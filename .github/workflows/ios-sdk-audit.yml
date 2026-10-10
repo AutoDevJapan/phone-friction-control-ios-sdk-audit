@@ -39,7 +39,7 @@ on:
         type: boolean
         default: false
       selection_inspection_mode:
-        description: Inspect selection layout, entries, value lifetime, or finite mutable Binding without requesting access
+        description: Inspect selection layout, entries, values, mutable Binding, or Picker/hosting metadata entries without requesting access
         type: choice
         default: none
         options:
@@ -48,6 +48,7 @@ on:
           - entries
           - values
           - mutable
+          - picker-entries
 permissions:
   contents: read
 jobs:
@@ -68,7 +69,7 @@ jobs:
           mkdir "$OUT"
           SELECTION_MODE='${{ inputs.selection_inspection_mode }}'
           case "$SELECTION_MODE" in
-            none|layout|entries|values|mutable) ;;
+            none|layout|entries|values|mutable|picker-entries) ;;
             *) echo 'Unknown selection inspection mode' >&2; exit 1 ;;
           esac
           if [ "$SELECTION_MODE" != none ]; then
@@ -263,6 +264,25 @@ jobs:
             # Verify the Darwin special dlsym handle against this SDK as well.
             grep -Eq '^#define[[:space:]]+RTLD_DEFAULT[[:space:]]+\(\(void[[:space:]]*\*\)[[:space:]]*-2\)' "$SDK/usr/include/dlfcn.h"
             SELECTION_ARGS=(--cfg selection_layout_probe)
+            if [ '${{ inputs.selection_inspection_mode }}' = picker-entries ]; then
+              export PICKER_METADATA_SYMBOL=$(jq -er '[.[] | select(.name == "FamilyActivityPicker" and .declKind == "Struct" and .genericSig == null and .usr == "s:14FamilyControls0A14ActivityPickerV") | .usr | sub("^s:"; "\u0024s") + "Ma"] | if length == 1 then .[0] else error("expected nongeneric Picker struct") end' "$OUT/FamilyControls-selected-declarations.json")
+              export PICKER_INIT_SYMBOL=$(jq -er '[.[] | select(.usr == "s:14FamilyControls0A14ActivityPickerV") | .members[] | select(.kind == "Constructor" and .printedName == "init(selection:)" and .moduleName == "FamilyControls" and .genericSig == null and .throwing != true and (.children | map(.printedName)) == ["FamilyControls.FamilyActivityPicker", "SwiftUI.Binding<FamilyControls.FamilyActivitySelection>"] and (.children | map(.usr)) == ["s:14FamilyControls0A14ActivityPickerV", "s:7SwiftUI7BindingV"] and .children[1].children[0].usr == "s:14FamilyControls0A17ActivitySelectionV" and .mangledName == "\u0024s14FamilyControls0A14ActivityPickerV9selectionAC7SwiftUI7BindingVyAA0aC9SelectionVG_tcfc") | .mangledName | sub("cfc$"; "cfC")] | if length == 1 then .[0] else error("expected exact Picker selection initializer") end' "$OUT/FamilyControls-selected-declarations.json")
+              export HOSTING_METADATA_SYMBOL=$(jq -er '[.[] | select(.name == "UIHostingController" and .declKind == "Class" and .genericSig == "<Content where Content : SwiftUI.View>" and .usr == "s:7SwiftUI19UIHostingControllerC") | .usr | sub("^s:"; "\u0024s") + "Ma"] | if length == 1 then .[0] else error("expected hosting class with one View constraint") end' "$OUT/SwiftUI-selected-declarations.json")
+              export HOSTING_INIT_SYMBOL=$(jq -er '[.[] | select(.usr == "s:7SwiftUI19UIHostingControllerC") | .members[] | select(.kind == "Constructor" and .printedName == "init(rootView:)" and .moduleName == "SwiftUI" and .genericSig == "<Content where Content : SwiftUI.View>" and .throwing != true and (.children | map(.printedName)) == ["SwiftUI.UIHostingController<Content>", "Content"] and .children[0].usr == "s:7SwiftUI19UIHostingControllerC" and .mangledName == "\u0024s7SwiftUI19UIHostingControllerC8rootViewACyxGx_tcfc") | .mangledName | sub("cfc$"; "cfC")] | if length == 1 then .[0] else error("expected exact hosting rootView allocating initializer") end' "$OUT/SwiftUI-selected-declarations.json")
+              export VIEW_PROTOCOL_SYMBOL=$(jq -er '[.[] | select(.name == "View" and .declKind == "Protocol" and .usr == "s:7SwiftUI4ViewP") | .usr | sub("^s:"; "\u0024s") | sub("P$"; "Mp")] | if length == 1 then .[0] else error("expected SwiftUI.View protocol descriptor") end' "$OUT/SwiftUI-selected-declarations.json")
+              grep -oE '\$s14FamilyControls0A14ActivityPickerV[[:alnum:]_]+' "$SDK/System/Library/Frameworks/FamilyControls.framework/FamilyControls.tbd" | sort -u > "$RUNNER_TEMP/picker-candidate-exports.txt"
+              grep -oE '\$s7SwiftUI(19UIHostingControllerC|4View)[[:alnum:]_]+' "$SDK/System/Library/Frameworks/SwiftUI.framework/SwiftUI.tbd" | sort -u > "$RUNNER_TEMP/hosting-candidate-exports.txt"
+              grep -oE '_swift_conformsToProtocol[[:alnum:]_]*' "$SDK/usr/lib/swift/libswiftCore.tbd" | sort -u > "$RUNNER_TEMP/conformance-candidate-exports.txt"
+              {
+                for SYMBOL in "$PICKER_METADATA_SYMBOL" "$PICKER_INIT_SYMBOL"; do grep -Fx "$SYMBOL" "$RUNNER_TEMP/picker-candidate-exports.txt"; done
+                for SYMBOL in "$HOSTING_METADATA_SYMBOL" "$HOSTING_INIT_SYMBOL" "$VIEW_PROTOCOL_SYMBOL"; do grep -Fx "$SYMBOL" "$RUNNER_TEMP/hosting-candidate-exports.txt"; done
+                grep -Fx '_swift_conformsToProtocol' "$RUNNER_TEMP/conformance-candidate-exports.txt"
+              } > "$OUT/picker-hosting-public-exports.txt"
+              test "$(wc -l < "$OUT/picker-hosting-public-exports.txt" | tr -d ' ')" = 6
+              xcrun swift-demangle --compact < "$OUT/picker-hosting-public-exports.txt" > "$OUT/picker-hosting-public-demangled.txt"
+              grep -n -A 12 -B 3 'dli_fname' "$SDK/usr/include/dlfcn.h" > "$OUT/picker-hosting-dladdr-declaration.txt"
+              SELECTION_ARGS+=(--cfg picker_entry_probe)
+            fi
             if [ '${{ inputs.selection_inspection_mode }}' = values ]; then
               SELECTION_ARGS+=(--cfg selection_value_probe)
             fi
@@ -285,7 +305,7 @@ jobs:
           # Bash preserves export attributes and array elements without eval.
           BUILD_ENV="$RUNNER_TEMP/ios-probe-build-env.sh"
           : > "$BUILD_ENV"
-          for PROBE_VAR in SDKROOT IPHONEOS_DEPLOYMENT_TARGET AUTH_SHARED_SYMBOL AUTH_METADATA_SYMBOL AUTH_ASYNC_SYMBOL AUTH_INDIVIDUAL_VALUE AUTH_STATUS_METADATA_SYMBOL AUTH_STATUS_GET_SYMBOL AUTH_STATUS_RAW_GET_SYMBOL UI_SYSTEM_BUTTON_TYPE UI_TOUCH_UP_INSIDE_EVENT SELECTION_METADATA_SYMBOL SELECTION_INIT_SYMBOL BINDING_METADATA_SYMBOL BINDING_INIT_SYMBOL BINDING_GET_SYMBOL BINDING_SET_SYMBOL SELECTION_CATEGORY_INIT_SYMBOL; do
+          for PROBE_VAR in SDKROOT IPHONEOS_DEPLOYMENT_TARGET AUTH_SHARED_SYMBOL AUTH_METADATA_SYMBOL AUTH_ASYNC_SYMBOL AUTH_INDIVIDUAL_VALUE AUTH_STATUS_METADATA_SYMBOL AUTH_STATUS_GET_SYMBOL AUTH_STATUS_RAW_GET_SYMBOL UI_SYSTEM_BUTTON_TYPE UI_TOUCH_UP_INSIDE_EVENT SELECTION_METADATA_SYMBOL SELECTION_INIT_SYMBOL BINDING_METADATA_SYMBOL BINDING_INIT_SYMBOL BINDING_GET_SYMBOL BINDING_SET_SYMBOL SELECTION_CATEGORY_INIT_SYMBOL PICKER_METADATA_SYMBOL PICKER_INIT_SYMBOL HOSTING_METADATA_SYMBOL HOSTING_INIT_SYMBOL VIEW_PROTOCOL_SYMBOL; do
             if declare -p "$PROBE_VAR" >/dev/null 2>&1; then declare -p "$PROBE_VAR" >> "$BUILD_ENV"; fi
           done
           declare -p REQUEST_ARGS SELECTION_ARGS >> "$BUILD_ENV"
@@ -396,6 +416,19 @@ jobs:
             rootObject = A00000000000000000000001;
           }
           PROJECT
+            if [ '${{ inputs.ui_consent_test }}' = true ]; then
+            mkdir -p "$XCODE_ROOT/Probe.xcodeproj/xcshareddata/xcschemes"
+            cat > "$XCODE_ROOT/Probe.xcodeproj/xcshareddata/xcschemes/Probe.xcscheme" <<'SCHEME'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <Scheme LastUpgradeVersion="1540" version="1.3">
+            <BuildAction parallelizeBuildables="NO" buildImplicitDependencies="YES"><BuildActionEntries>
+              <BuildActionEntry buildForTesting="YES" buildForRunning="YES" buildForProfiling="NO" buildForArchiving="NO" buildForAnalyzing="YES"><BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="A00000000000000000000002" BuildableName="authorization-center-probe.app" BlueprintName="authorization-center-probe" ReferencedContainer="container:Probe.xcodeproj"/></BuildActionEntry>
+              <BuildActionEntry buildForTesting="YES" buildForRunning="NO" buildForProfiling="NO" buildForArchiving="NO" buildForAnalyzing="YES"><BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="A00000000000000000000016" BuildableName="ProbeUITests.xctest" BlueprintName="ProbeUITests" ReferencedContainer="container:Probe.xcodeproj"/></BuildActionEntry>
+            </BuildActionEntries></BuildAction>
+            <TestAction buildConfiguration="Debug" selectedDebuggerIdentifier="Xcode.DebuggerFoundation.Debugger.LLDB" selectedLauncherIdentifier="Xcode.IDEFoundation.Launcher.LLDB" shouldUseLaunchSchemeArgsEnv="YES"><Testables><TestableReference skipped="NO"><BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="A00000000000000000000016" BuildableName="ProbeUITests.xctest" BlueprintName="ProbeUITests" ReferencedContainer="container:Probe.xcodeproj"/></TestableReference></Testables></TestAction>
+          </Scheme>
+          SCHEME
+            fi
             plutil -lint "$XCODE_ROOT/Probe.xcodeproj/project.pbxproj" "$XCODE_ROOT/Info.plist" "$XCODE_ROOT/Entitlements.plist"
             # No provisioning update, login, new certificate, or paid account.
             xcodebuild -project "$XCODE_ROOT/Probe.xcodeproj" -target authorization-center-probe -configuration Debug -sdk iphonesimulator SYMROOT="$OUT/xcode-products" OBJROOT="$RUNNER_TEMP/xcode-objects" > "$OUT/xcode-build.txt" 2>&1
@@ -429,19 +462,22 @@ jobs:
             LAUNCH_STATUS=0
             xcrun simctl launch --console "$SIM_ID" com.autodevjapan.phonecontrol1614abiprobe > "$OUT/singleton-runtime.txt" 2>&1 || LAUNCH_STATUS=$?
             grep -E '^(Selection (layout:|box:|entry bytes:|layout inspection complete;)|Binding (control transfer:|accessor inspection complete;))' "$OUT/singleton-runtime.txt" > "$OUT/selection-layout.txt" || true
+            if [ '${{ inputs.selection_inspection_mode }}' = picker-entries ]; then
+              grep -E '^Picker/hosting (layout:|conformance:|class:|entry bytes:|control transfer:)' "$OUT/singleton-runtime.txt" > "$OUT/picker-hosting-entries.txt" || true
+              grep '^Picker/hosting result: ' "$OUT/singleton-runtime.txt" | sed 's/^Picker\/hosting result: //' > "$OUT/picker-hosting-results.txt" || true
+              printf 'launch_status=%s\n' "$LAUNCH_STATUS" > "$OUT/picker-hosting-launch.txt"
+            fi
             if [ '${{ inputs.selection_inspection_mode }}' = values ]; then
-              # Preserve actual partial counts on failure; never synthesize
-              # successful value counts from the requested input.
               grep '^Selection value result: ' "$OUT/singleton-runtime.txt" | sed 's/^Selection value result: //' > "$OUT/selection-value-results.txt" || true
             fi
             if [ '${{ inputs.selection_inspection_mode }}' = mutable ]; then
-              # Extract actual partial comparisons/counters BEFORE exit checks.
               grep '^Mutable binding result: ' "$OUT/singleton-runtime.txt" | sed 's/^Mutable binding result: //' > "$OUT/mutable-binding-results.txt" || true
               grep '^Mutable binding entry guards: ' "$OUT/singleton-runtime.txt" > "$OUT/mutable-binding-entry-guards.txt" || true
               printf 'launch_status=%s\n' "$LAUNCH_STATUS" > "$OUT/mutable-binding-launch.txt"
               cat "$OUT/mutable-binding-launch.txt" "$OUT/mutable-binding-results.txt" >> "$GITHUB_STEP_SUMMARY"
             fi
             test "$LAUNCH_STATUS" = 0
+            if [ '${{ inputs.selection_inspection_mode }}' != picker-entries ]; then
             grep -F 'Selection box: buffer_aligned=true; project_matches=true; uninitialized_deallocated=true' "$OUT/selection-layout.txt"
             grep -F 'Selection layout inspection complete; phase=layout; selection_values_constructed=0; selection_values_read=0; initializer_calls=0; closure_calls=0; value_witness_calls=0; authorization_requests=0;' "$OUT/selection-layout.txt"
             test "$(grep -c '^Selection layout:' "$OUT/selection-layout.txt")" = 2
@@ -452,8 +488,6 @@ jobs:
               grep -F 'Binding accessor inspection complete; helper_calls=0; getter_calls=0; setter_calls=0; closure_calls=0; ownership_verified=false' "$OUT/selection-layout.txt"
               test "$(grep -c '^Selection entry bytes: Binding.wrappedValue getter;' "$OUT/selection-layout.txt")" = 1
               test "$(grep -c '^Selection entry bytes: Binding.wrappedValue setter;' "$OUT/selection-layout.txt")" = 1
-              # Validate the actual control transfers, not an assumed BL in
-              # every entry. The setter's first call is indirect in this SDK.
               grep -Fx 'Binding control transfer: Binding.set; source_offset=40; kind=indirect_call; target_read=false' "$OUT/selection-layout.txt"
               grep -F 'Binding control transfer: Binding.get; source_offset=0; kind=direct_branch;' "$OUT/selection-layout.txt" | grep -F 'same_image=true'
               test "$(grep -Fc 'Selection entry bytes: Binding.get.offset0 direct_branch target;' "$OUT/selection-layout.txt")" = 1
@@ -463,6 +497,7 @@ jobs:
               done
             fi
             printf 'phase=layout\nselection_layout_verified=true\nmetadata_complete=true\nmetadata_kind_struct=true\nbox_buffer_aligned=true\nbox_project_matches=true\nbox_uninitialized_deallocated=true\nentry_prefix_max_bytes=128\nentry_reads_page_bounded=true\nentry_registers_verified=false\nselection_values_constructed=0\nselection_values_read=0\ninitializer_calls=0\nclosure_calls=0\nvalue_witness_calls=0\ngrant_verified=false\nmonitoring_verified=false\nshielding_verified=false\n' > "$OUT/selection-layout-scope.txt"
+            fi
             if [ '${{ inputs.selection_inspection_mode }}' = values ]; then
               RESULTS="$OUT/selection-value-results.txt"
               for EXPECTED in phase=value_lifecycle lifecycle_verified=true allocations=3 deallocations=3 initializer_calls=1 initializer_wrapper_calls=1 initialize_with_copy_calls=2 assign_with_copy_calls=1 destroy_calls=3 value_witness_calls=6 selection_values_constructed=3 selection_values_read=6 returned_destination_checks=3 byte_comparisons=3 independent_allocations=true source_destroyed_before_copy=true; do
@@ -487,8 +522,6 @@ jobs:
               for FIELD in authorization_requests private_api_calls private_api_reads; do
                 test "$(grep -Fxc "$FIELD=0" "$RESULTS")" = 1
               done
-              # Getter calls during construction are allowed: check relations,
-              # not a hardcoded closure/getter count inferred from the mode.
               awk -F= '
                 /^[a-z_]+=[0-9]+$/ { if (seen[$1]++) exit 1; n[$1]=$2 }
                 END {
@@ -499,12 +532,25 @@ jobs:
               test "$(wc -l < "$RESULTS" | tr -d ' ')" = 37
               grep -Fx 'Mutable binding entry guards: category_first28=true; binding_register_prefixes=true; setter_outer_destroy=true; reconstructed_addresses_used=false' "$OUT/mutable-binding-entry-guards.txt"
             fi
-            grep -F 'SDK singleton class: FamilyControls.AuthorizationCenter' "$OUT/singleton-runtime.txt"
+            if [ '${{ inputs.selection_inspection_mode }}' = picker-entries ]; then
+              RESULTS="$OUT/picker-hosting-results.txt"
+              for EXPECTED in phase=picker_hosting_entry picker_metadata_calls=1 hosting_metadata_calls=1 conformance_calls=1 entry_prefix_max_bytes=128 entry_reads_page_bounded=true direct_helper_max_depth=1 metadata_inspection_verified=true; do test "$(grep -Fxc "$EXPECTED" "$RESULTS")" = 1; done
+              for FIELD in picker_constructor_calls hosting_constructor_calls picker_values_constructed hosting_instances_constructed value_witness_calls box_api_calls authorization_requests status_getter_calls private_api_calls private_api_reads; do test "$(grep -Fxc "$FIELD=0" "$RESULTS")" = 1; done
+              for FIELD in constructor_arguments_verified constructor_ownership_verified picker_ui_verified selection_contents_output reconstructed_addresses_used; do test "$(grep -Fxc "$FIELD=false" "$RESULTS")" = 1; done
+              test "$(wc -l < "$RESULTS" | tr -d ' ')" = 23
+              for KIND in layout conformance class; do test "$(grep -c "^Picker/hosting $KIND:" "$OUT/picker-hosting-entries.txt")" = 1; done
+              for LABEL in 'FamilyActivityPicker.init(selection:)' 'UIHostingController.init(rootView:) allocating'; do test "$(grep -Fc "Picker/hosting entry bytes: $LABEL;" "$OUT/picker-hosting-entries.txt")" = 1; done
+              if grep -Eq 'SDK singleton class:|Rust async task entry observed;|Authorization status ' "$OUT/singleton-runtime.txt"; then exit 1; fi
+            else
+              grep -F 'SDK singleton class: FamilyControls.AuthorizationCenter' "$OUT/singleton-runtime.txt"
+            fi
             grep -F 'Rust UIKit active callback observed' "$OUT/singleton-runtime.txt"
             if grep -Fq 'Public individual authorization request starting;' "$OUT/singleton-runtime.txt"; then exit 1; fi
-            printf 'authorization_requested=false\n' >> "$OUT/selection-layout-scope.txt"
-            # Layout/box, optional value lifecycle or finite mutation. Separate consent
-            # fixture checks the authorization continuation after a UI choice.
+            if [ '${{ inputs.selection_inspection_mode }}' = picker-entries ]; then
+              printf 'authorization_requested=false\n' >> "$OUT/picker-hosting-launch.txt"
+            else
+              printf 'authorization_requested=false\n' >> "$OUT/selection-layout-scope.txt"
+            fi
             exit 0
           fi
           if [ '${{ inputs.authorization_status_entry_probe }}' = true ]; then
@@ -528,17 +574,6 @@ jobs:
           fi
           if [ '${{ inputs.ui_consent_test }}' = true ]; then
 
-            mkdir -p "$XCODE_ROOT/Probe.xcodeproj/xcshareddata/xcschemes"
-            cat > "$XCODE_ROOT/Probe.xcodeproj/xcshareddata/xcschemes/Probe.xcscheme" <<'SCHEME'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <Scheme LastUpgradeVersion="1540" version="1.3">
-            <BuildAction parallelizeBuildables="NO" buildImplicitDependencies="YES"><BuildActionEntries>
-              <BuildActionEntry buildForTesting="YES" buildForRunning="YES" buildForProfiling="NO" buildForArchiving="NO" buildForAnalyzing="YES"><BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="A00000000000000000000002" BuildableName="authorization-center-probe.app" BlueprintName="authorization-center-probe" ReferencedContainer="container:Probe.xcodeproj"/></BuildActionEntry>
-              <BuildActionEntry buildForTesting="YES" buildForRunning="NO" buildForProfiling="NO" buildForArchiving="NO" buildForAnalyzing="YES"><BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="A00000000000000000000016" BuildableName="ProbeUITests.xctest" BlueprintName="ProbeUITests" ReferencedContainer="container:Probe.xcodeproj"/></BuildActionEntry>
-            </BuildActionEntries></BuildAction>
-            <TestAction buildConfiguration="Debug" selectedDebuggerIdentifier="Xcode.DebuggerFoundation.Debugger.LLDB" selectedLauncherIdentifier="Xcode.IDEFoundation.Launcher.LLDB" shouldUseLaunchSchemeArgsEnv="YES"><Testables><TestableReference skipped="NO"><BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="A00000000000000000000016" BuildableName="ProbeUITests.xctest" BlueprintName="ProbeUITests" ReferencedContainer="container:Probe.xcodeproj"/></TestableReference></Testables></TestAction>
-          </Scheme>
-          SCHEME
             xcodebuild -project "$XCODE_ROOT/Probe.xcodeproj" -scheme Probe -configuration Debug -sdk iphonesimulator -destination "id=$SIM_ID" -parallel-testing-enabled NO SYMROOT="$OUT/xcode-products" OBJROOT="$RUNNER_TEMP/xcode-objects" build-for-testing > "$OUT/xcode-ui-build.txt" 2>&1
             xcrun otool -L "$PROBE_APP/authorization-center-probe" > "$OUT/host-linked-libraries.txt"
             if grep -Fq 'XCTest.framework' "$OUT/host-linked-libraries.txt"; then
@@ -627,7 +662,7 @@ jobs:
           retention-days: 1
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
-        if: always() && inputs.selection_inspection_mode != 'none'
+        if: always() && inputs.selection_inspection_mode != 'none' && inputs.selection_inspection_mode != 'picker-entries'
         with:
           name: ios-selection-layout-audit
           path: |
@@ -668,5 +703,24 @@ jobs:
             ${{ runner.temp }}/ios-sdk-audit/selection-category-init-export.txt
             ${{ runner.temp }}/ios-sdk-audit/binding-accessor-exports.txt
             ${{ runner.temp }}/ios-sdk-audit/singleton-runtime.txt
+          retention-days: 1
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always() && inputs.selection_inspection_mode == 'picker-entries'
+        with:
+          name: ios-picker-hosting-entry-audit
+          path: |
+            ${{ runner.temp }}/ios-sdk-audit/singleton-runtime.txt
+            ${{ runner.temp }}/ios-sdk-audit/versions.txt
+            ${{ runner.temp }}/ios-sdk-audit/xcode-build.txt
+            ${{ runner.temp }}/ios-sdk-audit/rust-static-link.txt
+            ${{ runner.temp }}/ios-sdk-audit/picker-hosting-entries.txt
+            ${{ runner.temp }}/ios-sdk-audit/picker-hosting-results.txt
+            ${{ runner.temp }}/ios-sdk-audit/picker-hosting-launch.txt
+            ${{ runner.temp }}/ios-sdk-audit/picker-hosting-public-exports.txt
+            ${{ runner.temp }}/ios-sdk-audit/picker-hosting-public-demangled.txt
+            ${{ runner.temp }}/ios-sdk-audit/picker-hosting-dladdr-declaration.txt
+            ${{ runner.temp }}/ios-sdk-audit/FamilyControls-selected-declarations.json
+            ${{ runner.temp }}/ios-sdk-audit/SwiftUI-selected-declarations.json
           retention-days: 1
           if-no-files-found: error
