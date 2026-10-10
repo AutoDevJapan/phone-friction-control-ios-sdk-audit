@@ -6,6 +6,10 @@ on:
         description: Call the public individual authorization API once in the isolated Simulator
         type: boolean
         default: false
+      native_uikit_host:
+        description: Use the public UIKit application lifecycle with an empty inspection window
+        type: boolean
+        default: false
 permissions:
   contents: read
 jobs:
@@ -94,6 +98,10 @@ jobs:
             awk '/^public enum FamilyControlsError / { found=1 } found { print } found && /^}/ { exit }' "$INTERFACE" > "$OUT/family-controls-error-definition.txt"
             REQUEST_ARGS=(--cfg auth_request)
           fi
+          if [ '${{ inputs.native_uikit_host }}' = true ]; then
+            test '${{ inputs.authorization_probe }}' = true
+            REQUEST_ARGS+=(--cfg uikit_host)
+          fi
           PROBE_APP="$OUT/authorization-center-probe.app"
           mkdir "$PROBE_APP"
           rustc tools/ios-abi-probe.rs --crate-name ios_runtime_probe --edition 2024 --cfg runtime_probe "${REQUEST_ARGS[@]}" --target aarch64-apple-ios-sim --emit "llvm-ir=$OUT/ios_runtime_probe.ll,asm=$OUT/ios_runtime_probe.s,link" -L "native=$SDK/usr/lib/swift" -C link-arg=-Wl,-rpath,/usr/lib/swift -o "$PROBE_APP/authorization-center-probe"
@@ -121,14 +129,21 @@ jobs:
           xcrun simctl install "$SIM_ID" "$PROBE_APP"
           xcrun simctl launch --console "$SIM_ID" com.autodevjapan.phonecontrol1614abiprobe > "$OUT/singleton-runtime.txt" 2>&1
           grep -F 'SDK singleton class: FamilyControls.AuthorizationCenter' "$OUT/singleton-runtime.txt"
-          grep -F 'Rust async task entry observed; authorization_requested=false' "$OUT/singleton-runtime.txt"
+          UIKIT_ACTIVE=false
+          if [ '${{ inputs.native_uikit_host }}' = true ]; then
+            grep -F 'Rust UIKit launch callback observed; blank_window=true' "$OUT/singleton-runtime.txt"
+            grep -F 'Rust UIKit active callback observed' "$OUT/singleton-runtime.txt"
+            UIKIT_ACTIVE=true
+          else
+            grep -F 'Rust async task entry observed; authorization_requested=false' "$OUT/singleton-runtime.txt"
+          fi
           REQUESTED=false
           if [ '${{ inputs.authorization_probe }}' = true ]; then
             grep -F 'SDK async continuation caller frame validated' "$OUT/singleton-runtime.txt"
             grep -F 'Public individual authorization continuation observed; error_present=' "$OUT/singleton-runtime.txt"
             REQUESTED=true
           fi
-          printf 'simulator_process_executed=true\npublic_singleton_called=true\npublic_async_descriptor_read=true\nrust_async_task_entry_observed=true\nruntime_teardown_verified=false\nauthorization_requested=%s\nauthorization_status_verified=false\nmonitoring=false\nshielding=false\n' "$REQUESTED" > "$OUT/singleton-runtime-scope.txt"
+          printf 'simulator_process_executed=true\npublic_singleton_called=true\npublic_async_descriptor_read=true\nrust_async_task_entry_observed=true\nuikit_host_active=%s\nruntime_teardown_verified=false\nauthorization_requested=%s\nauthorization_status_verified=false\nmonitoring=false\nshielding=false\n' "$UIKIT_ACTIVE" "$REQUESTED" > "$OUT/singleton-runtime-scope.txt"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
