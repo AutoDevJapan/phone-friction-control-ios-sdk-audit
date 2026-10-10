@@ -125,6 +125,8 @@ compile_error!("Xcode static library host requires the UIKit authorization mode"
     not(all(runtime_probe, uikit_host, auth_request, xcode_host))
 ))]
 compile_error!("selection layout inspection requires the Xcode UIKit authorization host");
+#[cfg(all(binding_entry_probe, not(selection_layout_probe)))]
+compile_error!("binding entry inspection requires the selection layout mode");
 
 // Layout and entry-byte evidence only; no Selection or Binding value is built.
 #[cfg(selection_layout_probe)]
@@ -169,6 +171,16 @@ mod selection_layout {
     unsafe extern "C" {
         fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
         fn getpagesize() -> i32;
+        #[cfg(binding_entry_probe)]
+        fn dladdr(address: *const c_void, information: *mut DlInfo) -> i32;
+    }
+    #[cfg(binding_entry_probe)]
+    #[repr(C)]
+    struct DlInfo {
+        filename: *const c_char,
+        base: *const c_void,
+        symbol_name: *const c_char,
+        symbol_address: *const c_void,
     }
     struct UninitializedBox(*mut c_void);
     impl Drop for UninitializedBox {
@@ -221,6 +233,62 @@ mod selection_layout {
             print!("{byte:02x}");
         }
         println!();
+    }
+    #[cfg(binding_entry_probe)]
+    fn first_call_helper(label: &str, entry: *const c_void, page: usize) {
+        // Observe only the first direct BL in the public entry's bounded prefix.
+        // No helper is invoked. Stop when its image differs from the entry.
+        let count = 128.min(page_remaining(entry, page));
+        for offset in (0..count.saturating_sub(3)).step_by(4) {
+            let instruction = unsafe { read(entry.cast::<u8>().add(offset).cast::<u32>(), page) };
+            if instruction & 0xfc00_0000 != 0x9400_0000 {
+                continue;
+            }
+            let relative = ((instruction << 6) as i32 >> 6) as isize * 4;
+            let target_address = entry
+                .addr()
+                .checked_add(offset)
+                .and_then(|address| address.checked_add_signed(relative))
+                .expect("BL address overflow");
+            let displacement = (offset as isize)
+                .checked_add(relative)
+                .expect("BL displacement overflow");
+            let target = entry
+                .cast::<u8>()
+                .wrapping_offset(displacement)
+                .cast::<c_void>();
+            assert!(
+                target.addr() == target_address,
+                "BL address projection mismatch"
+            );
+            let empty = || DlInfo {
+                filename: std::ptr::null(),
+                base: std::ptr::null(),
+                symbol_name: std::ptr::null(),
+                symbol_address: std::ptr::null(),
+            };
+            let mut source_info = empty();
+            let mut target_info = empty();
+            assert!(
+                unsafe { dladdr(entry, &mut source_info) } != 0,
+                "public entry image missing"
+            );
+            if unsafe { dladdr(target, &mut target_info) } != 0
+                && !source_info.base.is_null()
+                && source_info.base == target_info.base
+            {
+                println!(
+                    "Binding first BL helper: {label}; source_offset={offset}; relative_bytes={relative}; same_image=true"
+                );
+                entry_bytes(&format!("{label}.firstBL helper"), target, page);
+            } else {
+                println!(
+                    "Binding first BL helper: {label}; source_offset={offset}; skipped_cross_image=true"
+                );
+            }
+            return;
+        }
+        println!("Binding first BL helper: {label}; present_in_prefix=false");
     }
 
     fn layout(label: &str, response: MetadataResponse, page: usize) -> usize {
@@ -321,6 +389,24 @@ mod selection_layout {
             resolve(env!("BINDING_INIT_SYMBOL")),
             page,
         );
+        #[cfg(binding_entry_probe)]
+        {
+            let constructor = resolve(env!("BINDING_INIT_SYMBOL"));
+            let getter = resolve(env!("BINDING_GET_SYMBOL"));
+            let setter = resolve(env!("BINDING_SET_SYMBOL"));
+            entry_bytes("Binding.wrappedValue getter", getter, page);
+            entry_bytes("Binding.wrappedValue setter", setter, page);
+            for (label, entry) in [
+                ("Binding.init", constructor),
+                ("Binding.get", getter),
+                ("Binding.set", setter),
+            ] {
+                first_call_helper(label, entry, page);
+            }
+            println!(
+                "Binding accessor inspection complete; helper_calls=0; getter_calls=0; setter_calls=0; closure_calls=0; ownership_verified=false"
+            );
+        }
         println!(
             "Selection layout inspection complete; selection_values_constructed=0; selection_values_read=0; initializer_calls=0; closure_calls=0; value_witness_calls=0; authorization_status_verified=false; monitoring=false; shielding=false"
         );

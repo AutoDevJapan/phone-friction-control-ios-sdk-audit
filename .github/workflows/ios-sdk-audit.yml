@@ -18,6 +18,10 @@ on:
         description: Inspect public Selection and Binding layout and bounded entry bytes without building values
         type: boolean
         default: false
+      binding_entry_probe:
+        description: Read public Binding accessor entries and their first same-image BL prefixes without invoking them
+        type: boolean
+        default: false
 permissions:
   contents: read
 jobs:
@@ -36,6 +40,7 @@ jobs:
           set -euo pipefail
           OUT="$RUNNER_TEMP/ios-sdk-audit"
           mkdir "$OUT"
+          if [ '${{ inputs.binding_entry_probe }}' = true ]; then test '${{ inputs.selection_layout_probe }}' = true; fi
           if [ '${{ inputs.selection_layout_probe }}' = true ]; then
             test '${{ inputs.native_uikit_host }}' = true
             test '${{ inputs.authorization_probe }}' = true
@@ -152,6 +157,14 @@ jobs:
             # Verify the Darwin special dlsym handle against this SDK as well.
             grep -Eq '^#define[[:space:]]+RTLD_DEFAULT[[:space:]]+\(\(void[[:space:]]*\*\)[[:space:]]*-2\)' "$SDK/usr/include/dlfcn.h"
             SELECTION_ARGS=(--cfg selection_layout_probe)
+            if [ '${{ inputs.binding_entry_probe }}' = true ]; then
+              BINDING_GET_SYMBOL=$(jq -er '[.[] | select(.usr == "s:7SwiftUI7BindingV") | .members[] | select(.kind == "Var" and .printedName == "wrappedValue") | .accessors[] | select(.accessorKind == "get" and .mangledName == "\u0024s7SwiftUI7BindingV12wrappedValuexvg") | .mangledName] | if length == 1 then .[0] else error("expected one public Binding getter") end' "$OUT/SwiftUI-selected-declarations.json")
+              BINDING_SET_SYMBOL=$(jq -er '[.[] | select(.usr == "s:7SwiftUI7BindingV") | .members[] | select(.kind == "Var" and .printedName == "wrappedValue") | .accessors[] | select(.accessorKind == "set" and .mangledName == "\u0024s7SwiftUI7BindingV12wrappedValuexvs") | .mangledName] | if length == 1 then .[0] else error("expected one public Binding setter") end' "$OUT/SwiftUI-selected-declarations.json")
+              export BINDING_GET_SYMBOL BINDING_SET_SYMBOL
+              { grep -Fx "$BINDING_GET_SYMBOL" "$RUNNER_TEMP/binding-candidate-exports.txt"; grep -Fx "$BINDING_SET_SYMBOL" "$RUNNER_TEMP/binding-candidate-exports.txt"; } > "$OUT/binding-accessor-exports.txt"
+              grep -n -A 12 -B 3 'dli_fname' "$SDK/usr/include/dlfcn.h" > "$OUT/dladdr-selected-declaration.txt"
+              SELECTION_ARGS+=(--cfg binding_entry_probe)
+            fi
           fi
           PROBE_APP="$OUT/authorization-center-probe.app"
           mkdir "$PROBE_APP"
@@ -250,12 +263,22 @@ jobs:
             # Preserve partial selection diagnostics even when the process fails.
             LAUNCH_STATUS=0
             xcrun simctl launch --console "$SIM_ID" com.autodevjapan.phonecontrol1614abiprobe > "$OUT/singleton-runtime.txt" 2>&1 || LAUNCH_STATUS=$?
-            grep -E '^Selection (layout:|box:|entry bytes:|layout inspection complete;)' "$OUT/singleton-runtime.txt" > "$OUT/selection-layout.txt" || true
+            grep -E '^(Selection (layout:|box:|entry bytes:|layout inspection complete;)|Binding (first BL helper:|accessor inspection complete;))' "$OUT/singleton-runtime.txt" > "$OUT/selection-layout.txt" || true
             test "$LAUNCH_STATUS" = 0
             grep -F 'Selection box: buffer_aligned=true; project_matches=true; uninitialized_deallocated=true' "$OUT/selection-layout.txt"
             grep -F 'Selection layout inspection complete; selection_values_constructed=0; selection_values_read=0; initializer_calls=0; closure_calls=0; value_witness_calls=0;' "$OUT/selection-layout.txt"
             test "$(grep -c '^Selection layout:' "$OUT/selection-layout.txt")" = 2
-            test "$(grep -c '^Selection entry bytes:' "$OUT/selection-layout.txt")" = 6
+            test "$(grep -Ec '^Selection entry bytes: (FamilyActivitySelection\.|Binding<FamilyActivitySelection>\.|Binding.init\(get:set:\) without Transaction;)' "$OUT/selection-layout.txt")" = 6
+            if [ '${{ inputs.binding_entry_probe }}' = true ]; then
+              grep -F 'Binding accessor inspection complete; helper_calls=0; getter_calls=0; setter_calls=0; closure_calls=0; ownership_verified=false' "$OUT/selection-layout.txt"
+              test "$(grep -c '^Selection entry bytes: Binding.wrappedValue getter;' "$OUT/selection-layout.txt")" = 1
+              test "$(grep -c '^Selection entry bytes: Binding.wrappedValue setter;' "$OUT/selection-layout.txt")" = 1
+              for LABEL in Binding.init Binding.get Binding.set; do
+                test "$(grep -Fc "Binding first BL helper: $LABEL;" "$OUT/selection-layout.txt")" = 1
+                grep -F "Binding first BL helper: $LABEL;" "$OUT/selection-layout.txt" | grep -F 'same_image=true'
+                test "$(grep -Fc "Selection entry bytes: $LABEL.firstBL helper;" "$OUT/selection-layout.txt")" = 1
+              done
+            fi
             printf 'selection_layout_verified=true\nmetadata_complete=true\nmetadata_kind_struct=true\nbox_buffer_aligned=true\nbox_project_matches=true\nbox_uninitialized_deallocated=true\nentry_prefix_max_bytes=128\nentry_reads_page_bounded=true\nentry_registers_verified=false\nselection_values_constructed=0\nselection_values_read=0\ninitializer_calls=0\nclosure_calls=0\nvalue_witness_calls=0\ngrant_verified=false\nmonitoring_verified=false\nshielding_verified=false\n' > "$OUT/selection-layout-scope.txt"
             grep -F 'SDK singleton class: FamilyControls.AuthorizationCenter' "$OUT/singleton-runtime.txt"
             grep -F 'Rust UIKit active callback observed' "$OUT/singleton-runtime.txt"
@@ -299,5 +322,14 @@ jobs:
             ${{ runner.temp }}/ios-sdk-audit/selection-layout-scope.txt
             ${{ runner.temp }}/ios-sdk-audit/selection-public-exports.txt
             ${{ runner.temp }}/ios-sdk-audit/selection-constructor-entries.txt
+          retention-days: 1
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always() && inputs.binding_entry_probe
+        with:
+          name: ios-binding-entry-audit
+          path: |
+            ${{ runner.temp }}/ios-sdk-audit/binding-accessor-exports.txt
+            ${{ runner.temp }}/ios-sdk-audit/dladdr-selected-declaration.txt
           retention-days: 1
           if-no-files-found: error
