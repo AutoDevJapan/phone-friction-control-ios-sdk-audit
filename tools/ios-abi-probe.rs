@@ -5,6 +5,14 @@
 #![cfg_attr(not(ui_test_bundle), feature(abi_swift))]
 #![cfg_attr(xcode_host, no_main)]
 
+#[cfg(all(authorization_status_entry_probe, not(runtime_probe)))]
+compile_error!("status entry inspection requires the isolated runtime probe");
+#[cfg(all(
+    authorization_status_entry_probe,
+    any(auth_request, uikit_host, xcode_host, ui_test_bundle)
+))]
+compile_error!("status entry inspection is a separate request-free process");
+
 #[cfg(all(
     ui_test_host,
     not(all(runtime_probe, uikit_host, auth_request, xcode_host))
@@ -111,9 +119,100 @@ fn main() {
     #[cfg(not(uikit_host))]
     {
         let object = inspect_singleton();
+        #[cfg(authorization_status_entry_probe)]
+        {
+            let _ = object;
+            authorization_status_entry::inspect();
+        }
+        #[cfg(not(authorization_status_entry_probe))]
         async_inspection::inspect();
         #[cfg(auth_request)]
         request_probe::run(object);
+    }
+}
+
+#[cfg(authorization_status_entry_probe)]
+mod authorization_status_entry {
+    use super::MetadataResponse;
+    use std::ffi::{CString, c_char, c_void};
+
+    #[link(name = "System")]
+    unsafe extern "C" {
+        fn dlsym(handle: *mut c_void, name: *const c_char) -> *mut c_void;
+        fn getpagesize() -> i32;
+    }
+    fn resolve(symbol: &str) -> *const c_void {
+        let name = CString::new(symbol).unwrap();
+        let entry = unsafe {
+            dlsym(
+                std::ptr::without_provenance_mut(usize::MAX - 1),
+                name.as_ptr(),
+            )
+        };
+        assert!(
+            !entry.is_null() && entry.addr() % 4 == 0,
+            "invalid public status entry"
+        );
+        entry
+    }
+    unsafe fn read<T: Copy>(pointer: *const T, page: usize) -> T {
+        assert!(
+            !pointer.is_null() && pointer.addr() % std::mem::align_of::<T>() == 0,
+            "invalid status ABI field"
+        );
+        assert!(
+            page - pointer.addr() % page >= std::mem::size_of::<T>(),
+            "status ABI field crosses page"
+        );
+        unsafe { pointer.read() }
+    }
+    pub(super) fn inspect() {
+        let page = unsafe { getpagesize() };
+        assert!(page > 0, "invalid page size");
+        let page = page as usize;
+        let accessor: unsafe extern "Swift" fn(usize) -> MetadataResponse =
+            unsafe { std::mem::transmute(resolve(env!("AUTH_STATUS_METADATA_SYMBOL"))) };
+        let response = unsafe { accessor(0) };
+        assert!(
+            response.state == 0 && !response.value.is_null(),
+            "incomplete status metadata"
+        );
+        assert!(
+            unsafe { read(response.value.cast::<usize>(), page) } == 0x201,
+            "expected enum metadata"
+        );
+        let witnesses =
+            unsafe { read(response.value.cast::<*const c_void>().wrapping_sub(1), page) };
+        assert!(!witnesses.is_null(), "missing status witnesses");
+        // Swift 5.10 required VWT: eight function pointers, size, stride,
+        // uint32 flags and extra inhabitant count. No witness is invoked here.
+        let words = witnesses.cast::<usize>();
+        let size = unsafe { read(words.wrapping_add(8), page) };
+        let stride = unsafe { read(words.wrapping_add(9), page) };
+        let flags = unsafe { read(words.wrapping_add(10).cast::<u32>(), page) };
+        let alignment = (flags as usize & 0xff) + 1;
+        assert!(
+            flags & 0x0040_0000 == 0 && alignment.is_power_of_two(),
+            "incomplete status layout"
+        );
+        assert!(
+            size > 0 && size <= 64 && stride >= size && stride % alignment == 0,
+            "invalid status value size"
+        );
+        println!(
+            "Authorization status layout: size={size}; stride={stride}; alignment={alignment}; metadata_complete=true; kind_enum=true"
+        );
+        let getter = resolve(env!("AUTH_STATUS_GET_SYMBOL"));
+        let length = 128.min(page - getter.addr() % page);
+        let bytes = unsafe { std::slice::from_raw_parts(getter.cast::<u8>(), length) };
+        print!("Authorization status getter entry: length={length}; hex=");
+        for byte in bytes {
+            print!("{byte:02x}");
+        }
+        println!();
+        println!(
+            "Authorization status entry inspection complete; status_getter_calls=0; enum_values_constructed=0; value_witness_calls=0; authorization_requests=0; grant_verified=false"
+        );
     }
 }
 
@@ -131,7 +230,7 @@ pub extern "C" fn main(_: i32, _: *mut *mut std::ffi::c_char) -> i32 {
 compile_error!("Xcode static library host requires the UIKit authorization mode");
 
 #[cfg(runtime_probe)]
-#[cfg_attr(uikit_host, allow(dead_code))]
+#[cfg_attr(any(uikit_host, authorization_status_entry_probe), allow(dead_code))]
 mod async_inspection {
     use std::ffi::c_void;
     use std::sync::atomic::{AtomicBool, Ordering};

@@ -2,6 +2,10 @@ name: Manual iOS SDK audit
 on:
   workflow_dispatch:
     inputs:
+      authorization_status_entry_probe:
+        description: Inspect public authorization status metadata and getter entry without requesting access or calling the getter
+        type: boolean
+        default: false
       authorization_probe:
         description: Call the public individual authorization API once in the isolated Simulator
         type: boolean
@@ -44,6 +48,13 @@ jobs:
           set -euo pipefail
           OUT="$RUNNER_TEMP/ios-sdk-audit"
           mkdir "$OUT"
+          if [ '${{ inputs.authorization_status_entry_probe }}' = true ]; then
+            test '${{ inputs.authorization_probe }}' = false
+            test '${{ inputs.native_uikit_host }}' = false
+            test '${{ inputs.xcode_signed_host }}' = false
+            test '${{ inputs.ui_consent_test }}' = false
+            test '${{ inputs.collect_xctest_headers }}' = false
+          fi
           xcodebuild -version > "$OUT/versions.txt"
           xcrun swiftc --version >> "$OUT/versions.txt"
           rustc --version --verbose >> "$OUT/versions.txt"
@@ -90,7 +101,7 @@ jobs:
             xcrun swift-api-digester -dump-sdk -module "$MODULE" -sdk "$SDK" -target "$TARGET" -o "$RUNNER_TEMP/$MODULE.json"
             jq '[.. | objects | select(.name? | IN("AuthorizationCenter", "shared", "requestAuthorization", "FamilyActivityPicker", "FamilyActivitySelection", "DeviceActivityCenter", "startMonitoring", "DeviceActivityEvent", "DeviceActivityMonitor", "ManagedSettingsStore", "ShieldSettings", "applications")) | {kind, name, printedName, usr, mangledName}]' "$RUNNER_TEMP/$MODULE.json" > "$OUT/$MODULE-symbols.json"
             test "$(jq length "$OUT/$MODULE-symbols.json")" -gt 0
-            jq '[.. | objects | select(.kind? == "TypeDecl" and (.name? | IN("AuthorizationCenter", "FamilyActivityPicker", "FamilyActivitySelection", "DeviceActivityCenter", "DeviceActivityMonitor", "DeviceActivityEvent", "ManagedSettingsStore", "ShieldSettings"))) | {name, usr, declKind, genericSig, members: [.children[]? | select(.name? | IN("shared", "requestAuthorization", "authorizationStatus", "init", "startMonitoring", "intervalDidStart", "intervalDidEnd", "eventDidReachThreshold", "shield", "applications"))]}]' "$RUNNER_TEMP/$MODULE.json" > "$OUT/$MODULE-selected-declarations.json"
+            jq '[.. | objects | select(.kind? == "TypeDecl" and (.name? | IN("AuthorizationCenter", "AuthorizationStatus", "FamilyActivityPicker", "FamilyActivitySelection", "DeviceActivityCenter", "DeviceActivityMonitor", "DeviceActivityEvent", "ManagedSettingsStore", "ShieldSettings"))) | {name, usr, declKind, genericSig, members: [.children[]? | select(.name? | IN("shared", "requestAuthorization", "authorizationStatus", "notDetermined", "denied", "approved", "init", "startMonitoring", "intervalDidStart", "intervalDidEnd", "eventDidReachThreshold", "shield", "applications"))]}]' "$RUNNER_TEMP/$MODULE.json" > "$OUT/$MODULE-selected-declarations.json"
             if [ "$MODULE" = FamilyControls ]; then
               grep -oE '\$s14FamilyControls19AuthorizationCenterC[[:alnum:]_]+' "$FRAMEWORK/$MODULE.tbd" | sort -u > "$OUT/authorization-center-exports.txt"
               test -s "$OUT/authorization-center-exports.txt"
@@ -139,6 +150,15 @@ jobs:
           export AUTH_ASYNC_SYMBOL="${AUTH_REQUEST_SYMBOL}TjTu"
           grep -Fx "$AUTH_ASYNC_SYMBOL" "$OUT/authorization-center-exports.txt"
           REQUEST_ARGS=()
+          if [ '${{ inputs.authorization_status_entry_probe }}' = true ]; then
+            export AUTH_STATUS_METADATA_SYMBOL=$(jq -er '[.[] | select(.name == "AuthorizationStatus" and .declKind == "Enum" and .genericSig == null and .usr == "s:14FamilyControls19AuthorizationStatusO") | .usr | sub("^s:"; "\u0024s") + "Ma"] | if length == 1 then .[0] else error("expected public status enum metadata") end' "$OUT/FamilyControls-selected-declarations.json")
+            export AUTH_STATUS_GET_SYMBOL=$(jq -er '[.[] | select(.name == "AuthorizationCenter") | .members[] | select(.name == "authorizationStatus" and .children[0].usr == "s:14FamilyControls19AuthorizationStatusO") | .accessors[] | select(.accessorKind == "get" and .mangledName == "\u0024s14FamilyControls19AuthorizationCenterC19authorizationStatusAA0cF0Ovg") | .mangledName + "Tj"] | if length == 1 then .[0] else error("expected public status getter") end' "$OUT/FamilyControls-selected-declarations.json")
+            grep -oE '\$s14FamilyControls19AuthorizationStatusO[[:alnum:]_]+' "$SDK/System/Library/Frameworks/FamilyControls.framework/FamilyControls.tbd" | sort -u > "$RUNNER_TEMP/status-candidate-exports.txt"
+            { grep -Fx "$AUTH_STATUS_METADATA_SYMBOL" "$RUNNER_TEMP/status-candidate-exports.txt"; grep -Fx "$AUTH_STATUS_GET_SYMBOL" "$OUT/authorization-center-exports.txt"; } > "$OUT/authorization-status-public-entries.txt"
+            test "$(wc -l < "$OUT/authorization-status-public-entries.txt" | tr -d ' ')" = 2
+            grep -Eq '^#define[[:space:]]+RTLD_DEFAULT[[:space:]]+\(\(void[[:space:]]*\*\)[[:space:]]*-2\)' "$SDK/usr/include/dlfcn.h"
+            REQUEST_ARGS=(--cfg authorization_status_entry_probe)
+          fi
           if [ '${{ inputs.authorization_probe }}' = true ]; then
             grep -F '_swift_stdlib_bridgeErrorToNSError' "$SDK/usr/lib/swift/libswiftCore.tbd"
             INTERFACE="$SDK/System/Library/Frameworks/FamilyControls.framework/Modules/FamilyControls.swiftmodule/arm64-apple-ios-simulator.swiftinterface"
@@ -283,6 +303,17 @@ jobs:
           xcrun simctl boot "$SIM_ID"
           xcrun simctl bootstatus "$SIM_ID" -b
           xcrun simctl install "$SIM_ID" "$PROBE_APP"
+          if [ '${{ inputs.authorization_status_entry_probe }}' = true ]; then
+            xcrun simctl launch --console "$SIM_ID" com.autodevjapan.phonecontrol1614abiprobe > "$OUT/singleton-runtime.txt" 2>&1
+            grep -F 'SDK singleton class: FamilyControls.AuthorizationCenter' "$OUT/singleton-runtime.txt"
+            grep -E '^Authorization status (layout:|getter entry:|entry inspection complete;)' "$OUT/singleton-runtime.txt" > "$OUT/authorization-status-entry.txt"
+            test "$(grep -c '^Authorization status layout:' "$OUT/authorization-status-entry.txt")" = 1
+            test "$(grep -c '^Authorization status getter entry:' "$OUT/authorization-status-entry.txt")" = 1
+            grep -Fx 'Authorization status entry inspection complete; status_getter_calls=0; enum_values_constructed=0; value_witness_calls=0; authorization_requests=0; grant_verified=false' "$OUT/authorization-status-entry.txt"
+            if grep -Eq 'Public individual authorization request starting;|Rust async task entry observed;' "$OUT/singleton-runtime.txt"; then exit 1; fi
+            printf 'status_metadata_verified=true\nstatus_getter_called=false\nauthorization_requested=false\nauthorization_status_verified=false\ngrant_verified=false\nmonitoring=false\nshielding=false\n' > "$OUT/authorization-status-entry-scope.txt"
+            exit 0
+          fi
           if [ '${{ inputs.ui_consent_test }}' = true ]; then
 
             mkdir -p "$XCODE_ROOT/Probe.xcodeproj/xcshareddata/xcschemes"
