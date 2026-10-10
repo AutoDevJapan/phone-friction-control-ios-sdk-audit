@@ -90,6 +90,8 @@ fn main() {
     let name = unsafe { std::ffi::CStr::from_ptr(name) }.to_str().unwrap();
     println!("SDK singleton class: {name}");
     async_inspection::inspect();
+    #[cfg(auth_request)]
+    request_probe::run(object);
     // Keep the singleton reference until this isolated process ends.
 }
 
@@ -108,9 +110,9 @@ mod async_inspection {
     }
 
     #[repr(C)]
-    struct TaskAndContext {
-        task: *mut c_void,
-        context: *mut c_void,
+    pub(super) struct TaskAndContext {
+        pub(super) task: *mut c_void,
+        pub(super) context: *mut c_void,
     }
 
     #[link(name = "FamilyControls", kind = "framework")]
@@ -121,7 +123,7 @@ mod async_inspection {
 
     #[link(name = "swift_Concurrency")]
     unsafe extern "Swift" {
-        fn swift_task_create_common(
+        pub(super) fn swift_task_create_common(
             flags: usize,
             options: *const c_void,
             result_type: *const c_void,
@@ -212,6 +214,232 @@ mod async_inspection {
         );
         println!("Rust async task entry observed; authorization_requested=false");
         // ENTERED proves entry only. It is not a runtime teardown assertion.
+        unsafe { CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.1, 0) };
+    }
+}
+
+// Prepared separately while the descriptor inspection runs. Merge into the
+// existing two-file audit only after the real SDK descriptor is confirmed.
+#[cfg(all(runtime_probe, auth_request))]
+mod request_probe {
+    use super::async_inspection::swift_task_create_common;
+    use std::ffi::c_void;
+    use std::sync::atomic::{AtomicU8, Ordering};
+    use std::sync::OnceLock;
+    use std::time::{Duration, Instant};
+
+    #[repr(C)]
+    struct Descriptor {
+        offset: i32,
+        size: u32,
+    }
+    #[repr(C)]
+    struct Executor {
+        identity: *const c_void,
+        implementation: usize,
+    }
+    #[repr(C)]
+    struct ExecutorOption {
+        flags: usize,
+        parent: *const c_void,
+        executor: Executor,
+    }
+    #[repr(C, align(16))]
+    struct Root {
+        parent: *mut c_void,
+        resume_parent: *const c_void,
+        child: *mut c_void,
+        entry: *const c_void,
+        object: *mut c_void,
+        member: isize,
+    }
+    #[repr(C, align(16))]
+    struct Header {
+        parent: *mut Root,
+        resume_parent: *const c_void,
+    }
+    struct Input {
+        entry: usize,
+        size: usize,
+        object: usize,
+        member: isize,
+    }
+    static INPUT: OnceLock<Input> = OnceLock::new();
+    // 0 pending, 1 returned normally, 2 returned an error. Neither outcome is
+    // represented as verified authorization status, monitoring, or shielding.
+    static RESULT: AtomicU8 = AtomicU8::new(0);
+
+    #[link(name = "FamilyControls", kind = "framework")]
+    unsafe extern "C" {
+        #[link_name = env!("AUTH_ASYNC_SYMBOL")]
+        static REQUEST: Descriptor;
+    }
+    #[link(name = "swift_Concurrency")]
+    unsafe extern "Swift" {
+        fn swift_task_alloc(size: usize) -> *mut c_void;
+        fn swift_task_dealloc(pointer: *mut c_void);
+        fn swift_task_getMainExecutor() -> Executor;
+        fn swift_task_cancel(task: *mut c_void);
+    }
+    #[link(name = "swiftCore")]
+    unsafe extern "Swift" {
+        fn swift_release(object: *mut c_void);
+    }
+    #[link(name = "swiftCore")]
+    unsafe extern "C" {
+        fn swift_errorRelease(error: *mut c_void);
+    }
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        static kCFRunLoopDefaultMode: *const c_void;
+        fn CFRunLoopRunInMode(mode: *const c_void, seconds: f64, return_after_source: u8) -> i32;
+    }
+    unsafe extern "C" {
+        fn rust_authorization_entry();
+        fn rust_authorization_resume();
+    }
+    struct TaskOwner(*mut c_void);
+    impl Drop for TaskOwner {
+        fn drop(&mut self) {
+            unsafe { swift_release(self.0) };
+        }
+    }
+
+    // Called synchronously within the active Swift task. All Rust input was
+    // initialized before task creation, so enqueue cannot race initialization.
+    #[unsafe(no_mangle)]
+    unsafe extern "C" fn rust_authorization_prepare(root: *mut Root) -> *mut c_void {
+        let input = INPUT.get().unwrap();
+        let child = unsafe { swift_task_alloc(input.size) };
+        assert!(!child.is_null());
+        unsafe {
+            child.cast::<Header>().write(Header {
+                parent: root,
+                resume_parent: rust_authorization_resume as *const c_void,
+            });
+            (*root).child = child;
+            (*root).entry = input.entry as *const c_void;
+            (*root).object = input.object as *mut c_void;
+            (*root).member = input.member;
+        }
+        child
+    }
+
+    #[unsafe(no_mangle)]
+    unsafe extern "C" fn rust_authorization_finish(root: *mut Root, error: *mut c_void) {
+        let child = unsafe { (*root).child };
+        // The callee has returned to its parent; its task allocation is now the
+        // last allocation. Release it before completing the caller task.
+        unsafe { swift_task_dealloc(child) };
+        let result = if error.is_null() {
+            1
+        } else {
+            unsafe { swift_errorRelease(error) };
+            2
+        };
+        RESULT.store(result, Ordering::Release);
+    }
+
+    // Swift 5.10 async convention on arm64: x22 context, x20 swiftself.
+    // FamilyControlsMember is the SDK's @objc Swift.Int enum, passed in x0
+    // with the C-compatible layout of GenEnum.cpp in Swift 5.10.
+    // A Void throwing continuation receives its error in x20.
+    core::arch::global_asm!(
+        ".text",
+        ".p2align 2",
+        ".globl _rust_authorization_entry",
+        "_rust_authorization_entry:",
+        "stp x29, x30, [sp, #-16]!",
+        "mov x29, sp",
+        "mov x0, x22",
+        "bl _rust_authorization_prepare",
+        "mov x17, x0",
+        "ldr x16, [x22, #24]",
+        "ldr x20, [x22, #32]",
+        "ldr x0, [x22, #40]",
+        "mov x22, x17",
+        "ldp x29, x30, [sp], #16",
+        "br x16",
+        ".p2align 2",
+        ".globl _rust_authorization_resume",
+        "_rust_authorization_resume:",
+        "stp x29, x30, [sp, #-16]!",
+        "mov x29, sp",
+        "mov x0, x22",
+        "mov x1, x20",
+        "bl _rust_authorization_finish",
+        "ldr x16, [x22, #8]",
+        "mov x20, #0",
+        "ldp x29, x30, [sp], #16",
+        "br x16",
+    );
+
+    pub fn run(object: *mut c_void) {
+        let descriptor = &raw const REQUEST;
+        let descriptor_value = unsafe { &*descriptor };
+        assert!(descriptor_value.size >= 16 && descriptor_value.size <= 1_048_576);
+        assert_ne!(descriptor_value.offset, 0);
+        let entry = descriptor
+            .cast::<u8>()
+            .wrapping_offset(descriptor_value.offset as isize);
+        assert_eq!(entry.addr() % 4, 0);
+        let member: isize = env!("AUTH_INDIVIDUAL_VALUE").parse().unwrap();
+        let input = Input {
+            entry: entry.addr(),
+            size: descriptor_value.size as usize,
+            object: object.addr(),
+            member,
+        };
+        assert!(INPUT.set(input).is_ok());
+        assert_eq!(std::mem::size_of::<Header>(), 16);
+        assert_eq!(std::mem::offset_of!(Root, child), 16);
+        assert_eq!(std::mem::offset_of!(Root, entry), 24);
+        assert_eq!(std::mem::offset_of!(Root, object), 32);
+        assert_eq!(std::mem::offset_of!(Root, member), 40);
+        let executor = unsafe { swift_task_getMainExecutor() };
+        assert!(!executor.identity.is_null());
+        // TaskOptionRecordKind::Executor = 0. The runtime reads the record
+        // synchronously and copies ExecutorRef before enqueueing (Task.cpp).
+        let option = ExecutorOption {
+            flags: 0,
+            parent: std::ptr::null(),
+            executor,
+        };
+        println!("Public individual authorization request starting; member={member}");
+        let task = unsafe {
+            swift_task_create_common(
+                1 << 12,
+                (&raw const option).cast(),
+                std::ptr::null(),
+                rust_authorization_entry as *const c_void,
+                std::ptr::null(),
+                std::mem::size_of::<Root>(),
+            )
+        };
+        assert!(!task.task.is_null() && !task.context.is_null());
+        // Keep the create caller's reference until the bounded wait ends, so
+        // cancellation on timeout never uses an already-deallocated task.
+        let _owner = TaskOwner(task.task);
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while RESULT.load(Ordering::Acquire) == 0 && Instant::now() < deadline {
+            unsafe { CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.1, 1) };
+        }
+        let result = RESULT.load(Ordering::Acquire);
+        if result == 0 {
+            unsafe { swift_task_cancel(task.task) };
+            let cancel_deadline = Instant::now() + Duration::from_secs(5);
+            while RESULT.load(Ordering::Acquire) == 0 && Instant::now() < cancel_deadline {
+                unsafe { CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.1, 1) };
+            }
+            // A cancellation response is not an accepted authorization flow.
+            panic!("public authorization continuation timed out; cancellation requested; process will exit");
+        }
+        assert_ne!(result, 0, "public authorization continuation timed out");
+        println!(
+            "Public individual authorization continuation observed; error_present={}",
+            result == 2
+        );
+        println!("authorization_status_verified=false; monitoring=false; shielding=false");
         unsafe { CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.1, 0) };
     }
 }

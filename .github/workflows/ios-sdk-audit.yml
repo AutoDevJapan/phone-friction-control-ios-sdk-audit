@@ -1,6 +1,11 @@
 name: Manual iOS SDK audit
 on:
   workflow_dispatch:
+    inputs:
+      authorization_probe:
+        description: Call the public individual authorization API once in the isolated Simulator
+        type: boolean
+        default: false
 permissions:
   contents: read
 jobs:
@@ -74,9 +79,22 @@ jobs:
           AUTH_REQUEST_SYMBOL=$(jq -er '[.[] | select(.name == "AuthorizationCenter") | .members[] | select(.name == "requestAuthorization" and .printedName == "requestAuthorization(for:)" and .throwing == true) | .mangledName] | if length == 1 then .[0] else error("expected one public individual async request") end' "$OUT/FamilyControls-selected-declarations.json")
           export AUTH_ASYNC_SYMBOL="${AUTH_REQUEST_SYMBOL}TjTu"
           grep -Fx "$AUTH_ASYNC_SYMBOL" "$OUT/authorization-center-exports.txt"
+          REQUEST_ARGS=()
+          if [ '${{ inputs.authorization_probe }}' = true ]; then
+            INTERFACE="$SDK/System/Library/Frameworks/FamilyControls.framework/Modules/FamilyControls.swiftmodule/arm64-apple-ios-simulator.swiftinterface"
+            awk '/^@objc public enum FamilyControlsMember : Swift.Int,/ { found=1 } found { print } found && /^}/ { exit }' "$INTERFACE" > "$OUT/member-raw-value-definition.txt"
+            grep -F '@objc public enum FamilyControlsMember : Swift.Int,' "$OUT/member-raw-value-definition.txt"
+            test "$(grep -c '^  case ' "$OUT/member-raw-value-definition.txt")" -eq 2
+            # Swift 5.10 ASTPrinter.cpp prints explicit @objc enum raw values.
+            # Require exactly these two implicit cases in this order. Swift.Int
+            # implicit raw values start at zero and increase by one (Swift book).
+            test "$(grep '^  case ' "$OUT/member-raw-value-definition.txt")" = "$(printf '  case child\n  case individual')"
+            export AUTH_INDIVIDUAL_VALUE=1
+            REQUEST_ARGS=(--cfg auth_request)
+          fi
           PROBE_APP="$OUT/authorization-center-probe.app"
           mkdir "$PROBE_APP"
-          rustc tools/ios-abi-probe.rs --crate-name ios_runtime_probe --edition 2024 --cfg runtime_probe --target aarch64-apple-ios-sim --emit "llvm-ir=$OUT/ios_runtime_probe.ll,asm=$OUT/ios_runtime_probe.s,link" -L "native=$SDK/usr/lib/swift" -C link-arg=-Wl,-rpath,/usr/lib/swift -o "$PROBE_APP/authorization-center-probe"
+          rustc tools/ios-abi-probe.rs --crate-name ios_runtime_probe --edition 2024 --cfg runtime_probe "${REQUEST_ARGS[@]}" --target aarch64-apple-ios-sim --emit "llvm-ir=$OUT/ios_runtime_probe.ll,asm=$OUT/ios_runtime_probe.s,link" -L "native=$SDK/usr/lib/swift" -C link-arg=-Wl,-rpath,/usr/lib/swift -o "$PROBE_APP/authorization-center-probe"
           cat > "$PROBE_APP/Info.plist" <<'PLIST'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -102,7 +120,12 @@ jobs:
           xcrun simctl launch --console "$SIM_ID" com.autodevjapan.phonecontrol1614abiprobe > "$OUT/singleton-runtime.txt" 2>&1
           grep -F 'SDK singleton class: FamilyControls.AuthorizationCenter' "$OUT/singleton-runtime.txt"
           grep -F 'Rust async task entry observed; authorization_requested=false' "$OUT/singleton-runtime.txt"
-          printf 'simulator_process_executed=true\npublic_singleton_called=true\npublic_async_descriptor_read=true\nrust_async_task_entry_observed=true\nruntime_teardown_verified=false\nauthorization_requested=false\nmonitoring=false\nshielding=false\n' > "$OUT/singleton-runtime-scope.txt"
+          REQUESTED=false
+          if [ '${{ inputs.authorization_probe }}' = true ]; then
+            grep -F 'Public individual authorization continuation observed; error_present=' "$OUT/singleton-runtime.txt"
+            REQUESTED=true
+          fi
+          printf 'simulator_process_executed=true\npublic_singleton_called=true\npublic_async_descriptor_read=true\nrust_async_task_entry_observed=true\nruntime_teardown_verified=false\nauthorization_requested=%s\nauthorization_status_verified=false\nmonitoring=false\nshielding=false\n' "$REQUESTED" > "$OUT/singleton-runtime-scope.txt"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
