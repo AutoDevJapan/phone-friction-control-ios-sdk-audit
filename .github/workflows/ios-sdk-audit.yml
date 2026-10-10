@@ -126,15 +126,19 @@ jobs:
             # Require the exact public type and constructor signatures, not a
             # substring match that could accept an overload or private symbol.
             SELECTION_METADATA_SYMBOL=$(jq -er '[.[] | select(.name == "FamilyActivitySelection" and .declKind == "Struct" and .genericSig == null and .usr == "s:14FamilyControls0A17ActivitySelectionV") | .usr | sub("^s:"; "\u0024s") + "Ma"] | if length == 1 then .[0] else error("expected one Selection metadata accessor") end' "$OUT/FamilyControls-selected-declarations.json")
-            SELECTION_INIT_SYMBOL=$(jq -er '[.[] | select(.name == "FamilyActivitySelection") | .members[] | select(.kind == "Constructor" and .printedName == "init()" and .moduleName == "FamilyControls" and .throwing != true and (.children | length) == 1 and .children[0].usr == "s:14FamilyControls0A17ActivitySelectionV" and .mangledName == "\u0024s14FamilyControls0A17ActivitySelectionVACycfc") | .mangledName] | if length == 1 then .[0] else error("expected one public Selection init()") end' "$OUT/FamilyControls-selected-declarations.json")
+            SELECTION_INIT_SYMBOL=$(jq -er '[.[] | select(.name == "FamilyActivitySelection") | .members[] | select(.kind == "Constructor" and .printedName == "init()" and .moduleName == "FamilyControls" and .throwing != true and (.children | length) == 1 and .children[0].usr == "s:14FamilyControls0A17ActivitySelectionV" and .mangledName == "\u0024s14FamilyControls0A17ActivitySelectionVACycfc") | .mangledName | sub("cfc$"; "cfC")] | if length == 1 then .[0] else error("expected one public Selection init()") end' "$OUT/FamilyControls-selected-declarations.json")
             BINDING_METADATA_SYMBOL=$(jq -er '[.[] | select(.name == "Binding" and .declKind == "Struct" and .genericSig == "<Value>" and .usr == "s:7SwiftUI7BindingV") | .usr | sub("^s:"; "\u0024s") + "Ma"] | if length == 1 then .[0] else error("expected one Binding metadata accessor") end' "$OUT/SwiftUI-selected-declarations.json")
-            BINDING_INIT_SYMBOL=$(jq -er '[.[] | select(.name == "Binding") | .members[] | select(.kind == "Constructor" and .printedName == "init(get:set:)" and .moduleName == "SwiftUI" and .genericSig == "<Value>" and .throwing != true and (.children | map(.printedName)) == ["SwiftUI.Binding<Value>", "() -> Value", "(Value) -> Swift.Void"] and .mangledName == "\u0024s7SwiftUI7BindingV3get3setACyxGxyc_yxctcfc") | .mangledName] | if length == 1 then .[0] else error("expected one public Binding init without Transaction") end' "$OUT/SwiftUI-selected-declarations.json")
+            BINDING_INIT_SYMBOL=$(jq -er '[.[] | select(.name == "Binding") | .members[] | select(.kind == "Constructor" and .printedName == "init(get:set:)" and .moduleName == "SwiftUI" and .genericSig == "<Value>" and .throwing != true and (.children | map(.printedName)) == ["SwiftUI.Binding<Value>", "() -> Value", "(Value) -> Swift.Void"] and .mangledName == "\u0024s7SwiftUI7BindingV3get3setACyxGxyc_yxctcfc") | .mangledName | sub("cfc$"; "cfC")] | if length == 1 then .[0] else error("expected one public Binding init without Transaction") end' "$OUT/SwiftUI-selected-declarations.json")
             export SELECTION_METADATA_SYMBOL SELECTION_INIT_SYMBOL BINDING_METADATA_SYMBOL BINDING_INIT_SYMBOL
+            # The digester identifies initializing constructors (fc). The ABI's
+            # allocating constructor entry (fC) is exported for these structs.
+            # Require that exact public entry; do not invoke either initializer.
             # Candidate exports stay in scratch. Publish only the seven exact
             # entries needed here; never publish complete tbd/SDK dumps.
             grep -oE '\$s14FamilyControls0A17ActivitySelectionV[[:alnum:]_]+' "$SDK/System/Library/Frameworks/FamilyControls.framework/FamilyControls.tbd" | sort -u > "$RUNNER_TEMP/selection-candidate-exports.txt"
             grep -oE '\$s7SwiftUI7BindingV[[:alnum:]_]+' "$SDK/System/Library/Frameworks/SwiftUI.framework/SwiftUI.tbd" | sort -u > "$RUNNER_TEMP/binding-candidate-exports.txt"
             grep -oE '_swift_(allocBox|projectBox|deallocBox)[[:alnum:]_]*' "$SDK/usr/lib/swift/libswiftCore.tbd" | sort -u > "$RUNNER_TEMP/box-candidate-exports.txt"
+            grep -E '(VMa|VACycf[Cc]|V3get3setACyxGxyc_yxctcf[Cc])$' "$RUNNER_TEMP/selection-candidate-exports.txt" "$RUNNER_TEMP/binding-candidate-exports.txt" > "$OUT/selection-constructor-entries.txt" || true
             {
               grep -Fx "$SELECTION_METADATA_SYMBOL" "$RUNNER_TEMP/selection-candidate-exports.txt"
               grep -Fx "$SELECTION_INIT_SYMBOL" "$RUNNER_TEMP/selection-candidate-exports.txt"
@@ -294,5 +298,6 @@ jobs:
             ${{ runner.temp }}/ios-sdk-audit/selection-layout.txt
             ${{ runner.temp }}/ios-sdk-audit/selection-layout-scope.txt
             ${{ runner.temp }}/ios-sdk-audit/selection-public-exports.txt
+            ${{ runner.temp }}/ios-sdk-audit/selection-constructor-entries.txt
           retention-days: 1
           if-no-files-found: error
