@@ -176,7 +176,7 @@ jobs:
             grep 'U _abi_probe_external' "$OUT/$TARGET/symbols.txt"
           done
           printf 'compiler_codegen=true\nsdk_declarations_collected=true\ncodegen_framework_linked=false\ncodegen_os_executed=false\nauthorization=false\nmonitoring=false\nshielding=false\n' > "$OUT/scope.txt"
-      - name: Inspect the public SDK singleton from a Rust Simulator process
+      - name: Prepare the public SDK runtime inputs
         if: ${{ !inputs.collect_xctest_headers || inputs.ui_consent_test }}
         shell: bash
         run: |
@@ -274,6 +274,22 @@ jobs:
               SELECTION_ARGS+=(--cfg binding_entry_probe)
             fi
           fi
+          # Only SDK symbols and inspection options cross this step boundary.
+          # Bash preserves export attributes and array elements without eval.
+          BUILD_ENV="$RUNNER_TEMP/ios-probe-build-env.sh"
+          : > "$BUILD_ENV"
+          for PROBE_VAR in SDKROOT IPHONEOS_DEPLOYMENT_TARGET AUTH_SHARED_SYMBOL AUTH_METADATA_SYMBOL AUTH_ASYNC_SYMBOL AUTH_INDIVIDUAL_VALUE AUTH_STATUS_METADATA_SYMBOL AUTH_STATUS_GET_SYMBOL AUTH_STATUS_RAW_GET_SYMBOL UI_SYSTEM_BUTTON_TYPE UI_TOUCH_UP_INSIDE_EVENT SELECTION_METADATA_SYMBOL SELECTION_INIT_SYMBOL BINDING_METADATA_SYMBOL BINDING_INIT_SYMBOL BINDING_GET_SYMBOL BINDING_SET_SYMBOL; do
+            if declare -p "$PROBE_VAR" >/dev/null 2>&1; then declare -p "$PROBE_VAR" >> "$BUILD_ENV"; fi
+          done
+          declare -p REQUEST_ARGS SELECTION_ARGS >> "$BUILD_ENV"
+      - name: Build and sign the Rust Simulator probe
+        if: ${{ !inputs.collect_xctest_headers || inputs.ui_consent_test }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="$RUNNER_TEMP/ios-sdk-audit"
+          SDK=$(xcrun --sdk iphonesimulator --show-sdk-path)
+          source "$RUNNER_TEMP/ios-probe-build-env.sh"
           PROBE_APP="$OUT/authorization-center-probe.app"
           mkdir "$PROBE_APP"
           if [ '${{ inputs.xcode_signed_host }}' != true ]; then
