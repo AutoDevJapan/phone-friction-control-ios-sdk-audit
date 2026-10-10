@@ -69,7 +69,8 @@ jobs:
               UIKIT_HEADERS="$SDK/System/Library/Frameworks/UIKit.framework/Headers"
               grep -n -A 5 -B 3 -E 'UIButtonTypeSystem|buttonWithType:|setTitle:.*forState:' "$UIKIT_HEADERS/UIButton.h" > "$OUT/uikit-test-button-declarations.txt"
               grep -n -A 5 -B 3 -E 'UIControlEventTouchUpInside|UIControlStateNormal|addTarget:' "$UIKIT_HEADERS/UIControl.h" >> "$OUT/uikit-test-button-declarations.txt"
-              grep -Eq 'UIButtonTypeSystem[[:space:]]*=[[:space:]]*1([[:space:]]|,)' "$UIKIT_HEADERS/UIButton.h"
+              # This SDK declares Custom=0 followed immediately by implicit System=1.
+              awk '/^typedef NS_ENUM\(NSInteger, UIButtonType\) \{/ { getline; sub(/[[:space:]]*\/\/.*/, ""); if ($0 !~ /^[[:space:]]*UIButtonTypeCustom[[:space:]]*=[[:space:]]*0,[[:space:]]*$/) { bad=1; exit } getline; sub(/[[:space:]]*\/\/.*/, ""); if ($0 !~ /^[[:space:]]*UIButtonTypeSystem[[:space:]]+API_AVAILABLE\(ios\(7\.0\)\),[[:space:]]*$/) { bad=1; exit } found++ } END { exit (bad || found != 1) }' "$UIKIT_HEADERS/UIButton.h"
               grep -Eq 'UIControlEventTouchUpInside[[:space:]]*=[[:space:]]*1[[:space:]]*<<[[:space:]]*6([[:space:]]|,)' "$UIKIT_HEADERS/UIControl.h"
               grep -Eq 'UIControlStateNormal[[:space:]]*=[[:space:]]*0([[:space:]]|,)' "$UIKIT_HEADERS/UIControl.h"
             fi
