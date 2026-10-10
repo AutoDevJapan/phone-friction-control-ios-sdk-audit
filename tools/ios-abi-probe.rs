@@ -607,6 +607,7 @@ mod ui_authorization_test {
         ) -> bool;
         fn sel_registerName(name: *const c_char) -> Sel;
         fn objc_msgSend();
+        fn objc_retain(object: Id) -> Id;
         fn objc_release(object: Id);
     }
 
@@ -640,6 +641,14 @@ mod ui_authorization_test {
                 unsafe { objc_release(self.0) };
             }
         }
+    }
+    // Query/element getters return +0 objects. Keep a +1 reference while their
+    // public wait/tap methods service the test runner's event loop.
+    unsafe fn retained_object(receiver: Id, selector: &std::ffi::CStr) -> Owned {
+        Owned(unsafe { objc_retain(object(receiver, selector)) })
+    }
+    unsafe fn retained_object_arg(receiver: Id, selector: &std::ffi::CStr, argument: Id) -> Owned {
+        Owned(unsafe { objc_retain(object_arg(receiver, selector, argument)) })
     }
 
     unsafe fn string(text: &std::ffi::CStr) -> Owned {
@@ -702,8 +711,19 @@ mod ui_authorization_test {
                 return;
             }
             action(app.0, c"launch");
-            let alert = object(object(app.0, c"alerts"), c"firstMatch");
-            if !wait_for(alert, 30.0) {
+            let request_label = string(c"Request Screen Time access");
+            let request_buttons = retained_object(app.0, c"buttons");
+            let request_query =
+                retained_object_arg(request_buttons.0, c"matchingIdentifier:", request_label.0);
+            let request_button = retained_object(request_query.0, c"firstMatch");
+            if !wait_for(request_button.0, 15.0) {
+                fail(test, c"Test host request button not observed");
+                return;
+            }
+            action(request_button.0, c"tap");
+            let alerts = retained_object(app.0, c"alerts");
+            let alert = retained_object(alerts.0, c"firstMatch");
+            if !wait_for(alert.0, 30.0) {
                 fail(test, c"Screen Time consent alert not observed");
                 return;
             }
@@ -712,22 +732,17 @@ mod ui_authorization_test {
             } else {
                 c"Don’t Allow"
             });
-            let mut button = object(
-                object_arg(object(alert, c"buttons"), c"matchingIdentifier:", label.0),
-                c"firstMatch",
-            );
-            if !cfg!(ui_test_continue) && !wait_for(button, 0.1) {
+            let alert_buttons = retained_object(alert.0, c"buttons");
+            let button_query =
+                retained_object_arg(alert_buttons.0, c"matchingIdentifier:", label.0);
+            let mut button = retained_object(button_query.0, c"firstMatch");
+            if !cfg!(ui_test_continue) && !wait_for(button.0, 0.1) {
                 let ascii_label = string(c"Don't Allow");
-                button = object(
-                    object_arg(
-                        object(alert, c"buttons"),
-                        c"matchingIdentifier:",
-                        ascii_label.0,
-                    ),
-                    c"firstMatch",
-                );
+                let ascii_query =
+                    retained_object_arg(alert_buttons.0, c"matchingIdentifier:", ascii_label.0);
+                button = retained_object(ascii_query.0, c"firstMatch");
             }
-            if !wait_for(button, 5.0) {
+            if !wait_for(button.0, 5.0) {
                 fail(test, c"Expected OS consent button not observed");
                 return;
             }
@@ -735,13 +750,23 @@ mod ui_authorization_test {
                 "XCTest ordinary Screen Time consent button observed; continue={}",
                 cfg!(ui_test_continue)
             );
-            action(button, c"tap");
+            action(button.0, c"tap");
             println!(
                 "XCTest ordinary Screen Time consent button tap returned; authorization_status_verified=false"
             );
-            // A returned tap is not an authorization result. The host's public
-            // API continuation and status remain separate acceptance checks.
-            std::thread::sleep(std::time::Duration::from_secs(8));
+            // This marker is set only after the host's public continuation and
+            // its result file have been observed. A tap alone is insufficient.
+            let result_label = string(c"Authorization result received");
+            let result_buttons = retained_object(app.0, c"buttons");
+            let result_query =
+                retained_object_arg(result_buttons.0, c"matchingIdentifier:", result_label.0);
+            let result_button = retained_object(result_query.0, c"firstMatch");
+            if !wait_for(result_button.0, 30.0) {
+                fail(test, c"Public authorization continuation not observed");
+                return;
+            }
+            println!("XCTest host public continuation marker observed");
+            action(app.0, c"terminate");
         }
     }
 
@@ -792,6 +817,10 @@ mod native_host {
     static ACTIVE: AtomicBool = AtomicBool::new(false);
     static WINDOW: AtomicUsize = AtomicUsize::new(0);
     static DELEGATE: AtomicUsize = AtomicUsize::new(0);
+    #[cfg(ui_test_host)]
+    static REQUESTED: AtomicBool = AtomicBool::new(false);
+    #[cfg(ui_test_host)]
+    static REQUEST_BUTTON: AtomicUsize = AtomicUsize::new(0);
     #[link(name = "UIKit", kind = "framework")]
     unsafe extern "C" {
         fn UIApplicationMain(argc: i32, argv: *mut *mut c_char, principal: Id, delegate: Id)
@@ -812,6 +841,8 @@ mod native_host {
         ) -> bool;
         fn sel_registerName(name: *const c_char) -> Sel;
         fn objc_retain(object: Id) -> Id;
+        #[cfg(ui_test_host)]
+        fn objc_release(object: Id);
     }
     #[link(name = "System")]
     unsafe extern "C" {
@@ -839,6 +870,43 @@ mod native_host {
         let f: unsafe extern "C" fn(Id, Sel) =
             unsafe { std::mem::transmute(objc_msgSend as unsafe extern "C" fn(Id, Sel) -> usize) };
         unsafe { f(object, sel_registerName(name.as_ptr())) };
+    }
+    #[cfg(ui_test_host)]
+    unsafe fn test_button_title(button: Id, title: &std::ffi::CStr) {
+        unsafe {
+            let make_string: unsafe extern "C" fn(Id, Sel, *const c_char) -> Id =
+                std::mem::transmute(objc_msgSend as unsafe extern "C" fn(Id, Sel) -> usize);
+            let string = make_string(
+                send0(objc_getClass(c"NSString".as_ptr()), c"alloc"),
+                sel_registerName(c"initWithUTF8String:".as_ptr()),
+                title.as_ptr(),
+            );
+            let set_title: unsafe extern "C" fn(Id, Sel, Id, usize) =
+                std::mem::transmute(objc_msgSend as unsafe extern "C" fn(Id, Sel) -> usize);
+            set_title(
+                button,
+                sel_registerName(c"setTitle:forState:".as_ptr()),
+                string,
+                0,
+            );
+            send_id(button, c"setAccessibilityIdentifier:", string);
+            objc_release(string);
+        }
+    }
+    #[cfg(ui_test_host)]
+    unsafe extern "C" fn completed_on_main(_: *mut c_void) {
+        unsafe {
+            test_button_title(
+                REQUEST_BUTTON.load(Ordering::Acquire) as Id,
+                c"Authorization result received",
+            )
+        };
+    }
+    #[cfg(ui_test_host)]
+    unsafe extern "C" fn request_clicked(_: Id, _: Sel, _: Id) {
+        if !REQUESTED.swap(true, Ordering::AcqRel) {
+            start_request(super::inspect_singleton());
+        }
     }
     unsafe extern "C" fn window(_: Id, _: Sel) -> Id {
         WINDOW.load(Ordering::Acquire) as Id
@@ -871,12 +939,50 @@ mod native_host {
             )
         };
         assert!(!controller.is_null());
+        #[cfg(ui_test_host)]
+        unsafe {
+            let create: unsafe extern "C" fn(Id, Sel, isize) -> Id =
+                std::mem::transmute(objc_msgSend as unsafe extern "C" fn(Id, Sel) -> usize);
+            let button = create(
+                objc_getClass(c"UIButton".as_ptr()),
+                sel_registerName(c"buttonWithType:".as_ptr()),
+                env!("UI_SYSTEM_BUTTON_TYPE").parse().unwrap(),
+            );
+            assert!(!button.is_null());
+            let set_frame: unsafe extern "C" fn(Id, Sel, Rect) =
+                std::mem::transmute(objc_msgSend as unsafe extern "C" fn(Id, Sel) -> usize);
+            set_frame(
+                button,
+                sel_registerName(c"setFrame:".as_ptr()),
+                Rect {
+                    x: 20.0,
+                    y: 120.0,
+                    width: rect.width - 40.0,
+                    height: 60.0,
+                },
+            );
+            test_button_title(button, c"Request Screen Time access");
+            let add_target: unsafe extern "C" fn(Id, Sel, Id, Sel, usize) =
+                std::mem::transmute(objc_msgSend as unsafe extern "C" fn(Id, Sel) -> usize);
+            add_target(
+                button,
+                sel_registerName(c"addTarget:action:forControlEvents:".as_ptr()),
+                delegate,
+                sel_registerName(c"requestScreenTime:".as_ptr()),
+                env!("UI_TOUCH_UP_INSIDE_EVENT").parse().unwrap(),
+            );
+            send_id(send0(controller, c"view"), c"addSubview:", button);
+            REQUEST_BUTTON.store(button.addr(), Ordering::Release);
+        }
         unsafe {
             send_id(view_window, c"setRootViewController:", controller);
             send_void(view_window, c"makeKeyAndVisible");
         }
         // Keep the allocation references for this bounded inspection process.
+        #[cfg(not(ui_test_host))]
         println!("Rust UIKit launch callback observed; blank_window=true");
+        #[cfg(ui_test_host)]
+        println!("Rust UIKit launch callback observed; test_request_button=true");
         true
     }
     unsafe extern "C" fn exit_on_main(context: *mut c_void) {
@@ -886,15 +992,33 @@ mod native_host {
         if ACTIVE.swap(true, Ordering::AcqRel) {
             return;
         }
-        let started = Instant::now();
         println!("Rust UIKit active callback observed");
-        let object = super::inspect_singleton();
+        #[cfg(not(ui_test_host))]
+        start_request(super::inspect_singleton());
+        #[cfg(ui_test_host)]
+        println!("Rust XCTest host ready; authorization_requested=false");
+    }
+    fn start_request(object: Id) {
+        let started = Instant::now();
         let owner = super::request_probe::start(object);
         // Return to UIKit immediately; its main executor must remain available
         // to run the Swift task. The worker only polls an atomic result and
         // cancels a retained task; it never accesses UIKit or task allocations.
         std::thread::spawn(move || {
             let success = super::request_probe::wait_from_worker(owner, started);
+            #[cfg(ui_test_host)]
+            if success {
+                unsafe {
+                    dispatch_async_f(
+                        (&raw const _dispatch_main_q).cast_mut().cast(),
+                        std::ptr::null_mut(),
+                        completed_on_main,
+                    );
+                }
+                // XCTest terminates this disposable host after observing the
+                // result marker. Keep it alive during the ordinary OS tap.
+                return;
+            }
             let code = if success { 0 } else { 1 };
             unsafe {
                 dispatch_async_f(
@@ -925,6 +1049,13 @@ mod native_host {
                 class,
                 sel_registerName(c"applicationDidBecomeActive:".as_ptr()),
                 active as *const c_void,
+                c"v@:@".as_ptr()
+            ));
+            #[cfg(ui_test_host)]
+            assert!(class_addMethod(
+                class,
+                sel_registerName(c"requestScreenTime:".as_ptr()),
+                request_clicked as *const c_void,
                 c"v@:@".as_ptr()
             ));
             assert!(class_addMethod(

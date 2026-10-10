@@ -65,6 +65,14 @@ jobs:
             for SELECTOR in initWithBundleIdentifier waitForExistenceWithTimeout matchingIdentifier recordFailureWithDescription; do
               grep -F "$SELECTOR" "$OUT/xctest-selected-headers.txt"
             done
+            if [ '${{ inputs.ui_consent_test }}' = true ]; then
+              UIKIT_HEADERS="$SDK/System/Library/Frameworks/UIKit.framework/Headers"
+              grep -n -A 5 -B 3 -E 'UIButtonTypeSystem|buttonWithType:|setTitle:.*forState:' "$UIKIT_HEADERS/UIButton.h" > "$OUT/uikit-test-button-declarations.txt"
+              grep -n -A 5 -B 3 -E 'UIControlEventTouchUpInside|UIControlStateNormal|addTarget:' "$UIKIT_HEADERS/UIControl.h" >> "$OUT/uikit-test-button-declarations.txt"
+              grep -Eq 'UIButtonTypeSystem[[:space:]]*=[[:space:]]*1([[:space:]]|,)' "$UIKIT_HEADERS/UIButton.h"
+              grep -Eq 'UIControlEventTouchUpInside[[:space:]]*=[[:space:]]*1[[:space:]]*<<[[:space:]]*6([[:space:]]|,)' "$UIKIT_HEADERS/UIControl.h"
+              grep -Eq 'UIControlStateNormal[[:space:]]*=[[:space:]]*0([[:space:]]|,)' "$UIKIT_HEADERS/UIControl.h"
+            fi
           fi
           if [ '${{ inputs.collect_xctest_headers }}' = true ] && [ '${{ inputs.ui_consent_test }}' = false ]; then
             printf 'xctest_public_headers_collected=true\nui_test_executed=false\nauthorization_requested=false\n' > "$OUT/xctest-header-scope.txt"
@@ -119,6 +127,9 @@ jobs:
           SDK=$(xcrun --sdk iphonesimulator --show-sdk-path)
           VERSION=$(xcrun --sdk iphonesimulator --show-sdk-version)
           export SDKROOT="$SDK" IPHONEOS_DEPLOYMENT_TARGET="$VERSION"
+          if [ '${{ inputs.ui_consent_test }}' = true ]; then
+            export UI_SYSTEM_BUTTON_TYPE=1 UI_TOUCH_UP_INSIDE_EVENT=64
+          fi
           export AUTH_SHARED_SYMBOL=$(jq -er '[.[] | select(.name == "AuthorizationCenter") | .members[] | select(.name == "shared" and .static == true) | .accessors[] | select(.accessorKind == "get" and .static == true) | .mangledName] | if length == 1 then .[0] else error("expected one public static getter") end' "$OUT/FamilyControls-selected-declarations.json")
           grep -Fx "$AUTH_SHARED_SYMBOL" "$OUT/authorization-center-exports.txt"
           export AUTH_METADATA_SYMBOL=$(jq -er '[.[] | select(.name == "AuthorizationCenter") | .usr | sub("^s:"; "\u0024s") + "Ma"] | if length == 1 then .[0] else error("expected one class metadata accessor") end' "$OUT/FamilyControls-selected-declarations.json")
@@ -271,7 +282,7 @@ jobs:
             <TestAction buildConfiguration="Debug" selectedDebuggerIdentifier="Xcode.DebuggerFoundation.Debugger.LLDB" selectedLauncherIdentifier="Xcode.IDEFoundation.Launcher.LLDB" shouldUseLaunchSchemeArgsEnv="YES"><Testables><TestableReference skipped="NO"><BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="A00000000000000000000016" BuildableName="ProbeUITests.xctest" BlueprintName="ProbeUITests" ReferencedContainer="container:Probe.xcodeproj"/></TestableReference></Testables></TestAction>
           </Scheme>
           SCHEME
-            if xcodebuild -project "$XCODE_ROOT/Probe.xcodeproj" -scheme Probe -configuration Debug -sdk iphonesimulator -destination "id=$SIM_ID" -parallel-testing-enabled NO -resultBundlePath "$OUT/consent-ui.xcresult" SYMROOT="$OUT/xcode-products" OBJROOT="$RUNNER_TEMP/xcode-objects" "OTHER_LDFLAGS=\$(inherited) -L$SDK/usr/lib/swift -F$TEST_FRAMEWORKS $NATIVE_LIBS $UI_NATIVE_LIBS" test > "$OUT/xcode-ui-test.txt" 2>&1; then UI_TEST_STATUS=0; else UI_TEST_STATUS=$?; fi
+            if xcodebuild -project "$XCODE_ROOT/Probe.xcodeproj" -scheme Probe -configuration Debug -sdk iphonesimulator -destination "id=$SIM_ID" -parallel-testing-enabled NO -test-timeouts-enabled YES -default-test-execution-time-allowance 60 -maximum-test-execution-time-allowance 90 -resultBundlePath "$OUT/consent-ui.xcresult" SYMROOT="$OUT/xcode-products" OBJROOT="$RUNNER_TEMP/xcode-objects" "OTHER_LDFLAGS=\$(inherited) -L$SDK/usr/lib/swift -F$TEST_FRAMEWORKS $NATIVE_LIBS $UI_NATIVE_LIBS" test > "$OUT/xcode-ui-test.txt" 2>&1; then UI_TEST_STATUS=0; else UI_TEST_STATUS=$?; fi
             xcrun simctl io "$SIM_ID" screenshot "$OUT/consent-after-test.png"
             xcrun simctl spawn "$SIM_ID" log show --last 2m --style compact --predicate 'process == "authorization-center-probe" OR process == "FamilyControlsAgent"' > "$OUT/authorization-process-log.txt" 2>&1
             test "$UI_TEST_STATUS" = 0
