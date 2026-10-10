@@ -224,7 +224,7 @@ mod async_inspection {
 mod request_probe {
     use super::async_inspection::swift_task_create_common;
     use std::ffi::c_void;
-    use std::sync::atomic::{AtomicU8, Ordering};
+    use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
     use std::sync::OnceLock;
     use std::time::{Duration, Instant};
 
@@ -268,6 +268,7 @@ mod request_probe {
     // 0 pending, 1 returned normally, 2 returned an error. Neither outcome is
     // represented as verified authorization status, monitoring, or shielding.
     static RESULT: AtomicU8 = AtomicU8::new(0);
+    static CALLER_ROOT: AtomicUsize = AtomicUsize::new(0);
 
     #[link(name = "FamilyControls", kind = "framework")]
     unsafe extern "C" {
@@ -309,6 +310,7 @@ mod request_probe {
     // initialized before task creation, so enqueue cannot race initialization.
     #[unsafe(no_mangle)]
     unsafe extern "C" fn rust_authorization_prepare(root: *mut Root) -> *mut c_void {
+        CALLER_ROOT.store(root.addr(), Ordering::Release);
         let input = INPUT.get().unwrap();
         let child = unsafe { swift_task_alloc(input.size) };
         assert!(!child.is_null());
@@ -327,6 +329,13 @@ mod request_probe {
 
     #[unsafe(no_mangle)]
     unsafe extern "C" fn rust_authorization_finish(root: *mut Root, error: *mut c_void) {
+        assert!(!root.is_null());
+        assert_eq!(
+            root.addr(),
+            CALLER_ROOT.load(Ordering::Acquire),
+            "async resume did not project the original caller frame"
+        );
+        println!("SDK async continuation caller frame validated");
         let child = unsafe { (*root).child };
         // The callee has returned to its parent; its task allocation is now the
         // last allocation. Release it before completing the caller task.
@@ -343,7 +352,10 @@ mod request_probe {
     // Swift 5.10 async convention on arm64: x22 context, x20 swiftself.
     // FamilyControlsMember is the SDK's @objc Swift.Int enum, passed in x0
     // with the C-compatible layout of GenEnum.cpp in Swift 5.10.
-    // A Void throwing continuation receives its error in x20.
+    // A Void throwing continuation receives its error in x20 and the callee
+    // context in x22. Swift 5.10 GenCall.cpp emitAsyncReturn passes its CURRENT
+    // context; the caller's continuation projects the parent before accessing
+    // its own frame. Task.h's manual resumeParent helper is a different adapter.
     core::arch::global_asm!(
         ".text",
         ".p2align 2",
@@ -365,6 +377,7 @@ mod request_probe {
         "_rust_authorization_resume:",
         "stp x29, x30, [sp, #-16]!",
         "mov x29, sp",
+        "ldr x22, [x22, #0]",
         "mov x0, x22",
         "mov x1, x20",
         "bl _rust_authorization_finish",

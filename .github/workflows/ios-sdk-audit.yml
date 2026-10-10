@@ -122,6 +122,7 @@ jobs:
           grep -F 'Rust async task entry observed; authorization_requested=false' "$OUT/singleton-runtime.txt"
           REQUESTED=false
           if [ '${{ inputs.authorization_probe }}' = true ]; then
+            grep -F 'SDK async continuation caller frame validated' "$OUT/singleton-runtime.txt"
             grep -F 'Public individual authorization continuation observed; error_present=' "$OUT/singleton-runtime.txt"
             REQUESTED=true
           fi
