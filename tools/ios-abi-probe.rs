@@ -224,8 +224,8 @@ mod async_inspection {
 mod request_probe {
     use super::async_inspection::swift_task_create_common;
     use std::ffi::c_void;
-    use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
     use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
 
     #[repr(C)]
@@ -287,8 +287,21 @@ mod request_probe {
         fn swift_release(object: *mut c_void);
     }
     #[link(name = "swiftCore")]
+    unsafe extern "Swift" {
+        // Swift 5.10 ErrorObject.h/mm: compiler runtime bridge consumes an
+        // owned Error box and returns an owned NSError. This is version-pinned
+        // Swift runtime SPI, not a FamilyControls private authorization API.
+        fn _swift_stdlib_bridgeErrorToNSError(error: *mut c_void) -> *mut c_void;
+    }
+    #[link(name = "Foundation", kind = "framework")]
+    unsafe extern "C" {}
+    #[link(name = "objc")]
     unsafe extern "C" {
-        fn swift_errorRelease(error: *mut c_void);
+        fn sel_registerName(name: *const std::ffi::c_char) -> *const c_void;
+        // These three zero-argument selectors return a pointer or NSInteger:
+        // all use one integer result register on this arm64 target.
+        fn objc_msgSend(object: *mut c_void, selector: *const c_void) -> usize;
+        fn objc_release(object: *mut c_void);
     }
     #[link(name = "CoreFoundation", kind = "framework")]
     unsafe extern "C" {
@@ -343,7 +356,29 @@ mod request_probe {
         let result = if error.is_null() {
             1
         } else {
-            unsafe { swift_errorRelease(error) };
+            // Do not message an uninitialized native Swift error box. The
+            // runtime bridge lazily creates its Cocoa domain/code first.
+            let ns_error = unsafe { _swift_stdlib_bridgeErrorToNSError(error) };
+            assert!(!ns_error.is_null());
+            let domain = unsafe { objc_msgSend(ns_error, sel_registerName(c"domain".as_ptr())) };
+            assert_ne!(domain, 0);
+            let utf8 = unsafe {
+                objc_msgSend(
+                    domain as *mut c_void,
+                    sel_registerName(c"UTF8String".as_ptr()),
+                )
+            };
+            assert_ne!(utf8, 0);
+            let domain = unsafe { std::ffi::CStr::from_ptr(utf8 as *const std::ffi::c_char) };
+            let code =
+                unsafe { objc_msgSend(ns_error, sel_registerName(c"code".as_ptr())) } as isize;
+            // Only system error domain/code; no userInfo, application tokens,
+            // account identity, or personal application data is read/logged.
+            println!(
+                "Public authorization NSError: domain={}, code={code}",
+                domain.to_string_lossy()
+            );
+            unsafe { objc_release(ns_error) };
             2
         };
         RESULT.store(result, Ordering::Release);
@@ -445,7 +480,9 @@ mod request_probe {
                 unsafe { CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.1, 1) };
             }
             // A cancellation response is not an accepted authorization flow.
-            panic!("public authorization continuation timed out; cancellation requested; process will exit");
+            panic!(
+                "public authorization continuation timed out; cancellation requested; process will exit"
+            );
         }
         assert_ne!(result, 0, "public authorization continuation timed out");
         println!(
