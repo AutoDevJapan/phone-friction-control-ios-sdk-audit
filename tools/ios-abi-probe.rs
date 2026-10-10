@@ -1154,8 +1154,10 @@ mod mutable_binding {
     // Every C/Swift boundary saves x20 and LR and has a 16-byte C stack/CFI.
     // Category: C(dst, Bool, entry) -> Swift x8=dst, x0=Bool, no self/metatype.
     // Binding init: C(dst, get, set, metadata, entry) -> x8, x0/NULL,
-    // x2/NULL, x4=generic metadata (not an explicit metatype argument).
-    // Public get/set: x20 is Binding self. Closure x20 is NULL context.
+    // x2/NULL, x4=Value metadata (not an explicit metatype argument).
+    // Public get/set: x20 is Binding self; x0(get)/x1(set) is Binding
+    // metadata, from which the SDK projects Value at +16.
+    // Closure x20 is NULL context.
     // Closure metadata registers are deliberately unused: the stable state
     // supplies the already validated metadata, so no extra-argument assumption.
     core::arch::global_asm!(
@@ -1598,7 +1600,12 @@ mod mutable_binding {
             assert!(output.witnesses.metadata == metadata && !output.binding);
             let before = self.proof.n(Count::ClosureGet);
             self.proof.inc(Count::PublicGet);
-            unsafe { rust_mutable_binding_get(self.ptr(), output.ptr(), metadata, entry) };
+            // The generic accessor receives Binding<Value> metadata, then
+            // projects its Value argument at +16. The initializer instead
+            // receives the direct Value metadata argument.
+            unsafe {
+                rust_mutable_binding_get(self.ptr(), output.ptr(), self.witnesses.metadata, entry)
+            };
             output.initialized = true; // only after the public getter returns
             assert!(
                 self.proof.n(Count::ClosureGet) > before,
@@ -1616,7 +1623,9 @@ mod mutable_binding {
             input.taken = true;
             self.proof.inc(Count::Taken);
             self.proof.inc(Count::PublicSet);
-            unsafe { rust_mutable_binding_set(self.ptr(), input.ptr(), metadata, entry) };
+            unsafe {
+                rust_mutable_binding_set(self.ptr(), input.ptr(), self.witnesses.metadata, entry)
+            };
         }
     }
     impl Drop for Value<'_> {
@@ -1864,6 +1873,8 @@ mod mutable_binding {
             (16, 0xaa14_03f5),
             (20, 0xaa00_03f6),
             (24, 0xaa08_03f3),
+            (104, 0xb980_22c8),
+            (112, 0xf940_0ac2),
         ] {
             assert!(
                 word(getter, offset, page) == expected,
@@ -1916,6 +1927,14 @@ mod mutable_binding {
             "Binding metadata incomplete"
         );
         let binding_type = Witnesses::load(response.value, 72, page);
+        // Swift5.10 StructMetadata has kind + descriptor before its generic
+        // arguments. Actual get body uses [x0+16], and set uses [x1+16],
+        // to project Value metadata. Validate that specialization before calls.
+        assert!(
+            unsafe { read(response.value.cast::<*const c_void>().wrapping_add(2), page) }
+                == metadata,
+            "Binding generic Value metadata differs"
+        );
         let category = resolve(env!("SELECTION_CATEGORY_INIT_SYMBOL"));
         let init = resolve(env!("BINDING_INIT_SYMBOL"));
         let get = resolve(env!("BINDING_GET_SYMBOL"));
