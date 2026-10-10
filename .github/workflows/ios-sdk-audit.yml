@@ -47,8 +47,49 @@ jobs:
             xcrun nm "$OUT/$TARGET/ios_abi_probe.o" > "$OUT/$TARGET/symbols.txt"
             grep 'U _abi_probe_external' "$OUT/$TARGET/symbols.txt"
           done
-          printf 'compiler_codegen=true\nsdk_declarations_collected=true\nframework_linked=false\nos_executed=false\nauthorization=false\nmonitoring=false\nshielding=false\n' > "$OUT/scope.txt"
+          printf 'compiler_codegen=true\nsdk_declarations_collected=true\ncodegen_framework_linked=false\ncodegen_os_executed=false\nauthorization=false\nmonitoring=false\nshielding=false\n' > "$OUT/scope.txt"
+      - name: Inspect the public SDK singleton from a Rust Simulator process
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="$RUNNER_TEMP/ios-sdk-audit"
+          SDK=$(xcrun --sdk iphonesimulator --show-sdk-path)
+          VERSION=$(xcrun --sdk iphonesimulator --show-sdk-version)
+          export SDKROOT="$SDK" IPHONEOS_DEPLOYMENT_TARGET="$VERSION"
+          export AUTH_SHARED_SYMBOL=$(jq -er '[.[] | select(.name == "AuthorizationCenter") | .members[] | select(.name == "shared" and .static == true) | .accessors[] | select(.accessorKind == "get" and .static == true) | .mangledName] | if length == 1 then .[0] else error("expected one public static getter") end' "$OUT/FamilyControls-selected-declarations.json")
+          grep -Fx "$AUTH_SHARED_SYMBOL" "$OUT/authorization-center-exports.txt"
+          export AUTH_METADATA_SYMBOL=$(jq -er '[.[] | select(.name == "AuthorizationCenter") | .usr | sub("^s:"; "\u0024s") + "Ma"] | if length == 1 then .[0] else error("expected one class metadata accessor") end' "$OUT/FamilyControls-selected-declarations.json")
+          grep -Fx "$AUTH_METADATA_SYMBOL" "$OUT/authorization-center-exports.txt"
+          PROBE_APP="$OUT/authorization-center-probe.app"
+          mkdir "$PROBE_APP"
+          rustc tools/ios-abi-probe.rs --crate-name ios_runtime_probe --edition 2024 --cfg runtime_probe --target aarch64-apple-ios-sim --emit llvm-ir,asm,link -o "$PROBE_APP/authorization-center-probe"
+          cat > "$PROBE_APP/Info.plist" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+          <key>CFBundleIdentifier</key><string>com.autodevjapan.phonecontrol1614abiprobe</string>
+          <key>CFBundleName</key><string>phone-friction-control（未定）</string>
+          <key>CFBundleExecutable</key><string>authorization-center-probe</string>
+          <key>CFBundlePackageType</key><string>APPL</string>
+          <key>CFBundleVersion</key><string>1</string>
+          <key>CFBundleShortVersionString</key><string>0.0.1</string>
+          <key>MinimumOSVersion</key><string>17.0</string>
+          <key>CFBundleSupportedPlatforms</key><array><string>iPhoneSimulator</string></array>
+          <key>UIDeviceFamily</key><array><integer>1</integer></array>
+          </dict></plist>
+          PLIST
+          codesign --sign - "$PROBE_APP"
+          RUNTIME=$(xcrun simctl list runtimes -j | jq -er --arg version "$VERSION" '[.runtimes[] | select(.isAvailable and .version == $version and (.identifier | contains("iOS"))) | .identifier] | if length == 1 then .[0] else error("SDK-matching Simulator runtime missing or ambiguous") end')
+          SIM_ID=$(xcrun simctl create phone-control1614-abi com.apple.CoreSimulator.SimDeviceType.iPhone-15 "$RUNTIME")
+          trap 'xcrun simctl shutdown "$SIM_ID" || true; xcrun simctl delete "$SIM_ID" || true' EXIT
+          xcrun simctl boot "$SIM_ID"
+          xcrun simctl bootstatus "$SIM_ID" -b
+          xcrun simctl install "$SIM_ID" "$PROBE_APP"
+          xcrun simctl launch --console "$SIM_ID" com.autodevjapan.phonecontrol1614abiprobe > "$OUT/singleton-runtime.txt" 2>&1
+          grep -F 'SDK singleton class: _TtC14FamilyControls19AuthorizationCenter' "$OUT/singleton-runtime.txt"
+          printf 'simulator_process_executed=true\npublic_singleton_called=true\nauthorization_requested=false\nmonitoring=false\nshielding=false\n' > "$OUT/singleton-runtime-scope.txt"
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: ios-sdk-audit
           path: ${{ runner.temp }}/ios-sdk-audit
