@@ -693,6 +693,19 @@ mod ui_authorization_test {
         }
     }
 
+    unsafe fn describe_system(application: Id) {
+        let description = unsafe { retained_object(application, c"debugDescription") };
+        if !description.0.is_null() {
+            let text = unsafe { object(description.0, c"UTF8String") }.cast::<c_char>();
+            if !text.is_null() {
+                println!(
+                    "System UI observation: {}",
+                    unsafe { std::ffi::CStr::from_ptr(text) }.to_string_lossy()
+                );
+            }
+        }
+    }
+
     unsafe extern "C" fn choose_consent(test: Id, _: Sel) {
         unsafe {
             let application_class = objc_getClass(c"XCUIApplication".as_ptr());
@@ -737,16 +750,7 @@ mod ui_authorization_test {
             let alerts = retained_object(system_app.0, c"alerts");
             let alert = retained_object(alerts.0, c"firstMatch");
             if !wait_for(alert.0, 30.0) {
-                let description = retained_object(system_app.0, c"debugDescription");
-                if !description.0.is_null() {
-                    let text = object(description.0, c"UTF8String").cast::<c_char>();
-                    if !text.is_null() {
-                        println!(
-                            "System UI observation: {}",
-                            std::ffi::CStr::from_ptr(text).to_string_lossy()
-                        );
-                    }
-                }
+                describe_system(system_app.0);
                 fail(test, c"Screen Time consent alert not observed");
                 return;
             }
@@ -777,6 +781,27 @@ mod ui_authorization_test {
             println!(
                 "XCTest ordinary Screen Time consent button tap returned; authorization_status_verified=false"
             );
+            if cfg!(ui_test_continue) {
+                // The fresh Simulator's observed second OS sheet is a separate
+                // decision, not the result of pressing Continue (run 38076292581).
+                let allow_label = string(c"Allow with Passcode");
+                let system_buttons = retained_object(system_app.0, c"buttons");
+                let allow_query =
+                    retained_object_arg(system_buttons.0, c"matchingIdentifier:", allow_label.0);
+                let allow_button = retained_object(allow_query.0, c"firstMatch");
+                if !wait_for(allow_button.0, 10.0) {
+                    describe_system(system_app.0);
+                    fail(
+                        test,
+                        c"Observed second Screen Time authorization button missing",
+                    );
+                    return;
+                }
+                action(allow_button.0, c"tap");
+                println!(
+                    "XCTest second Screen Time authorization button tap returned; passcode_entries=0; authorization_status_verified=false"
+                );
+            }
             // This marker is set only after the host's public continuation and
             // its result file have been observed. A tap alone is insufficient.
             let result_label = string(c"Authorization result received");
@@ -785,6 +810,7 @@ mod ui_authorization_test {
                 retained_object_arg(result_buttons.0, c"matchingIdentifier:", result_label.0);
             let result_button = retained_object(result_query.0, c"firstMatch");
             if !wait_for(result_button.0, 30.0) {
+                describe_system(system_app.0);
                 fail(test, c"Public authorization continuation not observed");
                 return;
             }
