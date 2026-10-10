@@ -235,15 +235,45 @@ mod selection_layout {
         println!();
     }
     #[cfg(binding_entry_probe)]
-    fn first_call_helper(label: &str, entry: *const c_void, page: usize) {
-        // Observe only the first direct BL in the public entry's bounded prefix.
-        // No helper is invoked. Stop when its image differs from the entry.
+    fn control_transfer_prefixes(label: &str, entry: *const c_void, page: usize) {
+        // Inspect a bounded straight-line prefix, stopping at its first branch,
+        // indirect call or return. A getter may forward with B; a setter may
+        // call indirectly. Bytes after those edges are not its executed prefix.
+        // Direct destinations are observed once, never invoked or recursively followed.
         let count = 128.min(page_remaining(entry, page));
         for offset in (0..count.saturating_sub(3)).step_by(4) {
             let instruction = unsafe { read(entry.cast::<u8>().add(offset).cast::<u32>(), page) };
-            if instruction & 0xfc00_0000 != 0x9400_0000 {
+            let direct_call = instruction & 0xfc00_0000 == 0x9400_0000;
+            let direct_branch = instruction & 0xfc00_0000 == 0x1400_0000;
+            let indirect_call = instruction & 0xffff_fc1f == 0xd63f_0000;
+            let indirect_branch = instruction & 0xffff_fc1f == 0xd61f_0000;
+            let returned = instruction & 0xffff_fc1f == 0xd65f_0000;
+            let conditional = instruction & 0xff00_0010 == 0x5400_0000
+                || instruction & 0x7e00_0000 == 0x3400_0000
+                || instruction & 0x7e00_0000 == 0x3600_0000;
+            if indirect_call || indirect_branch || returned || conditional {
+                let kind = if indirect_call {
+                    "indirect_call"
+                } else if indirect_branch {
+                    "indirect_branch"
+                } else if returned {
+                    "return"
+                } else {
+                    "conditional_branch"
+                };
+                println!(
+                    "Binding control transfer: {label}; source_offset={offset}; kind={kind}; target_read=false"
+                );
+                return;
+            }
+            if !direct_call && !direct_branch {
                 continue;
             }
+            let kind = if direct_call {
+                "direct_call"
+            } else {
+                "direct_branch"
+            };
             let relative = ((instruction << 6) as i32 >> 6) as isize * 4;
             let target_address = entry
                 .addr()
@@ -278,17 +308,23 @@ mod selection_layout {
                 && source_info.base == target_info.base
             {
                 println!(
-                    "Binding first BL helper: {label}; source_offset={offset}; relative_bytes={relative}; same_image=true"
+                    "Binding control transfer: {label}; source_offset={offset}; kind={kind}; relative_bytes={relative}; same_image=true"
                 );
-                entry_bytes(&format!("{label}.firstBL helper"), target, page);
+                entry_bytes(
+                    &format!("{label}.offset{offset} {kind} target"),
+                    target,
+                    page,
+                );
             } else {
                 println!(
-                    "Binding first BL helper: {label}; source_offset={offset}; skipped_cross_image=true"
+                    "Binding control transfer: {label}; source_offset={offset}; kind={kind}; skipped_cross_image=true"
                 );
             }
-            return;
+            if direct_branch {
+                return;
+            }
         }
-        println!("Binding first BL helper: {label}; present_in_prefix=false");
+        println!("Binding control transfer: {label}; straight_line_prefix_end=true");
     }
 
     fn layout(label: &str, response: MetadataResponse, page: usize) -> usize {
@@ -401,7 +437,7 @@ mod selection_layout {
                 ("Binding.get", getter),
                 ("Binding.set", setter),
             ] {
-                first_call_helper(label, entry, page);
+                control_transfer_prefixes(label, entry, page);
             }
             println!(
                 "Binding accessor inspection complete; helper_calls=0; getter_calls=0; setter_calls=0; closure_calls=0; ownership_verified=false"

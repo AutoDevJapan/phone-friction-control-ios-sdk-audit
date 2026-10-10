@@ -270,7 +270,7 @@ jobs:
             # Preserve partial selection diagnostics even when the process fails.
             LAUNCH_STATUS=0
             xcrun simctl launch --console "$SIM_ID" com.autodevjapan.phonecontrol1614abiprobe > "$OUT/singleton-runtime.txt" 2>&1 || LAUNCH_STATUS=$?
-            grep -E '^(Selection (layout:|box:|entry bytes:|layout inspection complete;)|Binding (first BL helper:|accessor inspection complete;))' "$OUT/singleton-runtime.txt" > "$OUT/selection-layout.txt" || true
+            grep -E '^(Selection (layout:|box:|entry bytes:|layout inspection complete;)|Binding (control transfer:|accessor inspection complete;))' "$OUT/singleton-runtime.txt" > "$OUT/selection-layout.txt" || true
             test "$LAUNCH_STATUS" = 0
             grep -F 'Selection box: buffer_aligned=true; project_matches=true; uninitialized_deallocated=true' "$OUT/selection-layout.txt"
             grep -F 'Selection layout inspection complete; selection_values_constructed=0; selection_values_read=0; initializer_calls=0; closure_calls=0; value_witness_calls=0;' "$OUT/selection-layout.txt"
@@ -280,10 +280,14 @@ jobs:
               grep -F 'Binding accessor inspection complete; helper_calls=0; getter_calls=0; setter_calls=0; closure_calls=0; ownership_verified=false' "$OUT/selection-layout.txt"
               test "$(grep -c '^Selection entry bytes: Binding.wrappedValue getter;' "$OUT/selection-layout.txt")" = 1
               test "$(grep -c '^Selection entry bytes: Binding.wrappedValue setter;' "$OUT/selection-layout.txt")" = 1
-              for LABEL in Binding.init Binding.get Binding.set; do
-                test "$(grep -Fc "Binding first BL helper: $LABEL;" "$OUT/selection-layout.txt")" = 1
-                grep -F "Binding first BL helper: $LABEL;" "$OUT/selection-layout.txt" | grep -F 'same_image=true'
-                test "$(grep -Fc "Selection entry bytes: $LABEL.firstBL helper;" "$OUT/selection-layout.txt")" = 1
+              # Validate the actual control transfers, not an assumed BL in
+              # every entry. The setter's first call is indirect in this SDK.
+              grep -Fx 'Binding control transfer: Binding.set; source_offset=40; kind=indirect_call; target_read=false' "$OUT/selection-layout.txt"
+              grep -F 'Binding control transfer: Binding.get; source_offset=0; kind=direct_branch;' "$OUT/selection-layout.txt" | grep -F 'same_image=true'
+              test "$(grep -Fc 'Selection entry bytes: Binding.get.offset0 direct_branch target;' "$OUT/selection-layout.txt")" = 1
+              for OFFSET in 8 40; do
+                grep -F "Binding control transfer: Binding.init; source_offset=$OFFSET; kind=direct_call;" "$OUT/selection-layout.txt" | grep -F 'same_image=true'
+                test "$(grep -Fc "Selection entry bytes: Binding.init.offset$OFFSET direct_call target;" "$OUT/selection-layout.txt")" = 1
               done
             fi
             printf 'selection_layout_verified=true\nmetadata_complete=true\nmetadata_kind_struct=true\nbox_buffer_aligned=true\nbox_project_matches=true\nbox_uninitialized_deallocated=true\nentry_prefix_max_bytes=128\nentry_reads_page_bounded=true\nentry_registers_verified=false\nselection_values_constructed=0\nselection_values_read=0\ninitializer_calls=0\nclosure_calls=0\nvalue_witness_calls=0\ngrant_verified=false\nmonitoring_verified=false\nshielding_verified=false\n' > "$OUT/selection-layout-scope.txt"
