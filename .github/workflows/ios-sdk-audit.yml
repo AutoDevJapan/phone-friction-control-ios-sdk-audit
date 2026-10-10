@@ -6,6 +6,10 @@ on:
         description: Call the public individual authorization API once in the isolated Simulator
         type: boolean
         default: false
+      family_controls_entitlement:
+        description: Include Family Controls in this disposable Simulator app's ad-hoc signature; not proof of development or distribution approval
+        type: boolean
+        default: false
 permissions:
   contents: read
 jobs:
@@ -112,7 +116,19 @@ jobs:
           <key>UIDeviceFamily</key><array><integer>1</integer></array>
           </dict></plist>
           PLIST
-          codesign --sign - "$PROBE_APP"
+          if [ '${{ inputs.family_controls_entitlement }}' = true ]; then
+            cat > "$OUT/probe-entitlements.plist" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+          <key>com.apple.developer.family-controls</key><true/>
+          </dict></plist>
+          PLIST
+            codesign --sign - --entitlements "$OUT/probe-entitlements.plist" "$PROBE_APP"
+          else
+            codesign --sign - "$PROBE_APP"
+          fi
+          codesign --display --entitlements :- "$PROBE_APP" > "$OUT/signed-entitlements.plist" 2> "$OUT/signature-diagnostics.txt"
           RUNTIME=$(xcrun simctl list runtimes -j | jq -er --arg version "$VERSION" '[.runtimes[] | select(.isAvailable and .version == $version and (.identifier | contains("iOS"))) | .identifier] | if length == 1 then .[0] else error("SDK-matching Simulator runtime missing or ambiguous") end')
           SIM_ID=$(xcrun simctl create phone-control1614-abi com.apple.CoreSimulator.SimDeviceType.iPhone-15 "$RUNTIME")
           trap 'xcrun simctl shutdown "$SIM_ID" || true; xcrun simctl delete "$SIM_ID" || true' EXIT
@@ -120,6 +136,9 @@ jobs:
           xcrun simctl bootstatus "$SIM_ID" -b
           xcrun simctl install "$SIM_ID" "$PROBE_APP"
           xcrun simctl launch --console "$SIM_ID" com.autodevjapan.phonecontrol1614abiprobe > "$OUT/singleton-runtime.txt" 2>&1
+          # The new Simulator has no account login, user selections, or personal
+          # apps. Limit diagnostics to this probe's connection/entitlement messages.
+          xcrun simctl spawn "$SIM_ID" log show --style compact --last 1m --predicate 'process == "authorization-center-probe" AND (eventMessage CONTAINS[c] "connection" OR eventMessage CONTAINS[c] "entitlement")' > "$OUT/probe-connection-log.txt" 2>&1
           grep -F 'SDK singleton class: FamilyControls.AuthorizationCenter' "$OUT/singleton-runtime.txt"
           grep -F 'Rust async task entry observed; authorization_requested=false' "$OUT/singleton-runtime.txt"
           REQUESTED=false
