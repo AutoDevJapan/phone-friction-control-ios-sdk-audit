@@ -307,7 +307,7 @@ jobs:
               printf 'Test framework unexpectedly linked into the inspected host\n' >&2
               exit 1
             fi
-            if xcodebuild -project "$XCODE_ROOT/Probe.xcodeproj" -scheme Probe -configuration Debug -sdk iphonesimulator -destination "id=$SIM_ID" -parallel-testing-enabled NO -test-timeouts-enabled YES -default-test-execution-time-allowance 60 -maximum-test-execution-time-allowance 90 -resultBundlePath "$OUT/consent-ui.xcresult" SYMROOT="$OUT/xcode-products" OBJROOT="$RUNNER_TEMP/xcode-objects" test-without-building > "$OUT/xcode-ui-test.txt" 2>&1; then UI_TEST_STATUS=0; else UI_TEST_STATUS=$?; fi
+            if xcodebuild -project "$XCODE_ROOT/Probe.xcodeproj" -scheme Probe -configuration Debug -sdk iphonesimulator -destination "id=$SIM_ID" -parallel-testing-enabled NO -test-timeouts-enabled YES -default-test-execution-time-allowance 90 -maximum-test-execution-time-allowance 90 -resultBundlePath "$OUT/consent-ui.xcresult" SYMROOT="$OUT/xcode-products" OBJROOT="$RUNNER_TEMP/xcode-objects" test-without-building > "$OUT/xcode-ui-test.txt" 2>&1; then UI_TEST_STATUS=0; else UI_TEST_STATUS=$?; fi
             xcrun simctl io "$SIM_ID" screenshot "$OUT/consent-after-test.png"
             xcrun simctl spawn "$SIM_ID" log show --last 2m --style compact --predicate 'process == "authorization-center-probe" OR process == "FamilyControlsAgent"' > "$OUT/authorization-process-log.txt" 2>&1
             test "$UI_TEST_STATUS" = 0

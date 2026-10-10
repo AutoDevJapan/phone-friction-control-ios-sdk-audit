@@ -827,6 +827,25 @@ mod ui_authorization_test {
                 println!(
                     "XCTest disposable Simulator synthetic fixture submitted once; authorization_status_verified=false"
                 );
+                // The observed successful OS sheet still needs Done before
+                // the public request returns (run38078299191).
+                let done_label = string(c"Done");
+                let finish_buttons = retained_object(system_app.0, c"buttons");
+                let finish_query =
+                    retained_object_arg(finish_buttons.0, c"matchingIdentifier:", done_label.0);
+                let finish = retained_object(finish_query.0, c"firstMatch");
+                if !wait_for(finish.0, 10.0) {
+                    describe_system(system_app.0);
+                    fail(
+                        test,
+                        c"Observed Simulator authorization completion button missing",
+                    );
+                    return;
+                }
+                action(finish.0, c"tap");
+                println!(
+                    "XCTest OS authorization completion button tap returned; authorization_status_verified=false"
+                );
             }
             // This marker is set only after the host's public continuation and
             // its result file have been observed. A tap alone is insufficient.
