@@ -204,7 +204,30 @@ jobs:
           xcrun simctl boot "$SIM_ID"
           xcrun simctl bootstatus "$SIM_ID" -b
           xcrun simctl install "$SIM_ID" "$PROBE_APP"
-          xcrun simctl launch --console "$SIM_ID" com.autodevjapan.phonecontrol1614abiprobe > "$OUT/singleton-runtime.txt" 2>&1
+          if [ '${{ inputs.xcode_signed_host }}' = true ]; then
+            # Observe the ordinary permission UI; do not approve or bypass it.
+            xcrun simctl launch --console "$SIM_ID" com.autodevjapan.phonecontrol1614abiprobe > "$OUT/singleton-runtime.txt" 2>&1 &
+            LAUNCH_PID=$!
+            trap 'kill "$LAUNCH_PID" 2>/dev/null || true; wait "$LAUNCH_PID" 2>/dev/null || true; xcrun simctl shutdown "$SIM_ID" || true; xcrun simctl delete "$SIM_ID" || true' EXIT
+            # Wait at most 45 seconds for this host's request to begin, so the
+            # screenshots cover the permission UI rather than launch animation.
+            for ATTEMPT in {1..45}; do
+              if grep -Fq 'Public individual authorization request starting;' "$OUT/singleton-runtime.txt"; then break; fi
+              if ! kill -0 "$LAUNCH_PID" 2>/dev/null; then break; fi
+              sleep 1
+            done
+            for FRAME in 1 2 3; do
+              sleep 5
+              xcrun simctl io "$SIM_ID" screenshot "$OUT/authorization-frame-$FRAME.png"
+            done
+            xcrun simctl spawn "$SIM_ID" log show --last 2m --style compact --predicate 'process == "authorization-center-probe" OR process == "FamilyControlsAgent"' > "$OUT/authorization-before-wait-log.txt" 2>&1
+            if wait "$LAUNCH_PID"; then LAUNCH_STATUS=0; else LAUNCH_STATUS=$?; fi
+            LAUNCH_PID=''
+            xcrun simctl spawn "$SIM_ID" log show --last 2m --style compact --predicate 'process == "authorization-center-probe" OR process == "FamilyControlsAgent"' > "$OUT/authorization-process-log.txt" 2>&1
+            test "$LAUNCH_STATUS" = 0
+          else
+            xcrun simctl launch --console "$SIM_ID" com.autodevjapan.phonecontrol1614abiprobe > "$OUT/singleton-runtime.txt" 2>&1
+          fi
           grep -F 'SDK singleton class: FamilyControls.AuthorizationCenter' "$OUT/singleton-runtime.txt"
           UIKIT_ACTIVE=false
           if [ '${{ inputs.native_uikit_host }}' = true ]; then
