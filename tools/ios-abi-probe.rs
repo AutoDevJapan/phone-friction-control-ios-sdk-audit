@@ -65,7 +65,7 @@ unsafe extern "C" {
 }
 
 #[cfg(runtime_probe)]
-fn main() {
+fn inspect_singleton() -> *mut std::ffi::c_void {
     // This deliberately does not request authorization or read another app's data.
     // Request 0 means a blocking request for complete metadata.
     let metadata = unsafe { authorization_center_metadata(0) };
@@ -89,13 +89,27 @@ fn main() {
     assert!(!name.is_null(), "SDK runtime class has no name");
     let name = unsafe { std::ffi::CStr::from_ptr(name) }.to_str().unwrap();
     println!("SDK singleton class: {name}");
-    async_inspection::inspect();
-    #[cfg(auth_request)]
-    request_probe::run(object);
-    // Keep the singleton reference until this isolated process ends.
+    object
 }
 
 #[cfg(runtime_probe)]
+fn main() {
+    #[cfg(uikit_host)]
+    native_host::run();
+    #[cfg(not(uikit_host))]
+    {
+        let object = inspect_singleton();
+        async_inspection::inspect();
+        #[cfg(auth_request)]
+        request_probe::run(object);
+    }
+}
+
+#[cfg(all(uikit_host, not(auth_request)))]
+compile_error!("UIKit host inspection requires auth_request");
+
+#[cfg(runtime_probe)]
+#[cfg_attr(uikit_host, allow(dead_code))]
 mod async_inspection {
     use std::ffi::c_void;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -300,9 +314,10 @@ mod request_probe {
         fn sel_registerName(name: *const std::ffi::c_char) -> *const c_void;
         // These three zero-argument selectors return a pointer or NSInteger:
         // all use one integer result register on this arm64 target.
-        fn objc_msgSend(object: *mut c_void, selector: *const c_void) -> usize;
+        pub(super) fn objc_msgSend(object: *mut c_void, selector: *const c_void) -> usize;
         fn objc_release(object: *mut c_void);
     }
+    #[cfg(not(uikit_host))]
     #[link(name = "CoreFoundation", kind = "framework")]
     unsafe extern "C" {
         static kCFRunLoopDefaultMode: *const c_void;
@@ -312,7 +327,16 @@ mod request_probe {
         fn rust_authorization_entry();
         fn rust_authorization_resume();
     }
-    struct TaskOwner(*mut c_void);
+    pub(super) struct TaskOwner(*mut c_void);
+    // The retained task handle supports concurrent cancellation and ARC; no
+    // task-context allocator or UIKit object is accessed through this handle.
+    #[cfg(uikit_host)]
+    unsafe impl Send for TaskOwner {}
+    impl TaskOwner {
+        fn cancel(&self) {
+            unsafe { swift_task_cancel(self.0) };
+        }
+    }
     impl Drop for TaskOwner {
         fn drop(&mut self) {
             unsafe { swift_release(self.0) };
@@ -422,7 +446,7 @@ mod request_probe {
         "br x16",
     );
 
-    pub fn run(object: *mut c_void) {
+    pub(super) fn start(object: *mut c_void) -> TaskOwner {
         let descriptor = &raw const REQUEST;
         let descriptor_value = unsafe { &*descriptor };
         assert!(descriptor_value.size >= 16 && descriptor_value.size <= 1_048_576);
@@ -467,14 +491,19 @@ mod request_probe {
         assert!(!task.task.is_null() && !task.context.is_null());
         // Keep the create caller's reference until the bounded wait ends, so
         // cancellation on timeout never uses an already-deallocated task.
-        let _owner = TaskOwner(task.task);
+        TaskOwner(task.task)
+    }
+
+    #[cfg(not(uikit_host))]
+    pub fn run(object: *mut c_void) {
         let deadline = Instant::now() + Duration::from_secs(20);
+        let owner = start(object);
         while RESULT.load(Ordering::Acquire) == 0 && Instant::now() < deadline {
             unsafe { CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.1, 1) };
         }
         let result = RESULT.load(Ordering::Acquire);
         if result == 0 {
-            unsafe { swift_task_cancel(task.task) };
+            owner.cancel();
             let cancel_deadline = Instant::now() + Duration::from_secs(5);
             while RESULT.load(Ordering::Acquire) == 0 && Instant::now() < cancel_deadline {
                 unsafe { CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.1, 1) };
@@ -491,5 +520,212 @@ mod request_probe {
         );
         println!("authorization_status_verified=false; monitoring=false; shielding=false");
         unsafe { CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.1, 0) };
+    }
+
+    #[cfg(uikit_host)]
+    pub(super) fn wait_from_worker(owner: TaskOwner, started: Instant) -> bool {
+        let deadline = started + Duration::from_secs(20);
+        while RESULT.load(Ordering::Acquire) == 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let result = RESULT.load(Ordering::Acquire);
+        if result == 0 {
+            owner.cancel();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while RESULT.load(Ordering::Acquire) == 0 && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            eprintln!("UIKit authorization wait timed out; cancellation requested");
+            return false;
+        }
+        println!(
+            "Public individual authorization continuation observed; error_present={}",
+            result == 2
+        );
+        println!("authorization_status_verified=false; monitoring=false; shielding=false");
+        true
+    }
+}
+
+#[cfg(all(runtime_probe, uikit_host, auth_request))]
+mod native_host {
+    use super::request_probe::objc_msgSend;
+    use std::ffi::{CString, c_char, c_void};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
+    type Id = *mut c_void;
+    type Sel = *const c_void;
+    #[derive(Clone, Copy)]
+    #[repr(C)]
+    struct Rect {
+        x: f64,
+        y: f64,
+        width: f64,
+        height: f64,
+    }
+    static ACTIVE: AtomicBool = AtomicBool::new(false);
+    static WINDOW: AtomicUsize = AtomicUsize::new(0);
+    static DELEGATE: AtomicUsize = AtomicUsize::new(0);
+    #[link(name = "UIKit", kind = "framework")]
+    unsafe extern "C" {
+        fn UIApplicationMain(argc: i32, argv: *mut *mut c_char, principal: Id, delegate: Id)
+        -> i32;
+    }
+    #[link(name = "objc")]
+    unsafe extern "C" {
+        fn objc_getClass(name: *const c_char) -> Id;
+        fn objc_getProtocol(name: *const c_char) -> Id;
+        fn objc_allocateClassPair(superclass: Id, name: *const c_char, extra: usize) -> Id;
+        fn objc_registerClassPair(class: Id);
+        fn class_addProtocol(class: Id, protocol: Id) -> bool;
+        fn class_addMethod(
+            class: Id,
+            selector: Sel,
+            implementation: *const c_void,
+            types: *const c_char,
+        ) -> bool;
+        fn sel_registerName(name: *const c_char) -> Sel;
+        fn objc_retain(object: Id) -> Id;
+    }
+    #[link(name = "System")]
+    unsafe extern "C" {
+        fn dispatch_get_main_queue() -> Id;
+        fn dispatch_async_f(
+            queue: Id,
+            context: *mut c_void,
+            function: unsafe extern "C" fn(*mut c_void),
+        );
+    }
+    unsafe fn send0(object: Id, name: &std::ffi::CStr) -> Id {
+        let f: unsafe extern "C" fn(Id, Sel) -> Id =
+            unsafe { std::mem::transmute(objc_msgSend as unsafe extern "C" fn(Id, Sel) -> usize) };
+        unsafe { f(object, sel_registerName(name.as_ptr())) }
+    }
+    unsafe fn send_id(object: Id, name: &std::ffi::CStr, value: Id) {
+        let f: unsafe extern "C" fn(Id, Sel, Id) =
+            unsafe { std::mem::transmute(objc_msgSend as unsafe extern "C" fn(Id, Sel) -> usize) };
+        unsafe { f(object, sel_registerName(name.as_ptr()), value) };
+    }
+    unsafe fn send_void(object: Id, name: &std::ffi::CStr) {
+        let f: unsafe extern "C" fn(Id, Sel) =
+            unsafe { std::mem::transmute(objc_msgSend as unsafe extern "C" fn(Id, Sel) -> usize) };
+        unsafe { f(object, sel_registerName(name.as_ptr())) };
+    }
+    unsafe extern "C" fn window(_: Id, _: Sel) -> Id {
+        WINDOW.load(Ordering::Acquire) as Id
+    }
+    unsafe extern "C" fn launched(delegate: Id, _: Sel, _: Id, _: Id) -> bool {
+        assert!(!delegate.is_null());
+        DELEGATE.store(unsafe { objc_retain(delegate) }.addr(), Ordering::Release);
+        let screen = unsafe { send0(objc_getClass(c"UIScreen".as_ptr()), c"mainScreen") };
+        assert!(!screen.is_null());
+        let bounds: unsafe extern "C" fn(Id, Sel) -> Rect =
+            unsafe { std::mem::transmute(objc_msgSend as unsafe extern "C" fn(Id, Sel) -> usize) };
+        let rect = unsafe { bounds(screen, sel_registerName(c"bounds".as_ptr())) };
+        assert!(rect.width > 0.0 && rect.height > 0.0);
+        let allocated = unsafe { send0(objc_getClass(c"UIWindow".as_ptr()), c"alloc") };
+        let init: unsafe extern "C" fn(Id, Sel, Rect) -> Id =
+            unsafe { std::mem::transmute(objc_msgSend as unsafe extern "C" fn(Id, Sel) -> usize) };
+        let view_window = unsafe {
+            init(
+                allocated,
+                sel_registerName(c"initWithFrame:".as_ptr()),
+                rect,
+            )
+        };
+        assert!(!view_window.is_null());
+        WINDOW.store(view_window.addr(), Ordering::Release);
+        let controller = unsafe {
+            send0(
+                send0(objc_getClass(c"UIViewController".as_ptr()), c"alloc"),
+                c"init",
+            )
+        };
+        assert!(!controller.is_null());
+        unsafe {
+            send_id(view_window, c"setRootViewController:", controller);
+            send_void(view_window, c"makeKeyAndVisible");
+        }
+        // Keep the allocation references for this bounded inspection process.
+        println!("Rust UIKit launch callback observed; blank_window=true");
+        true
+    }
+    unsafe extern "C" fn exit_on_main(context: *mut c_void) {
+        std::process::exit(context.addr() as i32);
+    }
+    unsafe extern "C" fn active(_: Id, _: Sel, _: Id) {
+        if ACTIVE.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let started = Instant::now();
+        println!("Rust UIKit active callback observed");
+        let object = super::inspect_singleton();
+        let owner = super::request_probe::start(object);
+        // Return to UIKit immediately; its main executor must remain available
+        // to run the Swift task. The worker only polls an atomic result and
+        // cancels a retained task; it never accesses UIKit or task allocations.
+        std::thread::spawn(move || {
+            let success = super::request_probe::wait_from_worker(owner, started);
+            let code = if success { 0 } else { 1 };
+            unsafe {
+                dispatch_async_f(
+                    dispatch_get_main_queue(),
+                    std::ptr::without_provenance_mut(code),
+                    exit_on_main,
+                )
+            };
+        });
+    }
+    pub(super) fn run() {
+        let name = c"PhoneControl1614ProbeDelegate";
+        unsafe {
+            let class =
+                objc_allocateClassPair(objc_getClass(c"NSObject".as_ptr()), name.as_ptr(), 0);
+            assert!(!class.is_null());
+            assert!(class_addProtocol(
+                class,
+                objc_getProtocol(c"UIApplicationDelegate".as_ptr())
+            ));
+            assert!(class_addMethod(
+                class,
+                sel_registerName(c"application:didFinishLaunchingWithOptions:".as_ptr()),
+                launched as *const c_void,
+                c"B@:@@".as_ptr()
+            ));
+            assert!(class_addMethod(
+                class,
+                sel_registerName(c"applicationDidBecomeActive:".as_ptr()),
+                active as *const c_void,
+                c"v@:@".as_ptr()
+            ));
+            assert!(class_addMethod(
+                class,
+                sel_registerName(c"window".as_ptr()),
+                window as *const c_void,
+                c"@@:".as_ptr()
+            ));
+            objc_registerClassPair(class);
+            let string_class = objc_getClass(c"NSString".as_ptr());
+            let init_string: unsafe extern "C" fn(Id, Sel, *const c_char) -> Id =
+                std::mem::transmute(objc_msgSend as unsafe extern "C" fn(Id, Sel) -> usize);
+            let delegate_name = init_string(
+                send0(string_class, c"alloc"),
+                sel_registerName(c"initWithUTF8String:".as_ptr()),
+                name.as_ptr(),
+            );
+            assert!(!delegate_name.is_null());
+            std::thread::spawn(|| {
+                std::thread::sleep(Duration::from_secs(30));
+                if !ACTIVE.load(Ordering::Acquire) {
+                    eprintln!("UIKit active callback timed out");
+                    std::process::exit(1);
+                }
+            });
+            let executable = CString::new("authorization-center-probe").unwrap();
+            let mut argv = [executable.as_ptr().cast_mut(), std::ptr::null_mut()];
+            let result =
+                UIApplicationMain(1, argv.as_mut_ptr(), std::ptr::null_mut(), delegate_name);
+            panic!("UIApplicationMain unexpectedly returned {result}");
+        }
     }
 }
