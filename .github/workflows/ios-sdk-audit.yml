@@ -47,7 +47,7 @@ jobs:
           if grep -R -n -A 12 -B 3 'FamilyControlsMember' "$FRAMEWORK/Headers" > "$OUT/family-controls-member-header.txt"; then
             printf 'member_definition_source=Headers\n' > "$OUT/member-definition-scope.txt"
           else
-            grep -R -n -A 12 -B 3 'FamilyControlsMember' "$FRAMEWORK/Modules" > "$OUT/family-controls-member-header.txt"
+            grep -R --include='*.swiftinterface' -n -A 12 -B 3 'FamilyControlsMember' "$FRAMEWORK/Modules" > "$OUT/family-controls-member-header.txt"
             printf 'member_definition_source=Modules\n' > "$OUT/member-definition-scope.txt"
           fi
           test -s "$OUT/family-controls-member-header.txt"
