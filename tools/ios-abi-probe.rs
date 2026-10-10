@@ -721,9 +721,32 @@ mod ui_authorization_test {
                 return;
             }
             action(request_button.0, c"tap");
-            let alerts = retained_object(app.0, c"alerts");
+            // Family Controls presents a system remote alert. The inspected
+            // app's AX tree contains only its request button (run 38075160045).
+            // Observe SpringBoard through public XCTest; never launch it.
+            let system_identifier = string(c"com.apple.springboard");
+            let system_app = Owned(object_arg(
+                object(application_class, c"alloc"),
+                c"initWithBundleIdentifier:",
+                system_identifier.0,
+            ));
+            if system_app.0.is_null() {
+                fail(test, c"Cannot construct system UI observer");
+                return;
+            }
+            let alerts = retained_object(system_app.0, c"alerts");
             let alert = retained_object(alerts.0, c"firstMatch");
             if !wait_for(alert.0, 30.0) {
+                let description = retained_object(system_app.0, c"debugDescription");
+                if !description.0.is_null() {
+                    let text = object(description.0, c"UTF8String").cast::<c_char>();
+                    if !text.is_null() {
+                        println!(
+                            "System UI observation: {}",
+                            std::ffi::CStr::from_ptr(text).to_string_lossy()
+                        );
+                    }
+                }
                 fail(test, c"Screen Time consent alert not observed");
                 return;
             }
