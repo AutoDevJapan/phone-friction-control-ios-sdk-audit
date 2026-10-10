@@ -589,7 +589,10 @@ mod native_host {
     }
     #[link(name = "System")]
     unsafe extern "C" {
-        fn dispatch_get_main_queue() -> Id;
+        // dispatch/queue.h exposes dispatch_get_main_queue as a C inline
+        // function returning DISPATCH_GLOBAL_OBJECT(..., _dispatch_main_q).
+        // Only take the address of this opaque global; never inspect its layout.
+        static _dispatch_main_q: [u8; 0];
         fn dispatch_async_f(
             queue: Id,
             context: *mut c_void,
@@ -669,7 +672,7 @@ mod native_host {
             let code = if success { 0 } else { 1 };
             unsafe {
                 dispatch_async_f(
-                    dispatch_get_main_queue(),
+                    (&raw const _dispatch_main_q).cast_mut().cast(),
                     std::ptr::without_provenance_mut(code),
                     exit_on_main,
                 )
