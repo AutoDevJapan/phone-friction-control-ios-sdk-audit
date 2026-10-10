@@ -253,6 +253,13 @@ jobs:
             codesign --sign - "$PROBE_APP"
           fi
           codesign --display --entitlements :- "$PROBE_APP" > "$OUT/signed-entitlements.plist" 2> "$OUT/signature-diagnostics.txt"
+          printf 'PROBE_APP=%s\nXCODE_ROOT=%s\n' "$PROBE_APP" "${XCODE_ROOT:-}" >> "$GITHUB_ENV"
+      - name: Execute the isolated Simulator inspection
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="$RUNNER_TEMP/ios-sdk-audit"
+          VERSION=$(xcrun --sdk iphonesimulator --show-sdk-version)
           RUNTIME=$(xcrun simctl list runtimes -j | jq -er --arg version "$VERSION" '[.runtimes[] | select(.isAvailable and .version == $version and (.identifier | contains("iOS"))) | .identifier] | if length == 1 then .[0] else error("SDK-matching Simulator runtime missing or ambiguous") end')
           SIM_ID=$(xcrun simctl create phone-control1614-abi com.apple.CoreSimulator.SimDeviceType.iPhone-15 "$RUNTIME")
           trap 'xcrun simctl shutdown "$SIM_ID" || true; xcrun simctl delete "$SIM_ID" || true' EXIT
