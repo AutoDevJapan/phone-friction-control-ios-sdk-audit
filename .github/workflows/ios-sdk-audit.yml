@@ -152,7 +152,7 @@ jobs:
           PROBE_APP="$OUT/authorization-center-probe.app"
           mkdir "$PROBE_APP"
           if [ '${{ inputs.xcode_signed_host }}' != true ]; then
-            rustc tools/ios-abi-probe.rs --crate-name ios_runtime_probe --edition 2024 --cfg runtime_probe "${REQUEST_ARGS[@]}" --target aarch64-apple-ios-sim --emit "llvm-ir=$OUT/ios_runtime_probe.ll,asm=$OUT/ios_runtime_probe.s,link" -L "native=$SDK/usr/lib/swift" -C link-arg=-Wl,-rpath,/usr/lib/swift -o "$PROBE_APP/authorization-center-probe"
+            rustc tools/ios-abi-probe.rs --crate-name ios_runtime_probe --edition 2024 --cfg runtime_probe ${REQUEST_ARGS[@]+"${REQUEST_ARGS[@]}"} --target aarch64-apple-ios-sim --emit "llvm-ir=$OUT/ios_runtime_probe.ll,asm=$OUT/ios_runtime_probe.s,link" -L "native=$SDK/usr/lib/swift" -C link-arg=-Wl,-rpath,/usr/lib/swift -o "$PROBE_APP/authorization-center-probe"
           fi
           cat > "$PROBE_APP/Info.plist" <<'PLIST'
           <?xml version="1.0" encoding="UTF-8"?>
@@ -181,7 +181,7 @@ jobs:
             # An object input is required: Xcode deliberately skips the link
             # when a target has libraries but no compiled/linked object files.
             # Emit our Rust object and its dependency archive in one invocation.
-            rustc tools/ios-abi-probe.rs --crate-name ios_xcode_probe --crate-type staticlib --edition 2024 --cfg runtime_probe --cfg auth_request --cfg uikit_host --cfg xcode_host "${SELECTION_ARGS[@]}" --target aarch64-apple-ios-sim --emit="obj=$XCODE_ROOT/probe.o,link" --print native-static-libs -o "$XCODE_ROOT/libprobe.a" 2> "$OUT/rust-static-link.txt"
+            rustc tools/ios-abi-probe.rs --crate-name ios_xcode_probe --crate-type staticlib --edition 2024 --cfg runtime_probe --cfg auth_request --cfg uikit_host --cfg xcode_host ${SELECTION_ARGS[@]+"${SELECTION_ARGS[@]}"} --target aarch64-apple-ios-sim --emit="obj=$XCODE_ROOT/probe.o,link" --print native-static-libs -o "$XCODE_ROOT/libprobe.a" 2> "$OUT/rust-static-link.txt"
             test "$(grep -c '^note: native-static-libs: ' "$OUT/rust-static-link.txt")" = 1
             NATIVE_LIBS=$(sed -n 's/^note: native-static-libs: //p' "$OUT/rust-static-link.txt")
             test -n "$NATIVE_LIBS"
