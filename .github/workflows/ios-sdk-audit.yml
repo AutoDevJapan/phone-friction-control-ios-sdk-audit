@@ -14,6 +14,10 @@ on:
         description: Link the Rust static library in an Xcode Simulator app target with Family Controls
         type: boolean
         default: false
+      selection_layout_probe:
+        description: Inspect public Selection and Binding layout and bounded entry bytes without building values
+        type: boolean
+        default: false
 permissions:
   contents: read
 jobs:
@@ -32,6 +36,12 @@ jobs:
           set -euo pipefail
           OUT="$RUNNER_TEMP/ios-sdk-audit"
           mkdir "$OUT"
+          if [ '${{ inputs.selection_layout_probe }}' = true ]; then
+            test '${{ inputs.native_uikit_host }}' = true
+            test '${{ inputs.authorization_probe }}' = true
+            test '${{ inputs.xcode_signed_host }}' = true
+            printf 'selection_layout_verified=false\nselection_values_constructed=0\nselection_values_read=0\ngrant_verified=false\nmonitoring_verified=false\nshielding_verified=false\n' > "$OUT/selection-layout-scope.txt"
+          fi
           xcodebuild -version > "$OUT/versions.txt"
           xcrun swiftc --version >> "$OUT/versions.txt"
           rustc --version --verbose >> "$OUT/versions.txt"
@@ -111,6 +121,34 @@ jobs:
             test '${{ inputs.authorization_probe }}' = true
             REQUEST_ARGS+=(--cfg uikit_host)
           fi
+          SELECTION_ARGS=()
+          if [ '${{ inputs.selection_layout_probe }}' = true ]; then
+            # Require the exact public type and constructor signatures, not a
+            # substring match that could accept an overload or private symbol.
+            SELECTION_METADATA_SYMBOL=$(jq -er '[.[] | select(.name == "FamilyActivitySelection" and .declKind == "Struct" and .genericSig == null and .usr == "s:14FamilyControls0A17ActivitySelectionV") | .usr | sub("^s:"; "\u0024s") + "Ma"] | if length == 1 then .[0] else error("expected one Selection metadata accessor") end' "$OUT/FamilyControls-selected-declarations.json")
+            SELECTION_INIT_SYMBOL=$(jq -er '[.[] | select(.name == "FamilyActivitySelection") | .members[] | select(.kind == "Constructor" and .printedName == "init()" and .moduleName == "FamilyControls" and .throwing != true and (.children | length) == 1 and .children[0].usr == "s:14FamilyControls0A17ActivitySelectionV" and .mangledName == "\u0024s14FamilyControls0A17ActivitySelectionVACycfc") | .mangledName] | if length == 1 then .[0] else error("expected one public Selection init()") end' "$OUT/FamilyControls-selected-declarations.json")
+            BINDING_METADATA_SYMBOL=$(jq -er '[.[] | select(.name == "Binding" and .declKind == "Struct" and .genericSig == "<Value>" and .usr == "s:7SwiftUI7BindingV") | .usr | sub("^s:"; "\u0024s") + "Ma"] | if length == 1 then .[0] else error("expected one Binding metadata accessor") end' "$OUT/SwiftUI-selected-declarations.json")
+            BINDING_INIT_SYMBOL=$(jq -er '[.[] | select(.name == "Binding") | .members[] | select(.kind == "Constructor" and .printedName == "init(get:set:)" and .moduleName == "SwiftUI" and .genericSig == "<Value>" and .throwing != true and (.children | map(.printedName)) == ["SwiftUI.Binding<Value>", "() -> Value", "(Value) -> Swift.Void"] and .mangledName == "\u0024s7SwiftUI7BindingV3get3setACyxGxyc_yxctcfc") | .mangledName] | if length == 1 then .[0] else error("expected one public Binding init without Transaction") end' "$OUT/SwiftUI-selected-declarations.json")
+            export SELECTION_METADATA_SYMBOL SELECTION_INIT_SYMBOL BINDING_METADATA_SYMBOL BINDING_INIT_SYMBOL
+            # Candidate exports stay in scratch. Publish only the seven exact
+            # entries needed here; never publish complete tbd/SDK dumps.
+            grep -oE '\$s14FamilyControls0A17ActivitySelectionV[[:alnum:]_]+' "$SDK/System/Library/Frameworks/FamilyControls.framework/FamilyControls.tbd" | sort -u > "$RUNNER_TEMP/selection-candidate-exports.txt"
+            grep -oE '\$s7SwiftUI7BindingV[[:alnum:]_]+' "$SDK/System/Library/Frameworks/SwiftUI.framework/SwiftUI.tbd" | sort -u > "$RUNNER_TEMP/binding-candidate-exports.txt"
+            grep -oE '_swift_(allocBox|projectBox|deallocBox)[[:alnum:]_]*' "$SDK/usr/lib/swift/libswiftCore.tbd" | sort -u > "$RUNNER_TEMP/box-candidate-exports.txt"
+            {
+              grep -Fx "$SELECTION_METADATA_SYMBOL" "$RUNNER_TEMP/selection-candidate-exports.txt"
+              grep -Fx "$SELECTION_INIT_SYMBOL" "$RUNNER_TEMP/selection-candidate-exports.txt"
+              grep -Fx "$BINDING_METADATA_SYMBOL" "$RUNNER_TEMP/binding-candidate-exports.txt"
+              grep -Fx "$BINDING_INIT_SYMBOL" "$RUNNER_TEMP/binding-candidate-exports.txt"
+              grep -Fx '_swift_allocBox' "$RUNNER_TEMP/box-candidate-exports.txt"
+              grep -Fx '_swift_projectBox' "$RUNNER_TEMP/box-candidate-exports.txt"
+              grep -Fx '_swift_deallocBox' "$RUNNER_TEMP/box-candidate-exports.txt"
+            } > "$OUT/selection-public-exports.txt"
+            test "$(wc -l < "$OUT/selection-public-exports.txt" | tr -d ' ')" = 7
+            # Verify the Darwin special dlsym handle against this SDK as well.
+            grep -Eq '^#define[[:space:]]+RTLD_DEFAULT[[:space:]]+\(\(void[[:space:]]*\*\)[[:space:]]*-2\)' "$SDK/usr/include/dlfcn.h"
+            SELECTION_ARGS=(--cfg selection_layout_probe)
+          fi
           PROBE_APP="$OUT/authorization-center-probe.app"
           mkdir "$PROBE_APP"
           if [ '${{ inputs.xcode_signed_host }}' != true ]; then
@@ -143,7 +181,7 @@ jobs:
             # An object input is required: Xcode deliberately skips the link
             # when a target has libraries but no compiled/linked object files.
             # Emit our Rust object and its dependency archive in one invocation.
-            rustc tools/ios-abi-probe.rs --crate-name ios_xcode_probe --crate-type staticlib --edition 2024 --cfg runtime_probe --cfg auth_request --cfg uikit_host --cfg xcode_host --target aarch64-apple-ios-sim --emit="obj=$XCODE_ROOT/probe.o,link" --print native-static-libs -o "$XCODE_ROOT/libprobe.a" 2> "$OUT/rust-static-link.txt"
+            rustc tools/ios-abi-probe.rs --crate-name ios_xcode_probe --crate-type staticlib --edition 2024 --cfg runtime_probe --cfg auth_request --cfg uikit_host --cfg xcode_host "${SELECTION_ARGS[@]}" --target aarch64-apple-ios-sim --emit="obj=$XCODE_ROOT/probe.o,link" --print native-static-libs -o "$XCODE_ROOT/libprobe.a" 2> "$OUT/rust-static-link.txt"
             test "$(grep -c '^note: native-static-libs: ' "$OUT/rust-static-link.txt")" = 1
             NATIVE_LIBS=$(sed -n 's/^note: native-static-libs: //p' "$OUT/rust-static-link.txt")
             test -n "$NATIVE_LIBS"
@@ -204,7 +242,27 @@ jobs:
           xcrun simctl boot "$SIM_ID"
           xcrun simctl bootstatus "$SIM_ID" -b
           xcrun simctl install "$SIM_ID" "$PROBE_APP"
-          xcrun simctl launch --console "$SIM_ID" com.autodevjapan.phonecontrol1614abiprobe > "$OUT/singleton-runtime.txt" 2>&1
+          if [ '${{ inputs.selection_layout_probe }}' = true ]; then
+            # Preserve partial selection diagnostics even when the process fails.
+            LAUNCH_STATUS=0
+            xcrun simctl launch --console "$SIM_ID" com.autodevjapan.phonecontrol1614abiprobe > "$OUT/singleton-runtime.txt" 2>&1 || LAUNCH_STATUS=$?
+            grep -E '^Selection (layout:|box:|entry bytes:|layout inspection complete;)' "$OUT/singleton-runtime.txt" > "$OUT/selection-layout.txt" || true
+            test "$LAUNCH_STATUS" = 0
+            grep -F 'Selection box: buffer_aligned=true; project_matches=true; uninitialized_deallocated=true' "$OUT/selection-layout.txt"
+            grep -F 'Selection layout inspection complete; selection_values_constructed=0; selection_values_read=0; initializer_calls=0; closure_calls=0; value_witness_calls=0;' "$OUT/selection-layout.txt"
+            test "$(grep -c '^Selection layout:' "$OUT/selection-layout.txt")" = 2
+            test "$(grep -c '^Selection entry bytes:' "$OUT/selection-layout.txt")" = 6
+            printf 'selection_layout_verified=true\nmetadata_complete=true\nmetadata_kind_struct=true\nbox_buffer_aligned=true\nbox_project_matches=true\nbox_uninitialized_deallocated=true\nentry_prefix_max_bytes=128\nentry_reads_page_bounded=true\nentry_registers_verified=false\nselection_values_constructed=0\nselection_values_read=0\ninitializer_calls=0\nclosure_calls=0\nvalue_witness_calls=0\ngrant_verified=false\nmonitoring_verified=false\nshielding_verified=false\n' > "$OUT/selection-layout-scope.txt"
+            grep -F 'SDK singleton class: FamilyControls.AuthorizationCenter' "$OUT/singleton-runtime.txt"
+            grep -F 'Rust UIKit active callback observed' "$OUT/singleton-runtime.txt"
+            if grep -Fq 'Public individual authorization request starting;' "$OUT/singleton-runtime.txt"; then exit 1; fi
+            printf 'authorization_requested=false\n' >> "$OUT/selection-layout-scope.txt"
+            # This mode checks only layout/box evidence. The separate consent
+            # fixture checks the authorization continuation after a UI choice.
+            exit 0
+          else
+            xcrun simctl launch --console "$SIM_ID" com.autodevjapan.phonecontrol1614abiprobe > "$OUT/singleton-runtime.txt" 2>&1
+          fi
           grep -F 'SDK singleton class: FamilyControls.AuthorizationCenter' "$OUT/singleton-runtime.txt"
           UIKIT_ACTIVE=false
           if [ '${{ inputs.native_uikit_host }}' = true ]; then
@@ -222,9 +280,19 @@ jobs:
           fi
           printf 'simulator_process_executed=true\npublic_singleton_called=true\npublic_async_descriptor_read=true\nrust_async_task_entry_observed=true\nuikit_host_active=%s\nruntime_teardown_verified=false\nauthorization_requested=%s\nauthorization_status_verified=false\nmonitoring=false\nshielding=false\n' "$UIKIT_ACTIVE" "$REQUESTED" > "$OUT/singleton-runtime-scope.txt"
       - uses: actions/upload-artifact@v4
-        if: always()
+        if: always() && !inputs.selection_layout_probe
         with:
           name: ios-sdk-audit
           path: ${{ runner.temp }}/ios-sdk-audit
+          retention-days: 1
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always() && inputs.selection_layout_probe
+        with:
+          name: ios-selection-layout-audit
+          path: |
+            ${{ runner.temp }}/ios-sdk-audit/selection-layout.txt
+            ${{ runner.temp }}/ios-sdk-audit/selection-layout-scope.txt
+            ${{ runner.temp }}/ios-sdk-audit/selection-public-exports.txt
           retention-days: 1
           if-no-files-found: error

@@ -120,6 +120,213 @@ pub extern "C" fn main(_: i32, _: *mut *mut std::ffi::c_char) -> i32 {
 #[cfg(all(xcode_host, not(all(runtime_probe, uikit_host, auth_request))))]
 compile_error!("Xcode static library host requires the UIKit authorization mode");
 
+#[cfg(all(
+    selection_layout_probe,
+    not(all(runtime_probe, uikit_host, auth_request, xcode_host))
+))]
+compile_error!("selection layout inspection requires the Xcode UIKit authorization host");
+
+// Layout and entry-byte evidence only; no Selection or Binding value is built.
+#[cfg(selection_layout_probe)]
+mod selection_layout {
+    use super::MetadataResponse;
+    use std::ffi::{CString, c_char, c_void};
+
+    // Swift 5.10 ABI/ValueWitness.def (required witnesses), in declaration order:
+    // initializeBufferWithCopyOfBuffer, destroy, initializeWithCopy,
+    // assignWithCopy, initializeWithTake, assignWithTake,
+    // getEnumTagSinglePayload, storeEnumTagSinglePayload, then the data fields.
+    // ABI/ValueWitnessTable.h uses size_t, size_t, uint32_t, uint32_t.
+    #[repr(C)]
+    struct ValueWitnessTable {
+        functions: [*const c_void; 8],
+        size: usize,
+        stride: usize,
+        flags: u32,
+        _extra_inhabitant_count: u32,
+    }
+
+    // Runtime/HeapObject.h: Swift CC returns object then uninitialized buffer.
+    #[repr(C)]
+    struct BoxPair {
+        object: *mut c_void,
+        buffer: *mut c_void,
+    }
+    #[link(name = "FamilyControls", kind = "framework")]
+    #[link(name = "SwiftUI", kind = "framework")]
+    unsafe extern "C" {}
+    #[link(name = "swiftCore")]
+    unsafe extern "Swift" {
+        fn swift_allocBox(metadata: *const c_void) -> BoxPair;
+    }
+    #[link(name = "swiftCore")]
+    unsafe extern "C" {
+        // These declarations have no SWIFT_CC(swift) in HeapObject.h.
+        fn swift_projectBox(object: *mut c_void) -> *mut c_void;
+        fn swift_deallocBox(object: *mut c_void);
+    }
+    #[link(name = "System")]
+    unsafe extern "C" {
+        fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+        fn getpagesize() -> i32;
+    }
+    struct UninitializedBox(*mut c_void);
+    impl Drop for UninitializedBox {
+        fn drop(&mut self) {
+            // Never release an uninitialized value through its destroy witness.
+            unsafe { swift_deallocBox(self.0) };
+        }
+    }
+
+    fn resolve(symbol: &str) -> *const c_void {
+        let name = CString::new(symbol).unwrap();
+        // Darwin dyld include/dlfcn.h: RTLD_DEFAULT is ((void *) -2).
+        // Only the four exact SDK symbols checked by the workflow are looked up.
+        let pointer = unsafe {
+            dlsym(
+                std::ptr::without_provenance_mut(usize::MAX - 1),
+                name.as_ptr(),
+            )
+        };
+        assert!(
+            !pointer.is_null(),
+            "required public selection symbol is missing"
+        );
+        assert!(pointer.addr() % 4 == 0, "unaligned arm64 public entry");
+        pointer
+    }
+
+    fn page_remaining(pointer: *const c_void, page: usize) -> usize {
+        assert!(!pointer.is_null(), "null inspection address");
+        page - pointer.addr() % page
+    }
+    unsafe fn read<T: Copy>(pointer: *const T, page: usize) -> T {
+        assert!(
+            pointer.addr() % std::mem::align_of::<T>() == 0,
+            "unaligned ABI field"
+        );
+        assert!(
+            page_remaining(pointer.cast(), page) >= std::mem::size_of::<T>(),
+            "ABI field crosses page boundary"
+        );
+        unsafe { pointer.read() }
+    }
+    fn entry_bytes(label: &str, pointer: *const c_void, page: usize) {
+        // This is a bounded entry prefix, not a claim about argument registers,
+        // ownership, or a whole function. Do not follow branches or call it.
+        let count = 128.min(page_remaining(pointer, page));
+        let bytes = unsafe { std::slice::from_raw_parts(pointer.cast::<u8>(), count) };
+        print!("Selection entry bytes: {label}; length={count}; hex=");
+        for byte in bytes {
+            print!("{byte:02x}");
+        }
+        println!();
+    }
+
+    fn layout(label: &str, response: MetadataResponse, page: usize) -> usize {
+        assert!(response.state == 0, "incomplete selection metadata");
+        assert!(!response.value.is_null(), "null selection metadata");
+        let metadata = response.value.cast::<usize>();
+        // Swift 5.10 ABI/MetadataKind.def: Struct = MetadataKindIsNonHeap,
+        // ABI/MetadataValues.h: MetadataKindIsNonHeap = 0x200.
+        assert!(
+            unsafe { read(metadata, page) } == 0x200,
+            "expected struct metadata"
+        );
+        // ABI/Metadata.h: FullMetadata inherits HeaderType before Metadata;
+        // HeaderType's final word is ValueWitnesses. The layout-string prefix
+        // is before that word, so VWT remains at canonical metadata minus one.
+        let witnesses = unsafe {
+            read(
+                metadata.cast::<*const ValueWitnessTable>().wrapping_sub(1),
+                page,
+            )
+        };
+        assert!(!witnesses.is_null(), "null selection value witnesses");
+        let size = unsafe { read(&raw const (*witnesses).size, page) };
+        let stride = unsafe { read(&raw const (*witnesses).stride, page) };
+        let flags = unsafe { read(&raw const (*witnesses).flags, page) };
+        // MetadataValues.h: AlignmentMask=0xff, Incomplete=0x00400000.
+        assert!(flags & 0x0040_0000 == 0, "incomplete value layout");
+        let alignment = (flags as usize & 0xff) + 1;
+        assert!(alignment.is_power_of_two(), "invalid value alignment");
+        let expected_stride = size.checked_add(alignment - 1).unwrap() & !(alignment - 1);
+        assert!(stride == expected_stride.max(1), "invalid value stride");
+        println!(
+            "Selection layout: {label}; size={size}; stride={stride}; alignment={alignment}; metadata_complete=true; kind_struct=true"
+        );
+        // Slots 2 and 3 are initializeWithCopy and assignWithCopy. Read only
+        // their addresses; no VWT function is called and no value is accessed.
+        for (slot, name) in [(2, "initializeWithCopy"), (3, "assignWithCopy")] {
+            let entry = unsafe {
+                read(
+                    (&raw const (*witnesses).functions)
+                        .cast::<*const c_void>()
+                        .wrapping_add(slot),
+                    page,
+                )
+            };
+            assert!(entry.addr() % 4 == 0, "unaligned arm64 value witness entry");
+            entry_bytes(&format!("{label}.{name}"), entry, page);
+        }
+        alignment
+    }
+
+    pub(super) fn inspect() {
+        let page = unsafe { getpagesize() };
+        assert!(page > 0, "invalid Darwin page size");
+        let page = page as usize;
+        // ABI/Metadata.h MetadataAccessFunction::operator(): Fn0 and Fn1
+        // both use Swift CC, with request before the direct generic argument.
+        // SDK Binding's <Value> has no conformance requirements.
+        let selection_accessor: unsafe extern "Swift" fn(usize) -> MetadataResponse =
+            unsafe { std::mem::transmute(resolve(env!("SELECTION_METADATA_SYMBOL"))) };
+        let binding_accessor: unsafe extern "Swift" fn(usize, *const c_void) -> MetadataResponse =
+            unsafe { std::mem::transmute(resolve(env!("BINDING_METADATA_SYMBOL"))) };
+        // MetadataRequest(0) requests complete metadata synchronously.
+        let selection = unsafe { selection_accessor(0) };
+        let selection_pointer = selection.value;
+        let alignment = layout("FamilyActivitySelection", selection, page);
+        let binding = unsafe { binding_accessor(0, selection_pointer) };
+        layout("Binding<FamilyActivitySelection>", binding, page);
+
+        let pair = unsafe { swift_allocBox(selection_pointer) };
+        assert!(!pair.object.is_null(), "null selection box object");
+        let owner = UninitializedBox(pair.object);
+        assert!(
+            pair.object.addr() % std::mem::align_of::<*mut c_void>() == 0,
+            "unaligned box object"
+        );
+        assert!(!pair.buffer.is_null(), "null selection box buffer");
+        assert!(
+            pair.buffer.addr() % alignment == 0,
+            "unaligned selection box buffer"
+        );
+        let projected = unsafe { swift_projectBox(owner.0) };
+        assert!(
+            !projected.is_null() && projected == pair.buffer,
+            "box projection mismatch"
+        );
+        drop(owner);
+        println!(
+            "Selection box: buffer_aligned=true; project_matches=true; uninitialized_deallocated=true"
+        );
+        entry_bytes(
+            "FamilyActivitySelection.init()",
+            resolve(env!("SELECTION_INIT_SYMBOL")),
+            page,
+        );
+        entry_bytes(
+            "Binding.init(get:set:) without Transaction",
+            resolve(env!("BINDING_INIT_SYMBOL")),
+            page,
+        );
+        println!(
+            "Selection layout inspection complete; selection_values_constructed=0; selection_values_read=0; initializer_calls=0; closure_calls=0; value_witness_calls=0; authorization_status_verified=false; monitoring=false; shielding=false"
+        );
+    }
+}
+
 #[cfg(runtime_probe)]
 #[cfg_attr(uikit_host, allow(dead_code))]
 mod async_inspection {
@@ -247,6 +454,7 @@ mod async_inspection {
 // Prepared separately while the descriptor inspection runs. Merge into the
 // existing two-file audit only after the real SDK descriptor is confirmed.
 #[cfg(all(runtime_probe, auth_request))]
+#[cfg_attr(selection_layout_probe, allow(dead_code))]
 mod request_probe {
     use super::async_inspection::swift_task_create_common;
     use std::ffi::c_void;
@@ -564,7 +772,9 @@ mod native_host {
     use super::request_probe::objc_msgSend;
     use std::ffi::{CString, c_char, c_void};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
+    #[cfg(not(selection_layout_probe))]
+    use std::time::Instant;
     type Id = *mut c_void;
     type Sel = *const c_void;
     #[derive(Clone, Copy)]
@@ -672,24 +882,42 @@ mod native_host {
         if ACTIVE.swap(true, Ordering::AcqRel) {
             return;
         }
+        #[cfg(not(selection_layout_probe))]
         let started = Instant::now();
         println!("Rust UIKit active callback observed");
         let object = super::inspect_singleton();
-        let owner = super::request_probe::start(object);
-        // Return to UIKit immediately; its main executor must remain available
-        // to run the Swift task. The worker only polls an atomic result and
-        // cancels a retained task; it never accesses UIKit or task allocations.
-        std::thread::spawn(move || {
-            let success = super::request_probe::wait_from_worker(owner, started);
-            let code = if success { 0 } else { 1 };
+        #[cfg(selection_layout_probe)]
+        {
+            // Keep the getter's allocation reference for this bounded process,
+            // as with its window/controller. This mode starts no Swift task.
+            let _ = object;
+            super::selection_layout::inspect();
             unsafe {
                 dispatch_async_f(
                     (&raw const _dispatch_main_q).cast_mut().cast(),
-                    std::ptr::without_provenance_mut(code),
+                    std::ptr::null_mut(),
                     exit_on_main,
                 )
             };
-        });
+        }
+        #[cfg(not(selection_layout_probe))]
+        {
+            let owner = super::request_probe::start(object);
+            // Return to UIKit immediately; its main executor must remain available
+            // to run the Swift task. The worker only polls an atomic result and
+            // cancels a retained task; it never accesses UIKit or task allocations.
+            std::thread::spawn(move || {
+                let success = super::request_probe::wait_from_worker(owner, started);
+                let code = if success { 0 } else { 1 };
+                unsafe {
+                    dispatch_async_f(
+                        (&raw const _dispatch_main_q).cast_mut().cast(),
+                        std::ptr::without_provenance_mut(code),
+                        exit_on_main,
+                    )
+                };
+            });
+        }
     }
     pub(super) fn run() {
         let name = c"PhoneControl1614ProbeDelegate";
