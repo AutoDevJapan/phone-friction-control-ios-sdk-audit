@@ -58,7 +58,7 @@ jobs:
           test -s "$OUT/family-controls-member-header.txt"
           for TARGET in aarch64-apple-ios aarch64-apple-ios-sim; do
             mkdir "$OUT/$TARGET"
-            rustc tools/ios-abi-probe.rs --crate-name ios_abi_probe --crate-type lib --target "$TARGET" --emit llvm-ir,asm,obj --out-dir "$OUT/$TARGET"
+            rustc tools/ios-abi-probe.rs --crate-name ios_abi_probe --edition 2024 --crate-type lib --target "$TARGET" --emit llvm-ir,asm,obj --out-dir "$OUT/$TARGET"
             grep -q 'call swiftcc void @abi_probe_external' "$OUT/$TARGET/ios_abi_probe.ll"
             xcrun nm "$OUT/$TARGET/ios_abi_probe.o" > "$OUT/$TARGET/symbols.txt"
             grep 'U _abi_probe_external' "$OUT/$TARGET/symbols.txt"
@@ -81,6 +81,7 @@ jobs:
           grep -Fx "$AUTH_ASYNC_SYMBOL" "$OUT/authorization-center-exports.txt"
           REQUEST_ARGS=()
           if [ '${{ inputs.authorization_probe }}' = true ]; then
+            grep -F '_swift_stdlib_bridgeErrorToNSError' "$SDK/usr/lib/swift/libswiftCore.tbd"
             INTERFACE="$SDK/System/Library/Frameworks/FamilyControls.framework/Modules/FamilyControls.swiftmodule/arm64-apple-ios-simulator.swiftinterface"
             awk '/^@objc public enum FamilyControlsMember : Swift.Int,/ { found=1 } found { print } found && /^}/ { exit }' "$INTERFACE" > "$OUT/member-raw-value-definition.txt"
             grep -F '@objc public enum FamilyControlsMember : Swift.Int,' "$OUT/member-raw-value-definition.txt"
@@ -90,6 +91,7 @@ jobs:
             # implicit raw values start at zero and increase by one (Swift book).
             test "$(grep '^  case ' "$OUT/member-raw-value-definition.txt")" = "$(printf '  case child\n  case individual')"
             export AUTH_INDIVIDUAL_VALUE=1
+            awk '/^public enum FamilyControlsError / { found=1 } found { print } found && /^}/ { exit }' "$INTERFACE" > "$OUT/family-controls-error-definition.txt"
             REQUEST_ARGS=(--cfg auth_request)
           fi
           PROBE_APP="$OUT/authorization-center-probe.app"
