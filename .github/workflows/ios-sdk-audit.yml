@@ -33,6 +33,12 @@ jobs:
             xcrun swift-api-digester -dump-sdk -module "$MODULE" -sdk "$SDK" -target "$TARGET" -o "$RUNNER_TEMP/$MODULE.json"
             jq '[.. | objects | select(.name? | IN("AuthorizationCenter", "shared", "requestAuthorization", "FamilyActivityPicker", "FamilyActivitySelection", "DeviceActivityCenter", "startMonitoring", "DeviceActivityEvent", "DeviceActivityMonitor", "ManagedSettingsStore", "ShieldSettings", "applications")) | {kind, name, printedName, usr, mangledName}]' "$RUNNER_TEMP/$MODULE.json" > "$OUT/$MODULE-symbols.json"
             test "$(jq length "$OUT/$MODULE-symbols.json")" -gt 0
+            jq '[.. | objects | select(.kind? == "TypeDecl" and (.name? | IN("AuthorizationCenter", "FamilyActivityPicker", "FamilyActivitySelection", "DeviceActivityCenter", "DeviceActivityMonitor", "DeviceActivityEvent", "ManagedSettingsStore", "ShieldSettings"))) | {name, usr, declKind, genericSig, members: [.children[]? | select(.name? | IN("shared", "requestAuthorization", "authorizationStatus", "init", "startMonitoring", "intervalDidStart", "intervalDidEnd", "eventDidReachThreshold", "shield", "applications"))]}]' "$RUNNER_TEMP/$MODULE.json" > "$OUT/$MODULE-selected-declarations.json"
+            if [ "$MODULE" = FamilyControls ]; then
+              grep -oE '\$s14FamilyControls19AuthorizationCenterC[[:alnum:]_]+' "$FRAMEWORK/$MODULE.tbd" | sort -u > "$OUT/authorization-center-exports.txt"
+              test -s "$OUT/authorization-center-exports.txt"
+              xcrun swift-demangle --compact < "$OUT/authorization-center-exports.txt" > "$OUT/authorization-center-demangled.txt"
+            fi
           done
           for TARGET in aarch64-apple-ios aarch64-apple-ios-sim; do
             mkdir "$OUT/$TARGET"
