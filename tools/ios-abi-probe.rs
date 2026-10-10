@@ -3,6 +3,7 @@
 //! No authorization request is made by this inspection stage.
 #![cfg_attr(not(runtime_probe), no_std)]
 #![feature(abi_swift)]
+#![cfg_attr(xcode_host, no_main)]
 
 #[cfg(all(
     runtime_probe,
@@ -93,6 +94,7 @@ fn inspect_singleton() -> *mut std::ffi::c_void {
 }
 
 #[cfg(runtime_probe)]
+#[cfg(not(xcode_host))]
 fn main() {
     #[cfg(uikit_host)]
     native_host::run();
@@ -107,6 +109,16 @@ fn main() {
 
 #[cfg(all(uikit_host, not(auth_request)))]
 compile_error!("UIKit host inspection requires auth_request");
+
+#[cfg(all(runtime_probe, xcode_host, uikit_host, auth_request))]
+#[unsafe(no_mangle)]
+pub extern "C" fn main(_: i32, _: *mut *mut std::ffi::c_char) -> i32 {
+    native_host::run();
+    1
+}
+
+#[cfg(all(xcode_host, not(all(runtime_probe, uikit_host, auth_request))))]
+compile_error!("Xcode static library host requires the UIKit authorization mode");
 
 #[cfg(runtime_probe)]
 #[cfg_attr(uikit_host, allow(dead_code))]
