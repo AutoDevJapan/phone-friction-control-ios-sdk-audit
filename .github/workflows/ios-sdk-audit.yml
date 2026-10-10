@@ -6,6 +6,10 @@ on:
         description: Inspect public authorization status metadata and getter entry without requesting access or calling the getter
         type: boolean
         default: false
+      authorization_status_value_probe:
+        description: Read the app's public status and reflected enum case in the isolated request-free process
+        type: boolean
+        default: false
       authorization_probe:
         description: Call the public individual authorization API once in the isolated Simulator
         type: boolean
@@ -48,6 +52,9 @@ jobs:
           set -euo pipefail
           OUT="$RUNNER_TEMP/ios-sdk-audit"
           mkdir "$OUT"
+          if [ '${{ inputs.authorization_status_value_probe }}' = true ]; then
+            test '${{ inputs.authorization_status_entry_probe }}' = true
+          fi
           if [ '${{ inputs.authorization_status_entry_probe }}' = true ]; then
             test '${{ inputs.authorization_probe }}' = false
             test '${{ inputs.native_uikit_host }}' = false
@@ -161,6 +168,10 @@ jobs:
             grep -n -A 12 -B 3 'dli_fname' "$SDK/usr/include/dlfcn.h" > "$OUT/status-dladdr-declaration.txt"
             grep -n -A 18 -B 2 'public enum AuthorizationStatus :' "$SDK/System/Library/Frameworks/FamilyControls.framework/Modules/FamilyControls.swiftmodule/arm64-apple-ios-simulator.swiftinterface" > "$OUT/authorization-status-enum-definition.txt"
             REQUEST_ARGS=(--cfg authorization_status_entry_probe)
+            if [ '${{ inputs.authorization_status_value_probe }}' = true ]; then
+              grep -F '_swift_EnumCaseName' "$SDK/usr/lib/swift/libswiftCore.tbd" > "$OUT/status-reflection-export.txt"
+              REQUEST_ARGS+=(--cfg authorization_status_value_probe)
+            fi
           fi
           if [ '${{ inputs.authorization_probe }}' = true ]; then
             grep -F '_swift_stdlib_bridgeErrorToNSError' "$SDK/usr/lib/swift/libswiftCore.tbd"
@@ -315,9 +326,14 @@ jobs:
             test "$(grep -c '^Authorization status getter implementation:' "$OUT/authorization-status-entry.txt")" = 1
             test "$(grep -c '^Authorization status raw value getter entry:' "$OUT/authorization-status-entry.txt")" = 1
             grep -Fx 'Authorization status dispatch observed: same_image=true; slot_derived=true; implementation_calls=0; raw_value_getter_calls=0' "$OUT/authorization-status-entry.txt"
-            grep -Fx 'Authorization status entry inspection complete; status_getter_calls=0; enum_values_constructed=0; value_witness_calls=0; authorization_requests=0; grant_verified=false' "$OUT/authorization-status-entry.txt"
+            grep -Fx 'Authorization status entry inspection complete; phase=entry; status_getter_calls=0; enum_values_constructed=0; value_witness_calls=0; authorization_requests=0; grant_verified=false' "$OUT/authorization-status-entry.txt"
             if grep -Eq 'Public individual authorization request starting;|Rust async task entry observed;' "$OUT/singleton-runtime.txt"; then exit 1; fi
-            printf 'status_metadata_verified=true\nstatus_getter_called=false\nauthorization_requested=false\nauthorization_status_verified=false\ngrant_verified=false\nmonitoring=false\nshielding=false\n' > "$OUT/authorization-status-entry-scope.txt"
+            printf 'phase=entry\nstatus_metadata_verified=true\nstatus_getter_called=false\nauthorization_requested=false\nauthorization_status_verified=false\ngrant_verified=false\nmonitoring=false\nshielding=false\n' > "$OUT/authorization-status-entry-scope.txt"
+            if [ '${{ inputs.authorization_status_value_probe }}' = true ]; then
+              grep -E '^Authorization status value read: raw_value=[012]; label=(notDetermined|denied|approved); status_getter_calls=1; raw_value_getter_calls=1; enum_case_name_calls=1; status_value_verified=true; authorization_requests=0; grant_verified=false$' "$OUT/singleton-runtime.txt" > "$OUT/authorization-status-value.txt"
+              test "$(wc -l < "$OUT/authorization-status-value.txt" | tr -d ' ')" = 1
+              printf 'status_value_verified=true\npublic_status_getter_called=true\npublic_raw_value_getter_called=true\nstatus_case_name_observed=true\nauthorization_requested=false\ngrant_flow_verified=false\nmonitoring=false\nshielding=false\n' > "$OUT/authorization-status-value-scope.txt"
+            fi
             exit 0
           fi
           if [ '${{ inputs.ui_consent_test }}' = true ]; then

@@ -8,6 +8,11 @@
 #[cfg(all(authorization_status_entry_probe, not(runtime_probe)))]
 compile_error!("status entry inspection requires the isolated runtime probe");
 #[cfg(all(
+    authorization_status_value_probe,
+    not(authorization_status_entry_probe)
+))]
+compile_error!("status value reading requires the verified status entry mode");
+#[cfg(all(
     authorization_status_entry_probe,
     any(auth_request, uikit_host, xcode_host, ui_test_bundle)
 ))]
@@ -121,7 +126,11 @@ fn main() {
         let object = inspect_singleton();
         #[cfg(authorization_status_entry_probe)]
         {
-            authorization_status_entry::inspect(object);
+            let metadata = authorization_status_entry::inspect(object);
+            #[cfg(authorization_status_value_probe)]
+            authorization_status_entry::read_value(object, metadata);
+            #[cfg(not(authorization_status_value_probe))]
+            let _ = metadata;
         }
         #[cfg(not(authorization_status_entry_probe))]
         async_inspection::inspect();
@@ -186,7 +195,7 @@ mod authorization_status_entry {
         }
         println!();
     }
-    pub(super) fn inspect(object: *mut c_void) {
+    pub(super) fn inspect(object: *mut c_void) -> *const c_void {
         let page = unsafe { getpagesize() };
         assert!(page > 0, "invalid page size");
         let page = page as usize;
@@ -282,7 +291,116 @@ mod authorization_status_entry {
             "Authorization status dispatch observed: same_image=true; slot_derived=true; implementation_calls=0; raw_value_getter_calls=0"
         );
         println!(
-            "Authorization status entry inspection complete; status_getter_calls=0; enum_values_constructed=0; value_witness_calls=0; authorization_requests=0; grant_verified=false"
+            "Authorization status entry inspection complete; phase=entry; status_getter_calls=0; enum_values_constructed=0; value_witness_calls=0; authorization_requests=0; grant_verified=false"
+        );
+        response.value
+    }
+
+    // Actual entry2 evidence: status implementation saves x8 (indirect enum
+    // result); public rawValue getter is ldrb w0,[x20]; ret. Preserve C's x20.
+    #[cfg(authorization_status_value_probe)]
+    core::arch::global_asm!(
+        ".text",
+        ".p2align 2",
+        ".globl _rust_status_with_self",
+        "_rust_status_with_self:",
+        ".cfi_startproc",
+        "stp x20, x30, [sp, #-16]!",
+        ".cfi_def_cfa_offset 16",
+        ".cfi_offset 20, -16",
+        ".cfi_offset 30, -8",
+        "mov x20, x0",
+        "mov x8, x1",
+        "blr x2",
+        "ldp x20, x30, [sp], #16",
+        ".cfi_restore 20",
+        ".cfi_restore 30",
+        ".cfi_def_cfa_offset 0",
+        "ret",
+        ".cfi_endproc",
+        ".p2align 2",
+        ".globl _rust_status_raw_with_self",
+        "_rust_status_raw_with_self:",
+        ".cfi_startproc",
+        "stp x20, x30, [sp, #-16]!",
+        ".cfi_def_cfa_offset 16",
+        ".cfi_offset 20, -16",
+        ".cfi_offset 30, -8",
+        "mov x20, x0",
+        "blr x1",
+        "ldp x20, x30, [sp], #16",
+        ".cfi_restore 20",
+        ".cfi_restore 30",
+        ".cfi_def_cfa_offset 0",
+        "ret",
+        ".cfi_endproc",
+    );
+    #[cfg(authorization_status_value_probe)]
+    unsafe extern "C" {
+        fn rust_status_with_self(object: *mut c_void, result: *mut c_void, entry: *const c_void);
+        fn rust_status_raw_with_self(value: *mut c_void, entry: *const c_void) -> isize;
+    }
+    #[cfg(authorization_status_value_probe)]
+    #[link(name = "swiftCore")]
+    unsafe extern "Swift" {
+        // Swift5.10 ReflectionMirror.cpp: SWIFT_CC(swift), two explicit args,
+        // borrowed pointer to the enum case name. Exact SDK export is checked.
+        #[link_name = "swift_EnumCaseName"]
+        fn enum_case_name(value: *mut c_void, metadata: *const c_void) -> *const c_char;
+    }
+    #[cfg(authorization_status_value_probe)]
+    pub(super) fn read_value(object: *mut c_void, metadata: *const c_void) {
+        let page = unsafe { getpagesize() } as usize;
+        let table = unsafe { read(metadata.cast::<*const c_void>().wrapping_sub(1), page) };
+        let words = table.cast::<usize>();
+        let size = unsafe { read(words.wrapping_add(8), page) };
+        let stride = unsafe { read(words.wrapping_add(9), page) };
+        let flags = unsafe { read(words.wrapping_add(10).cast::<u32>(), page) };
+        // This specific SDK enum is one-byte POD; no owned payload to destroy.
+        assert!(
+            size == 1 && stride == 1 && flags & 0x100ff == 0,
+            "status value ABI changed"
+        );
+        let raw_getter = resolve(env!("AUTH_STATUS_RAW_GET_SYMBOL"));
+        assert!(
+            unsafe { read(raw_getter.cast::<u32>(), page) } == 0x3940_0280
+                && unsafe { read(raw_getter.cast::<u32>().wrapping_add(1), page) } == 0xd65f_03c0,
+            "rawValue getter convention changed"
+        );
+        let mut value = std::mem::MaybeUninit::new(0xff_u8);
+        unsafe {
+            rust_status_with_self(
+                object,
+                value.as_mut_ptr().cast(),
+                resolve(env!("AUTH_STATUS_GET_SYMBOL")),
+            )
+        };
+        let raw = unsafe { rust_status_raw_with_self(value.as_mut_ptr().cast(), raw_getter) };
+        assert!((0..=2).contains(&raw), "invalid public status raw value");
+        let name = unsafe { enum_case_name(value.as_mut_ptr().cast(), metadata) };
+        assert!(!name.is_null(), "status case reflection unavailable");
+        let count = 32.min(page - name.addr() % page);
+        let mut bytes = Vec::new();
+        let mut terminated = false;
+        for offset in 0..count {
+            let byte = unsafe { name.cast::<u8>().add(offset).read() };
+            if byte == 0 {
+                terminated = true;
+                break;
+            }
+            bytes.push(byte);
+        }
+        assert!(terminated, "status name exceeds bound");
+        let label = std::str::from_utf8(&bytes).unwrap();
+        assert!(
+            matches!(
+                (raw, label),
+                (0, "notDetermined") | (1, "denied") | (2, "approved")
+            ),
+            "status case/raw mapping differs"
+        );
+        println!(
+            "Authorization status value read: raw_value={raw}; label={label}; status_getter_calls=1; raw_value_getter_calls=1; enum_case_name_calls=1; status_value_verified=true; authorization_requests=0; grant_verified=false"
         );
     }
 }
