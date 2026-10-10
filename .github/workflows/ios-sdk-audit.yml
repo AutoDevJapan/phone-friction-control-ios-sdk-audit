@@ -86,7 +86,7 @@ jobs:
           xcrun simctl bootstatus "$SIM_ID" -b
           xcrun simctl install "$SIM_ID" "$PROBE_APP"
           xcrun simctl launch --console "$SIM_ID" com.autodevjapan.phonecontrol1614abiprobe > "$OUT/singleton-runtime.txt" 2>&1
-          grep -F 'SDK singleton class: _TtC14FamilyControls19AuthorizationCenter' "$OUT/singleton-runtime.txt"
+          grep -F 'SDK singleton class: FamilyControls.AuthorizationCenter' "$OUT/singleton-runtime.txt"
           printf 'simulator_process_executed=true\npublic_singleton_called=true\nauthorization_requested=false\nmonitoring=false\nshielding=false\n' > "$OUT/singleton-runtime-scope.txt"
       - uses: actions/upload-artifact@v4
         if: always()

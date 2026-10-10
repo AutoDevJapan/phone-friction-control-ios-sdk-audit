@@ -74,10 +74,13 @@ fn main() {
         !class.is_null(),
         "SDK reference has no Objective-C runtime class"
     );
+    assert_eq!(
+        class, metadata.value,
+        "SDK getter returned a reference of a different runtime class"
+    );
     let name = unsafe { class_getName(class) };
     assert!(!name.is_null(), "SDK runtime class has no name");
     let name = unsafe { std::ffi::CStr::from_ptr(name) }.to_str().unwrap();
-    assert_eq!(name, "_TtC14FamilyControls19AuthorizationCenter");
     println!("SDK singleton class: {name}");
     // Keep the singleton reference until this isolated process ends.
 }
