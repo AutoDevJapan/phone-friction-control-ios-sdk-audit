@@ -1,7 +1,14 @@
 //! Default mode: compiler experiment with an undefined external symbol.
-//! runtime_probe mode: isolated Simulator getter inspection, without authorization.
+//! runtime_probe mode: isolated Simulator getter and async runtime inspection.
+//! No authorization request is made by this inspection stage.
 #![cfg_attr(not(runtime_probe), no_std)]
 #![feature(abi_swift)]
+
+#[cfg(all(
+    runtime_probe,
+    not(all(target_os = "ios", target_arch = "aarch64", target_abi = "sim"))
+))]
+compile_error!("runtime inspection is limited to arm64 iOS Simulator");
 
 #[cfg(not(runtime_probe))]
 unsafe extern "Swift" {
@@ -82,5 +89,129 @@ fn main() {
     assert!(!name.is_null(), "SDK runtime class has no name");
     let name = unsafe { std::ffi::CStr::from_ptr(name) }.to_str().unwrap();
     println!("SDK singleton class: {name}");
+    async_inspection::inspect();
     // Keep the singleton reference until this isolated process ends.
+}
+
+#[cfg(runtime_probe)]
+mod async_inspection {
+    use std::ffi::c_void;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+
+    // Swift 5.10 include/swift/ABI/Executor.h: AsyncFunctionPointer.
+    // This probe is limited to non-pointer-authenticated arm64 Simulator code.
+    #[repr(C)]
+    struct AsyncFunctionPointer {
+        entry_offset: i32,
+        context_size: u32,
+    }
+
+    #[repr(C)]
+    struct TaskAndContext {
+        task: *mut c_void,
+        context: *mut c_void,
+    }
+
+    #[link(name = "FamilyControls", kind = "framework")]
+    unsafe extern "C" {
+        #[link_name = env!("AUTH_ASYNC_SYMBOL")]
+        static AUTHORIZATION_POINTER: AsyncFunctionPointer;
+    }
+
+    #[link(name = "swift_Concurrency")]
+    unsafe extern "Swift" {
+        fn swift_task_create_common(
+            flags: usize,
+            options: *const c_void,
+            result_type: *const c_void,
+            entry: *const c_void,
+            closure: *const c_void,
+            context_size: usize,
+        ) -> TaskAndContext;
+    }
+
+    #[link(name = "swiftCore")]
+    unsafe extern "Swift" {
+        fn swift_release(object: *mut c_void);
+    }
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        static kCFRunLoopDefaultMode: *const c_void;
+        fn CFRunLoopRunInMode(mode: *const c_void, seconds: f64, return_after_source: u8) -> i32;
+    }
+
+    unsafe extern "C" {
+        fn rust_async_smoke_entry();
+    }
+
+    static ENTERED: AtomicBool = AtomicBool::new(false);
+
+    #[unsafe(no_mangle)]
+    extern "C" fn rust_async_smoke_report() {
+        ENTERED.store(true, Ordering::Release);
+    }
+
+    // Runtime non_future_adapter passes the initial context in x22, and its
+    // null closure in x20. AsyncContext.ResumeParent is at byte offset 8.
+    // Swift 5.10 Task.cpp installs completeTaskAndRelease here. Its error
+    // argument uses swiftself/x20, NOT the synchronous swifterror/x21.
+    // All synchronous stack storage is removed before the async tail call.
+    core::arch::global_asm!(
+        ".text",
+        ".p2align 2",
+        ".globl _rust_async_smoke_entry",
+        "_rust_async_smoke_entry:",
+        "stp x29, x30, [sp, #-16]!",
+        "mov x29, sp",
+        "bl _rust_async_smoke_report",
+        "ldp x29, x30, [sp], #16",
+        "ldr x16, [x22, #8]",
+        "mov x20, #0",
+        "br x16",
+    );
+
+    pub fn inspect() {
+        let pointer = &raw const AUTHORIZATION_POINTER;
+        let descriptor = unsafe { &*pointer };
+        assert_ne!(descriptor.entry_offset, 0, "null relative async entry");
+        assert!(descriptor.context_size >= 16 && descriptor.context_size <= 1_048_576);
+        let entry = pointer
+            .cast::<u8>()
+            .wrapping_offset(descriptor.entry_offset as isize);
+        assert_eq!(entry.addr() % 4, 0, "unaligned arm64 async entry");
+        println!(
+            "Public async descriptor: offset={}, context_size={}",
+            descriptor.entry_offset, descriptor.context_size
+        );
+
+        // EnqueueJob bit 12 from Swift 5.10 MetadataValues.h. No state is
+        // written to InitialContext after enqueue: only runtime initializes it.
+        // A null closure keeps the runtime from releasing a Rust allocation.
+        let task = unsafe {
+            swift_task_create_common(
+                1 << 12,
+                std::ptr::null(),
+                std::ptr::null(),
+                rust_async_smoke_entry as *const c_void,
+                std::ptr::null(),
+                32,
+            )
+        };
+        assert!(!task.task.is_null() && !task.context.is_null());
+        // Drop the create caller's +1; queued/running task owns a separate +1.
+        unsafe { swift_release(task.task) };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !ENTERED.load(Ordering::Acquire) && Instant::now() < deadline {
+            unsafe { CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.1, 1) };
+        }
+        assert!(
+            ENTERED.load(Ordering::Acquire),
+            "Swift runtime task entry timed out"
+        );
+        println!("Rust async task entry observed; authorization_requested=false");
+        // ENTERED proves entry only. It is not a runtime teardown assertion.
+        unsafe { CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.1, 0) };
+    }
 }
