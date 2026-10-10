@@ -1,6 +1,6 @@
 //! Default mode: compiler experiment with an undefined external symbol.
 //! runtime_probe mode: isolated Simulator getter and async runtime inspection.
-//! No authorization request is made by this inspection stage.
+//! auth_request additionally calls the public individual authorization API once.
 #![cfg_attr(not(runtime_probe), no_std)]
 #![feature(abi_swift)]
 
@@ -66,7 +66,8 @@ unsafe extern "C" {
 
 #[cfg(runtime_probe)]
 fn main() {
-    // This deliberately does not request authorization or read another app's data.
+    // Getter inspection alone does not request authorization or read app data.
+    // The optional auth_request stage below is a separate one-shot OS request.
     // Request 0 means a blocking request for complete metadata.
     let metadata = unsafe { authorization_center_metadata(0) };
     assert_eq!(metadata.state, 0, "SDK class metadata is incomplete");

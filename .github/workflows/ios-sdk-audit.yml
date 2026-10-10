@@ -135,7 +135,16 @@ jobs:
           xcrun simctl boot "$SIM_ID"
           xcrun simctl bootstatus "$SIM_ID" -b
           xcrun simctl install "$SIM_ID" "$PROBE_APP"
-          xcrun simctl launch --console "$SIM_ID" com.autodevjapan.phonecontrol1614abiprobe > "$OUT/singleton-runtime.txt" 2>&1
+          LAUNCH_STATUS=0
+          xcrun simctl launch --console "$SIM_ID" com.autodevjapan.phonecontrol1614abiprobe > "$OUT/singleton-runtime.txt" 2>&1 || LAUNCH_STATUS=$?
+          printf 'simctl_launch_exit=%s\n' "$LAUNCH_STATUS" > "$OUT/launch-scope.txt"
+          if [ "$LAUNCH_STATUS" -ne 0 ]; then
+            # Include only launch services mentioning this exact owned bundle.
+            LOG_STATUS=0
+            xcrun simctl spawn "$SIM_ID" log show --style compact --last 1m --predicate '(process == "SpringBoard" OR process == "launchd" OR process == "amfid") AND eventMessage CONTAINS "com.autodevjapan.phonecontrol1614abiprobe"' > "$OUT/probe-launch-log.txt" 2>&1 || LOG_STATUS=$?
+            printf 'launch_diagnostic_exit=%s\n' "$LOG_STATUS" >> "$OUT/launch-scope.txt"
+            exit "$LAUNCH_STATUS"
+          fi
           # The new Simulator has no account login, user selections, or personal
           # apps. Limit diagnostics to this probe's connection/entitlement messages.
           xcrun simctl spawn "$SIM_ID" log show --style compact --last 1m --predicate 'process == "authorization-center-probe" AND (eventMessage CONTAINS[c] "connection" OR eventMessage CONTAINS[c] "entitlement")' > "$OUT/probe-connection-log.txt" 2>&1
