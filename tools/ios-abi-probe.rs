@@ -5,6 +5,25 @@
 #![cfg_attr(not(ui_test_bundle), feature(abi_swift))]
 #![cfg_attr(xcode_host, no_main)]
 
+#[cfg(all(authorization_status_entry_probe, not(runtime_probe)))]
+compile_error!("status entry inspection requires the isolated runtime probe");
+#[cfg(all(
+    authorization_status_value_probe,
+    not(authorization_status_entry_probe)
+))]
+compile_error!("status value reading requires the verified status entry mode");
+#[cfg(all(
+    authorization_status_entry_probe,
+    any(auth_request, uikit_host, xcode_host, ui_test_bundle)
+))]
+compile_error!("status entry inspection is a separate request-free process");
+
+#[cfg(all(
+    authorization_status_consent_probe,
+    not(all(runtime_probe, ui_test_host, uikit_host, xcode_host, auth_request))
+))]
+compile_error!("consent status reading requires the isolated Xcode UI test host");
+
 #[cfg(all(
     ui_test_bundle,
     not(all(target_os = "ios", target_arch = "aarch64", target_abi = "sim"))
@@ -117,9 +136,300 @@ fn main() {
     #[cfg(not(uikit_host))]
     {
         let object = inspect_singleton();
+        #[cfg(authorization_status_entry_probe)]
+        {
+            let metadata = authorization_status_entry::inspect(object);
+            #[cfg(authorization_status_value_probe)]
+            {
+                let status = authorization_status_entry::read_value(object, metadata);
+                println!(
+                    "Authorization status value read: raw_value={}; label={}; status_getter_calls=1; raw_value_getter_calls=1; enum_case_name_calls=1; status_value_verified=true; authorization_requests=0; grant_verified=false",
+                    status.raw, status.label
+                );
+            }
+            #[cfg(not(authorization_status_value_probe))]
+            let _ = metadata;
+        }
+        #[cfg(not(authorization_status_entry_probe))]
         async_inspection::inspect();
         #[cfg(auth_request)]
         request_probe::run(object);
+    }
+}
+
+#[cfg(any(authorization_status_entry_probe, authorization_status_consent_probe))]
+mod authorization_status_entry {
+    use super::MetadataResponse;
+    use std::ffi::{CString, c_char, c_void};
+
+    #[link(name = "System")]
+    unsafe extern "C" {
+        fn dlsym(handle: *mut c_void, name: *const c_char) -> *mut c_void;
+        fn getpagesize() -> i32;
+        fn dladdr(address: *const c_void, information: *mut DlInfo) -> i32;
+    }
+    #[repr(C)]
+    struct DlInfo {
+        filename: *const c_char,
+        base: *const c_void,
+        symbol: *const c_char,
+        symbol_address: *const c_void,
+    }
+    fn resolve(symbol: &str) -> *const c_void {
+        let name = CString::new(symbol).unwrap();
+        let entry = unsafe {
+            dlsym(
+                std::ptr::without_provenance_mut(usize::MAX - 1),
+                name.as_ptr(),
+            )
+        };
+        assert!(
+            !entry.is_null() && entry.addr() % 4 == 0,
+            "invalid public status entry"
+        );
+        entry
+    }
+    unsafe fn read<T: Copy>(pointer: *const T, page: usize) -> T {
+        assert!(
+            !pointer.is_null() && pointer.addr() % std::mem::align_of::<T>() == 0,
+            "invalid status ABI field"
+        );
+        assert!(
+            page - pointer.addr() % page >= std::mem::size_of::<T>(),
+            "status ABI field crosses page"
+        );
+        unsafe { pointer.read() }
+    }
+    fn prefix(label: &str, entry: *const c_void, page: usize) {
+        assert!(
+            !entry.is_null() && entry.addr() % 4 == 0,
+            "invalid status code entry"
+        );
+        let length = 128.min(page - entry.addr() % page);
+        let bytes = unsafe { std::slice::from_raw_parts(entry.cast::<u8>(), length) };
+        print!("Authorization status {label}: length={length}; hex=");
+        for byte in bytes {
+            print!("{byte:02x}");
+        }
+        println!();
+    }
+    pub(super) fn inspect(object: *mut c_void) -> *const c_void {
+        let page = unsafe { getpagesize() };
+        assert!(page > 0, "invalid page size");
+        let page = page as usize;
+        let accessor: unsafe extern "Swift" fn(usize) -> MetadataResponse =
+            unsafe { std::mem::transmute(resolve(env!("AUTH_STATUS_METADATA_SYMBOL"))) };
+        let response = unsafe { accessor(0) };
+        assert!(
+            response.state == 0 && !response.value.is_null(),
+            "incomplete status metadata"
+        );
+        assert!(
+            unsafe { read(response.value.cast::<usize>(), page) } == 0x201,
+            "expected enum metadata"
+        );
+        let witnesses =
+            unsafe { read(response.value.cast::<*const c_void>().wrapping_sub(1), page) };
+        assert!(!witnesses.is_null(), "missing status witnesses");
+        // Swift 5.10 required VWT: eight function pointers, size, stride,
+        // uint32 flags and extra inhabitant count. No witness is invoked here.
+        let words = witnesses.cast::<usize>();
+        let size = unsafe { read(words.wrapping_add(8), page) };
+        let stride = unsafe { read(words.wrapping_add(9), page) };
+        let flags = unsafe { read(words.wrapping_add(10).cast::<u32>(), page) };
+        let alignment = (flags as usize & 0xff) + 1;
+        assert!(
+            flags & 0x0040_0000 == 0 && alignment.is_power_of_two(),
+            "incomplete status layout"
+        );
+        assert!(
+            size > 0 && size <= 64 && stride >= size && stride % alignment == 0,
+            "invalid status value size"
+        );
+        println!(
+            "Authorization status layout: size={size}; stride={stride}; alignment={alignment}; metadata_complete=true; kind_enum=true"
+        );
+        let getter = resolve(env!("AUTH_STATUS_GET_SYMBOL"));
+        prefix("getter entry", getter, page);
+        // Actual SDK17.5 public dispatch thunk (run38077790004):
+        // ldr x9,[x20]; ldr x0,[x9,#slot]; br x0. Validate that exact
+        // instruction shape before deriving the slot; never invoke either entry.
+        let instructions = getter.cast::<u32>();
+        assert!(
+            unsafe { read(instructions, page) } == 0xf940_0289,
+            "getter class load changed"
+        );
+        let load = unsafe { read(instructions.wrapping_add(1), page) };
+        assert!(
+            load & 0xffc0_03ff == 0xf940_0120,
+            "getter slot load changed"
+        );
+        assert!(
+            unsafe { read(instructions.wrapping_add(2), page) } == 0xd61f_0000,
+            "getter branch changed"
+        );
+        let slot = ((load >> 10) & 0xfff) as usize * 8;
+        let class = unsafe { super::object_getClass(object) };
+        assert!(!class.is_null(), "status center class missing");
+        assert!(
+            unsafe { read(object.cast::<*const c_void>(), page) } == class,
+            "getter requires an unpacked Swift class reference"
+        );
+        let target = unsafe {
+            read(
+                class
+                    .cast::<u8>()
+                    .wrapping_add(slot)
+                    .cast::<*const c_void>(),
+                page,
+            )
+        };
+        let info = || DlInfo {
+            filename: std::ptr::null(),
+            base: std::ptr::null(),
+            symbol: std::ptr::null(),
+            symbol_address: std::ptr::null(),
+        };
+        let mut source_info = info();
+        let mut target_info = info();
+        assert!(
+            unsafe { dladdr(getter, &mut source_info) } != 0
+                && unsafe { dladdr(target, &mut target_info) } != 0
+                && !source_info.base.is_null()
+                && source_info.base == target_info.base,
+            "status getter implementation image differs"
+        );
+        prefix("getter implementation", target, page);
+        prefix(
+            "raw value getter entry",
+            resolve(env!("AUTH_STATUS_RAW_GET_SYMBOL")),
+            page,
+        );
+        println!(
+            "Authorization status dispatch observed: same_image=true; slot_derived=true; implementation_calls=0; raw_value_getter_calls=0"
+        );
+        #[cfg(authorization_status_entry_probe)]
+        println!(
+            "Authorization status entry inspection complete; phase=entry; status_getter_calls=0; enum_values_constructed=0; value_witness_calls=0; authorization_requests=0; grant_verified=false"
+        );
+        response.value
+    }
+
+    // Actual entry2 evidence: status implementation saves x8 (indirect enum
+    // result); public rawValue getter is ldrb w0,[x20]; ret. Preserve C's x20.
+    #[cfg(any(authorization_status_value_probe, authorization_status_consent_probe))]
+    core::arch::global_asm!(
+        ".text",
+        ".p2align 2",
+        ".globl _rust_status_with_self",
+        "_rust_status_with_self:",
+        ".cfi_startproc",
+        "stp x20, x30, [sp, #-16]!",
+        ".cfi_def_cfa_offset 16",
+        ".cfi_offset 20, -16",
+        ".cfi_offset 30, -8",
+        "mov x20, x0",
+        "mov x8, x1",
+        "blr x2",
+        "ldp x20, x30, [sp], #16",
+        ".cfi_restore 20",
+        ".cfi_restore 30",
+        ".cfi_def_cfa_offset 0",
+        "ret",
+        ".cfi_endproc",
+        ".p2align 2",
+        ".globl _rust_status_raw_with_self",
+        "_rust_status_raw_with_self:",
+        ".cfi_startproc",
+        "stp x20, x30, [sp, #-16]!",
+        ".cfi_def_cfa_offset 16",
+        ".cfi_offset 20, -16",
+        ".cfi_offset 30, -8",
+        "mov x20, x0",
+        "blr x1",
+        "ldp x20, x30, [sp], #16",
+        ".cfi_restore 20",
+        ".cfi_restore 30",
+        ".cfi_def_cfa_offset 0",
+        "ret",
+        ".cfi_endproc",
+    );
+    #[cfg(any(authorization_status_value_probe, authorization_status_consent_probe))]
+    unsafe extern "C" {
+        fn rust_status_with_self(object: *mut c_void, result: *mut c_void, entry: *const c_void);
+        fn rust_status_raw_with_self(value: *mut c_void, entry: *const c_void) -> isize;
+    }
+    #[cfg(any(authorization_status_value_probe, authorization_status_consent_probe))]
+    #[link(name = "swiftCore")]
+    unsafe extern "Swift" {
+        // Swift5.10 ReflectionMirror.cpp: SWIFT_CC(swift), two explicit args,
+        // borrowed pointer to the enum case name. Exact SDK export is checked.
+        #[link_name = "swift_EnumCaseName"]
+        fn enum_case_name(value: *mut c_void, metadata: *const c_void) -> *const c_char;
+    }
+    #[cfg(any(authorization_status_value_probe, authorization_status_consent_probe))]
+    pub(super) struct StatusValue {
+        pub(super) raw: isize,
+        pub(super) label: &'static str,
+    }
+    #[cfg(any(authorization_status_value_probe, authorization_status_consent_probe))]
+    pub(super) fn read_value(object: *mut c_void, metadata: *const c_void) -> StatusValue {
+        let page = unsafe { getpagesize() } as usize;
+        let table = unsafe { read(metadata.cast::<*const c_void>().wrapping_sub(1), page) };
+        let words = table.cast::<usize>();
+        let size = unsafe { read(words.wrapping_add(8), page) };
+        let stride = unsafe { read(words.wrapping_add(9), page) };
+        let flags = unsafe { read(words.wrapping_add(10).cast::<u32>(), page) };
+        // This specific SDK enum is one-byte POD; no owned payload to destroy.
+        assert!(
+            size == 1 && stride == 1 && flags & 0x100ff == 0,
+            "status value ABI changed"
+        );
+        let raw_getter = resolve(env!("AUTH_STATUS_RAW_GET_SYMBOL"));
+        assert!(
+            unsafe { read(raw_getter.cast::<u32>(), page) } == 0x3940_0280
+                && unsafe { read(raw_getter.cast::<u32>().wrapping_add(1), page) } == 0xd65f_03c0,
+            "rawValue getter convention changed"
+        );
+        let mut value = std::mem::MaybeUninit::new(0xff_u8);
+        unsafe {
+            rust_status_with_self(
+                object,
+                value.as_mut_ptr().cast(),
+                resolve(env!("AUTH_STATUS_GET_SYMBOL")),
+            )
+        };
+        let raw = unsafe { rust_status_raw_with_self(value.as_mut_ptr().cast(), raw_getter) };
+        assert!((0..=2).contains(&raw), "invalid public status raw value");
+        let name = unsafe { enum_case_name(value.as_mut_ptr().cast(), metadata) };
+        assert!(!name.is_null(), "status case reflection unavailable");
+        let count = 32.min(page - name.addr() % page);
+        let mut bytes = Vec::new();
+        let mut terminated = false;
+        for offset in 0..count {
+            let byte = unsafe { name.cast::<u8>().add(offset).read() };
+            if byte == 0 {
+                terminated = true;
+                break;
+            }
+            bytes.push(byte);
+        }
+        assert!(terminated, "status name exceeds bound");
+        let label = std::str::from_utf8(&bytes).unwrap();
+        assert!(
+            matches!(
+                (raw, label),
+                (0, "notDetermined") | (1, "denied") | (2, "approved")
+            ),
+            "status case/raw mapping differs"
+        );
+        let label = match raw {
+            0 => "notDetermined",
+            1 => "denied",
+            2 => "approved",
+            _ => unreachable!(),
+        };
+        StatusValue { raw, label }
     }
 }
 
@@ -137,7 +447,7 @@ pub extern "C" fn main(_: i32, _: *mut *mut std::ffi::c_char) -> i32 {
 compile_error!("Xcode static library host requires the UIKit authorization mode");
 
 #[cfg(runtime_probe)]
-#[cfg_attr(uikit_host, allow(dead_code))]
+#[cfg_attr(any(uikit_host, authorization_status_entry_probe), allow(dead_code))]
 mod async_inspection {
     use std::ffi::c_void;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -551,6 +861,17 @@ mod request_probe {
     }
 
     #[cfg(uikit_host)]
+    #[cfg(authorization_status_consent_probe)]
+    pub(super) fn completed_with_error() -> bool {
+        let result = RESULT.load(Ordering::Acquire);
+        assert!(
+            result == 1 || result == 2,
+            "authorization has not completed"
+        );
+        result == 2
+    }
+
+    #[cfg(uikit_host)]
     pub(super) fn wait_from_worker(owner: TaskOwner, started: Instant) -> bool {
         // The UI test runner has to launch the host before it can choose the
         // ordinary OS consent button. Keep the default inspection deadline.
@@ -574,7 +895,7 @@ mod request_probe {
             result == 2
         );
         println!("authorization_status_verified=false; monitoring=false; shielding=false");
-        #[cfg(ui_test_host)]
+        #[cfg(all(ui_test_host, not(authorization_status_consent_probe)))]
         {
             // Diagnostic output in this disposable test app's own container.
             // It contains no account details, tokens, or activity selection.
@@ -989,6 +1310,32 @@ mod native_host {
     }
     #[cfg(ui_test_host)]
     unsafe extern "C" fn completed_on_main(_: *mut c_void) {
+        #[cfg(authorization_status_consent_probe)]
+        {
+            let is_main: unsafe extern "C" fn(Id, Sel) -> bool = unsafe {
+                std::mem::transmute(objc_msgSend as unsafe extern "C" fn(Id, Sel) -> usize)
+            };
+            assert!(
+                unsafe {
+                    is_main(
+                        objc_getClass(c"NSThread".as_ptr()),
+                        sel_registerName(c"isMainThread".as_ptr()),
+                    )
+                },
+                "status must be read on the main thread"
+            );
+            let object = super::inspect_singleton();
+            let metadata = super::authorization_status_entry::inspect(object);
+            let status = super::authorization_status_entry::read_value(object, metadata);
+            let error = super::request_probe::completed_with_error();
+            let home = std::env::var_os("HOME").expect("test app container HOME missing");
+            let documents = std::path::PathBuf::from(home).join("Documents");
+            std::fs::create_dir_all(&documents).expect("create test output directory");
+            std::fs::write(
+                documents.join("public-authorization-result.txt"),
+                format!("public_authorization_continuation_observed=true\nerror_present={error}\nauthorization_status_verified=true\nstatus_raw_value={}\nstatus_label={}\nstatus_getter_calls=1\nraw_value_getter_calls=1\nenum_case_name_calls=1\nstatus_read_on_main_thread=true\nmonitoring=false\nshielding=false\n", status.raw, status.label),
+            ).expect("write public authorization and status test result");
+        }
         unsafe {
             test_button_title(
                 REQUEST_BUTTON.load(Ordering::Acquire) as Id,
