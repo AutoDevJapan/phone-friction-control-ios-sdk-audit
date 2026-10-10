@@ -127,6 +127,8 @@ compile_error!("Xcode static library host requires the UIKit authorization mode"
 compile_error!("selection layout inspection requires the Xcode UIKit authorization host");
 #[cfg(all(binding_entry_probe, not(selection_layout_probe)))]
 compile_error!("binding entry inspection requires the selection layout mode");
+#[cfg(all(selection_value_probe, not(selection_layout_probe)))]
+compile_error!("selection value lifecycle requires the selection layout mode");
 
 // Layout and entry-byte evidence only; no Selection or Binding value is built.
 #[cfg(selection_layout_probe)]
@@ -140,11 +142,11 @@ mod selection_layout {
     // getEnumTagSinglePayload, storeEnumTagSinglePayload, then the data fields.
     // ABI/ValueWitnessTable.h uses size_t, size_t, uint32_t, uint32_t.
     #[repr(C)]
-    struct ValueWitnessTable {
-        functions: [*const c_void; 8],
-        size: usize,
-        stride: usize,
-        flags: u32,
+    pub(super) struct ValueWitnessTable {
+        pub(super) functions: [*const c_void; 8],
+        pub(super) size: usize,
+        pub(super) stride: usize,
+        pub(super) flags: u32,
         _extra_inhabitant_count: u32,
     }
 
@@ -190,7 +192,7 @@ mod selection_layout {
         }
     }
 
-    fn resolve(symbol: &str) -> *const c_void {
+    pub(super) fn resolve(symbol: &str) -> *const c_void {
         let name = CString::new(symbol).unwrap();
         // Darwin dyld include/dlfcn.h: RTLD_DEFAULT is ((void *) -2).
         // Only the four exact SDK symbols checked by the workflow are looked up.
@@ -212,7 +214,7 @@ mod selection_layout {
         assert!(!pointer.is_null(), "null inspection address");
         page - pointer.addr() % page
     }
-    unsafe fn read<T: Copy>(pointer: *const T, page: usize) -> T {
+    pub(super) unsafe fn read<T: Copy>(pointer: *const T, page: usize) -> T {
         assert!(
             pointer.addr() % std::mem::align_of::<T>() == 0,
             "unaligned ABI field"
@@ -376,7 +378,7 @@ mod selection_layout {
         alignment
     }
 
-    pub(super) fn inspect() {
+    pub(super) fn inspect() -> *const c_void {
         let page = unsafe { getpagesize() };
         assert!(page > 0, "invalid Darwin page size");
         let page = page as usize;
@@ -444,8 +446,342 @@ mod selection_layout {
             );
         }
         println!(
-            "Selection layout inspection complete; selection_values_constructed=0; selection_values_read=0; initializer_calls=0; closure_calls=0; value_witness_calls=0; authorization_status_verified=false; monitoring=false; shielding=false"
+            "Selection layout inspection complete; phase=layout; selection_values_constructed=0; selection_values_read=0; initializer_calls=0; closure_calls=0; value_witness_calls=0; authorization_requests=0; authorization_status_verified=false; monitoring=false; shielding=false"
         );
+        selection_pointer
+    }
+}
+
+// Separate prerequisite experiment: real default values, never a mutable Binding.
+#[cfg(all(selection_value_probe, selection_layout_probe))]
+mod selection_value {
+    use super::selection_layout::{ValueWitnessTable, read, resolve};
+    use std::alloc::{Layout, alloc_zeroed, dealloc};
+    use std::cell::{Cell, RefCell};
+    use std::ffi::c_void;
+    use std::ptr::NonNull;
+
+    // SDK 17.5 entry_4 (binding-control-prefix-disassembly.txt): init() has no
+    // parameters and returns its resilient value indirectly in x8. Do not model
+    // its fields. C receives (destination, dynamically resolved public entry).
+    // Preserve C/Swift callee-saved registers and the return address; the Swift
+    // call may clobber x8 and all caller-saved registers. No swiftself is needed.
+    core::arch::global_asm!(
+        ".text",
+        ".p2align 2",
+        ".globl _rust_selection_default_init",
+        "_rust_selection_default_init:",
+        ".cfi_startproc",
+        "stp x29, x30, [sp, #-16]!",
+        ".cfi_def_cfa_offset 16",
+        ".cfi_offset 29, -16",
+        ".cfi_offset 30, -8",
+        "mov x29, sp",
+        "mov x8, x0",
+        "blr x1",
+        "ldp x29, x30, [sp], #16",
+        ".cfi_restore 29",
+        ".cfi_restore 30",
+        ".cfi_def_cfa_offset 0",
+        "ret",
+        ".cfi_endproc",
+    );
+    unsafe extern "C" {
+        fn rust_selection_default_init(destination: *mut c_void, entry: *const c_void);
+        fn getpagesize() -> i32;
+    }
+    // Swift 5.10 ValueWitness.def/Table.h: required slots 1, 2, 3. The copy
+    // signatures use mutable opaque pointers even though the source is preserved.
+    type Destroy = unsafe extern "Swift" fn(*mut c_void, *const c_void);
+    type Copy = unsafe extern "Swift" fn(*mut c_void, *mut c_void, *const c_void) -> *mut c_void;
+    struct Witnesses {
+        metadata: *const c_void,
+        destroy: Destroy,
+        initialize: Copy,
+        assign: Copy,
+        layout: Layout,
+        size: usize,
+    }
+    #[derive(Default)]
+    struct Counts {
+        allocations: usize,
+        deallocations: usize,
+        initializer_calls: usize,
+        initialize_with_copy_calls: usize,
+        assign_with_copy_calls: usize,
+        destroy_calls: usize,
+        selection_values_constructed: usize,
+        selection_values_read: usize,
+        returned_destination_checks: usize,
+        byte_comparisons: usize,
+    }
+    #[derive(Default)]
+    struct Proof {
+        counts: RefCell<Counts>,
+        independent_allocations: Cell<bool>,
+        source_destroyed_before_copy: Cell<bool>,
+        verified: Cell<bool>,
+    }
+    impl Drop for Proof {
+        fn drop(&mut self) {
+            // Declared before the owners: unwinding destroys/deallocates them
+            // first, then emits actual partial counts with verified=false.
+            let c = self.counts.borrow();
+            println!("Selection value result: phase=value_lifecycle");
+            println!(
+                "Selection value result: lifecycle_verified={}",
+                self.verified.get()
+            );
+            for (name, count) in [
+                ("allocations", c.allocations),
+                ("deallocations", c.deallocations),
+                ("initializer_calls", c.initializer_calls),
+                ("initializer_wrapper_calls", c.initializer_calls),
+                ("initialize_with_copy_calls", c.initialize_with_copy_calls),
+                ("assign_with_copy_calls", c.assign_with_copy_calls),
+                ("destroy_calls", c.destroy_calls),
+                (
+                    "value_witness_calls",
+                    c.initialize_with_copy_calls + c.assign_with_copy_calls + c.destroy_calls,
+                ),
+                (
+                    "selection_values_constructed",
+                    c.selection_values_constructed,
+                ),
+                ("selection_values_read", c.selection_values_read),
+                ("returned_destination_checks", c.returned_destination_checks),
+                ("byte_comparisons", c.byte_comparisons),
+            ] {
+                println!("Selection value result: {name}={count}");
+            }
+            println!(
+                "Selection value result: independent_allocations={}",
+                self.independent_allocations.get()
+            );
+            println!(
+                "Selection value result: source_destroyed_before_copy={}",
+                self.source_destroyed_before_copy.get()
+            );
+            for field in [
+                "binding_values_constructed",
+                "binding_initializer_calls",
+                "binding_getter_calls",
+                "binding_setter_calls",
+                "closure_calls",
+                "authorization_requests",
+                "private_api_calls",
+                "private_api_reads",
+            ] {
+                println!("Selection value result: {field}=0");
+            }
+            for field in [
+                "mutable_binding_verified",
+                "mutable_values_verified",
+                "picker_verified",
+                "grant_verified",
+                "monitoring_verified",
+                "shielding_verified",
+                "selection_contents_output",
+            ] {
+                println!("Selection value result: {field}=false");
+            }
+        }
+    }
+    struct Value<'a> {
+        pointer: NonNull<u8>,
+        initialized: bool,
+        witnesses: &'a Witnesses,
+        proof: &'a Proof,
+    }
+    impl<'a> Value<'a> {
+        fn allocate(witnesses: &'a Witnesses, proof: &'a Proof) -> Self {
+            // Entry_4 and the observed copy/assign witnesses leave padding alone.
+            // Zero it before any foreign call so full-size comparisons read only
+            // initialized bytes. Never interpret tokens or expose value contents.
+            let pointer = NonNull::new(unsafe { alloc_zeroed(witnesses.layout) })
+                .expect("selection allocation failed");
+            proof.counts.borrow_mut().allocations += 1;
+            Self {
+                pointer,
+                initialized: false,
+                witnesses,
+                proof,
+            }
+        }
+        fn initialize_default(&mut self, entry: *const c_void) {
+            assert!(!self.initialized, "selection already initialized");
+            unsafe { rust_selection_default_init(self.pointer.as_ptr().cast(), entry) };
+            self.initialized = true;
+            let mut c = self.proof.counts.borrow_mut();
+            c.initializer_calls += 1;
+            c.selection_values_constructed += 1;
+        }
+        fn copy_from(&mut self, source: &Self, initialize: bool) {
+            assert!(source.initialized, "copy source is not initialized");
+            assert!(
+                self.initialized != initialize,
+                "invalid copy destination lifetime"
+            );
+            assert!(self.pointer != source.pointer, "copy allocations alias");
+            let witness = if initialize {
+                self.witnesses.initialize
+            } else {
+                self.witnesses.assign
+            };
+            let destination = self.pointer.as_ptr().cast();
+            let returned = unsafe {
+                witness(
+                    destination,
+                    source.pointer.as_ptr().cast(),
+                    self.witnesses.metadata,
+                )
+            };
+            // Mark the successful initialization before assertions can unwind.
+            self.initialized = true;
+            {
+                let mut c = self.proof.counts.borrow_mut();
+                if initialize {
+                    c.initialize_with_copy_calls += 1;
+                    c.selection_values_constructed += 1;
+                } else {
+                    c.assign_with_copy_calls += 1;
+                }
+            }
+            assert!(
+                returned == destination,
+                "copy witness did not return its destination"
+            );
+            self.proof.counts.borrow_mut().returned_destination_checks += 1;
+        }
+        fn bytes(&self) -> &[u8] {
+            assert!(self.initialized, "cannot read a destroyed selection");
+            self.proof.counts.borrow_mut().selection_values_read += 1;
+            unsafe { std::slice::from_raw_parts(self.pointer.as_ptr(), self.witnesses.size) }
+        }
+        fn compare(&self, other: &Self) {
+            // Boolean assertion only: assert_eq! would print selection contents.
+            assert!(
+                self.bytes() == other.bytes(),
+                "initialized selection bytes differ"
+            );
+            self.proof.counts.borrow_mut().byte_comparisons += 1;
+        }
+        fn destroy(&mut self) {
+            if self.initialized {
+                self.initialized = false;
+                unsafe {
+                    (self.witnesses.destroy)(self.pointer.as_ptr().cast(), self.witnesses.metadata)
+                };
+                self.proof.counts.borrow_mut().destroy_calls += 1;
+            }
+        }
+    }
+    impl Drop for Value<'_> {
+        fn drop(&mut self) {
+            self.destroy();
+            unsafe { dealloc(self.pointer.as_ptr(), self.witnesses.layout) };
+            self.proof.counts.borrow_mut().deallocations += 1;
+        }
+    }
+    pub(super) fn inspect(metadata: *const c_void) {
+        let proof = Proof::default();
+        let page = unsafe { getpagesize() };
+        assert!(page > 0, "invalid Darwin page size");
+        let page = page as usize;
+        let table = unsafe {
+            read(
+                metadata.cast::<*const ValueWitnessTable>().wrapping_sub(1),
+                page,
+            )
+        };
+        assert!(!table.is_null(), "null selection witnesses");
+        let size = unsafe { read(&raw const (*table).size, page) };
+        let stride = unsafe { read(&raw const (*table).stride, page) };
+        let flags = unsafe { read(&raw const (*table).flags, page) };
+        let alignment = (flags as usize & 0xff) + 1;
+        assert!(flags & 0x0040_0000 == 0, "incomplete selection layout");
+        assert!(
+            (size, stride, alignment) == (56, 56, 8),
+            "SDK selection layout changed"
+        );
+        let entry = |slot: usize| {
+            let pointer = unsafe {
+                read(
+                    (&raw const (*table).functions)
+                        .cast::<*const c_void>()
+                        .add(slot),
+                    page,
+                )
+            };
+            assert!(
+                !pointer.is_null() && pointer.addr() % 4 == 0,
+                "invalid selection witness entry"
+            );
+            pointer
+        };
+        let witnesses = Witnesses {
+            metadata,
+            destroy: unsafe { std::mem::transmute::<*const c_void, Destroy>(entry(1)) },
+            initialize: unsafe { std::mem::transmute::<*const c_void, Copy>(entry(2)) },
+            assign: unsafe { std::mem::transmute::<*const c_void, Copy>(entry(3)) },
+            layout: Layout::from_size_align(stride, alignment)
+                .expect("invalid selection allocation layout"),
+            size,
+        };
+        let initializer = resolve(env!("SELECTION_INIT_SYMBOL"));
+        let mut first = Value::allocate(&witnesses, &proof);
+        let mut second = Value::allocate(&witnesses, &proof);
+        let mut third = Value::allocate(&witnesses, &proof);
+        for (a, b) in [(&first, &second), (&first, &third), (&second, &third)] {
+            let low = a.pointer.addr().get().min(b.pointer.addr().get());
+            let high = a.pointer.addr().get().max(b.pointer.addr().get());
+            assert!(high - low >= stride, "selection allocations overlap");
+            assert!(
+                low % alignment == 0 && high % alignment == 0,
+                "selection allocation misaligned"
+            );
+        }
+        proof.independent_allocations.set(true);
+        first.initialize_default(initializer);
+        second.copy_from(&first, true);
+        first.compare(&second);
+        first.destroy();
+        assert!(
+            !first.initialized && second.initialized,
+            "source destruction invalidated the copy"
+        );
+        third.copy_from(&second, true);
+        proof.source_destroyed_before_copy.set(true);
+        second.compare(&third);
+        third.copy_from(&second, false);
+        second.compare(&third);
+        drop(first);
+        drop(second);
+        drop(third);
+        {
+            let c = proof.counts.borrow();
+            assert!(
+                (
+                    c.allocations,
+                    c.deallocations,
+                    c.initializer_calls,
+                    c.initialize_with_copy_calls,
+                    c.assign_with_copy_calls,
+                    c.destroy_calls
+                ) == (3, 3, 1, 2, 1, 3),
+                "selection lifecycle counts mismatch"
+            );
+            assert!(
+                (
+                    c.selection_values_constructed,
+                    c.selection_values_read,
+                    c.returned_destination_checks,
+                    c.byte_comparisons
+                ) == (3, 6, 3, 3),
+                "selection lifecycle proof incomplete"
+            );
+        }
+        proof.verified.set(true);
     }
 }
 
@@ -1013,11 +1349,20 @@ mod native_host {
             // Keep the getter's allocation reference for this bounded process,
             // as with its window/controller. This mode starts no Swift task.
             let _ = object;
-            super::selection_layout::inspect();
+            // Catch Rust validation failures before crossing the C callback;
+            // value owners unwind and emit their partial lifecycle counts.
+            let success = std::panic::catch_unwind(|| {
+                let metadata = super::selection_layout::inspect();
+                #[cfg(selection_value_probe)]
+                super::selection_value::inspect(metadata);
+                #[cfg(not(selection_value_probe))]
+                let _ = metadata;
+            })
+            .is_ok();
             unsafe {
                 dispatch_async_f(
                     (&raw const _dispatch_main_q).cast_mut().cast(),
-                    std::ptr::null_mut(),
+                    std::ptr::without_provenance_mut(if success { 0 } else { 1 }),
                     exit_on_main,
                 )
             };
@@ -1081,6 +1426,13 @@ mod native_host {
             assert!(!delegate_name.is_null());
             std::thread::spawn(|| {
                 std::thread::sleep(Duration::from_secs(30));
+                #[cfg(selection_layout_probe)]
+                {
+                    // Also bound a stalled foreign initializer/witness call.
+                    eprintln!("Selection inspection process timed out");
+                    std::process::exit(1);
+                }
+                #[cfg(not(selection_layout_probe))]
                 if !ACTIVE.load(Ordering::Acquire) {
                     eprintln!("UIKit active callback timed out");
                     std::process::exit(1);

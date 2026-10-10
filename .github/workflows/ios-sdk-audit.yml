@@ -18,6 +18,10 @@ on:
         description: Inspect public Selection and Binding layout and bounded entry bytes without building values
         type: boolean
         default: false
+      selection_value_probe:
+        description: Separately validate default Selection init/copy/assign/destroy lifetimes; requires layout mode
+        type: boolean
+        default: false
       binding_entry_probe:
         description: Read public Binding accessor entries and their first same-image BL prefixes without invoking them
         type: boolean
@@ -41,11 +45,12 @@ jobs:
           OUT="$RUNNER_TEMP/ios-sdk-audit"
           mkdir "$OUT"
           if [ '${{ inputs.binding_entry_probe }}' = true ]; then test '${{ inputs.selection_layout_probe }}' = true; fi
+          if [ '${{ inputs.selection_value_probe }}' = true ]; then test '${{ inputs.selection_layout_probe }}' = true; fi
           if [ '${{ inputs.selection_layout_probe }}' = true ]; then
             test '${{ inputs.native_uikit_host }}' = true
             test '${{ inputs.authorization_probe }}' = true
             test '${{ inputs.xcode_signed_host }}' = true
-            printf 'selection_layout_verified=false\nselection_values_constructed=0\nselection_values_read=0\ngrant_verified=false\nmonitoring_verified=false\nshielding_verified=false\n' > "$OUT/selection-layout-scope.txt"
+            printf 'phase=layout\nselection_layout_verified=false\nselection_values_constructed=0\nselection_values_read=0\ngrant_verified=false\nmonitoring_verified=false\nshielding_verified=false\n' > "$OUT/selection-layout-scope.txt"
           fi
           xcodebuild -version > "$OUT/versions.txt"
           xcrun swiftc --version >> "$OUT/versions.txt"
@@ -137,7 +142,8 @@ jobs:
             export SELECTION_METADATA_SYMBOL SELECTION_INIT_SYMBOL BINDING_METADATA_SYMBOL BINDING_INIT_SYMBOL
             # The digester identifies initializing constructors (fc). The ABI's
             # allocating constructor entry (fC) is exported for these structs.
-            # Require that exact public entry; do not invoke either initializer.
+            # Require that exact public entry. Only the separate value phase
+            # may invoke Selection.init(); Binding entries remain inspection-only.
             # Candidate exports stay in scratch. Publish only the seven exact
             # entries needed here; never publish complete tbd/SDK dumps.
             grep -oE '\$s14FamilyControls0A17ActivitySelectionV[[:alnum:]_]+' "$SDK/System/Library/Frameworks/FamilyControls.framework/FamilyControls.tbd" | sort -u > "$RUNNER_TEMP/selection-candidate-exports.txt"
@@ -157,6 +163,9 @@ jobs:
             # Verify the Darwin special dlsym handle against this SDK as well.
             grep -Eq '^#define[[:space:]]+RTLD_DEFAULT[[:space:]]+\(\(void[[:space:]]*\*\)[[:space:]]*-2\)' "$SDK/usr/include/dlfcn.h"
             SELECTION_ARGS=(--cfg selection_layout_probe)
+            if [ '${{ inputs.selection_value_probe }}' = true ]; then
+              SELECTION_ARGS+=(--cfg selection_value_probe)
+            fi
             if [ '${{ inputs.binding_entry_probe }}' = true ]; then
               BINDING_GET_SYMBOL=$(jq -er '[.[] | select(.usr == "s:7SwiftUI7BindingV") | .members[] | select(.kind == "Var" and .printedName == "wrappedValue") | .accessors[] | select(.accessorKind == "get" and .mangledName == "\u0024s7SwiftUI7BindingV12wrappedValuexvg") | .mangledName] | if length == 1 then .[0] else error("expected one public Binding getter") end' "$OUT/SwiftUI-selected-declarations.json")
               BINDING_SET_SYMBOL=$(jq -er '[.[] | select(.usr == "s:7SwiftUI7BindingV") | .members[] | select(.kind == "Var" and .printedName == "wrappedValue") | .accessors[] | select(.accessorKind == "set" and .mangledName == "\u0024s7SwiftUI7BindingV12wrappedValuexvs") | .mangledName] | if length == 1 then .[0] else error("expected one public Binding setter") end' "$OUT/SwiftUI-selected-declarations.json")
@@ -271,9 +280,14 @@ jobs:
             LAUNCH_STATUS=0
             xcrun simctl launch --console "$SIM_ID" com.autodevjapan.phonecontrol1614abiprobe > "$OUT/singleton-runtime.txt" 2>&1 || LAUNCH_STATUS=$?
             grep -E '^(Selection (layout:|box:|entry bytes:|layout inspection complete;)|Binding (control transfer:|accessor inspection complete;))' "$OUT/singleton-runtime.txt" > "$OUT/selection-layout.txt" || true
+            if [ '${{ inputs.selection_value_probe }}' = true ]; then
+              # Preserve actual partial counts on failure; never synthesize
+              # successful value counts from the requested input.
+              grep '^Selection value result: ' "$OUT/singleton-runtime.txt" | sed 's/^Selection value result: //' > "$OUT/selection-value-results.txt" || true
+            fi
             test "$LAUNCH_STATUS" = 0
             grep -F 'Selection box: buffer_aligned=true; project_matches=true; uninitialized_deallocated=true' "$OUT/selection-layout.txt"
-            grep -F 'Selection layout inspection complete; selection_values_constructed=0; selection_values_read=0; initializer_calls=0; closure_calls=0; value_witness_calls=0;' "$OUT/selection-layout.txt"
+            grep -F 'Selection layout inspection complete; phase=layout; selection_values_constructed=0; selection_values_read=0; initializer_calls=0; closure_calls=0; value_witness_calls=0; authorization_requests=0;' "$OUT/selection-layout.txt"
             test "$(grep -c '^Selection layout:' "$OUT/selection-layout.txt")" = 2
             test "$(grep -Ec '^Selection entry bytes: (FamilyActivitySelection\.|Binding<FamilyActivitySelection>\.|Binding.init\(get:set:\) without Transaction;)' "$OUT/selection-layout.txt")" = 6
             if [ '${{ inputs.binding_entry_probe }}' = true ]; then
@@ -290,12 +304,25 @@ jobs:
                 test "$(grep -Fc "Selection entry bytes: Binding.init.offset$OFFSET direct_call target;" "$OUT/selection-layout.txt")" = 1
               done
             fi
-            printf 'selection_layout_verified=true\nmetadata_complete=true\nmetadata_kind_struct=true\nbox_buffer_aligned=true\nbox_project_matches=true\nbox_uninitialized_deallocated=true\nentry_prefix_max_bytes=128\nentry_reads_page_bounded=true\nentry_registers_verified=false\nselection_values_constructed=0\nselection_values_read=0\ninitializer_calls=0\nclosure_calls=0\nvalue_witness_calls=0\ngrant_verified=false\nmonitoring_verified=false\nshielding_verified=false\n' > "$OUT/selection-layout-scope.txt"
+            printf 'phase=layout\nselection_layout_verified=true\nmetadata_complete=true\nmetadata_kind_struct=true\nbox_buffer_aligned=true\nbox_project_matches=true\nbox_uninitialized_deallocated=true\nentry_prefix_max_bytes=128\nentry_reads_page_bounded=true\nentry_registers_verified=false\nselection_values_constructed=0\nselection_values_read=0\ninitializer_calls=0\nclosure_calls=0\nvalue_witness_calls=0\ngrant_verified=false\nmonitoring_verified=false\nshielding_verified=false\n' > "$OUT/selection-layout-scope.txt"
+            if [ '${{ inputs.selection_value_probe }}' = true ]; then
+              RESULTS="$OUT/selection-value-results.txt"
+              for EXPECTED in phase=value_lifecycle lifecycle_verified=true allocations=3 deallocations=3 initializer_calls=1 initializer_wrapper_calls=1 initialize_with_copy_calls=2 assign_with_copy_calls=1 destroy_calls=3 value_witness_calls=6 selection_values_constructed=3 selection_values_read=6 returned_destination_checks=3 byte_comparisons=3 independent_allocations=true source_destroyed_before_copy=true; do
+                test "$(grep -Fxc "$EXPECTED" "$RESULTS")" = 1
+              done
+              for FIELD in binding_values_constructed binding_initializer_calls binding_getter_calls binding_setter_calls closure_calls authorization_requests private_api_calls private_api_reads; do
+                test "$(grep -Fxc "$FIELD=0" "$RESULTS")" = 1
+              done
+              for FIELD in mutable_binding_verified mutable_values_verified picker_verified grant_verified monitoring_verified shielding_verified selection_contents_output; do
+                test "$(grep -Fxc "$FIELD=false" "$RESULTS")" = 1
+              done
+              test "$(wc -l < "$RESULTS" | tr -d ' ')" = 31
+            fi
             grep -F 'SDK singleton class: FamilyControls.AuthorizationCenter' "$OUT/singleton-runtime.txt"
             grep -F 'Rust UIKit active callback observed' "$OUT/singleton-runtime.txt"
             if grep -Fq 'Public individual authorization request starting;' "$OUT/singleton-runtime.txt"; then exit 1; fi
             printf 'authorization_requested=false\n' >> "$OUT/selection-layout-scope.txt"
-            # This mode checks only layout/box evidence. The separate consent
+            # Layout/box and optional default-value lifecycle only. Separate consent
             # fixture checks the authorization continuation after a UI choice.
             exit 0
           else
@@ -333,6 +360,13 @@ jobs:
             ${{ runner.temp }}/ios-sdk-audit/selection-layout-scope.txt
             ${{ runner.temp }}/ios-sdk-audit/selection-public-exports.txt
             ${{ runner.temp }}/ios-sdk-audit/selection-constructor-entries.txt
+          retention-days: 1
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always() && inputs.selection_value_probe
+        with:
+          name: ios-selection-value-audit
+          path: ${{ runner.temp }}/ios-sdk-audit/selection-value-results.txt
           retention-days: 1
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
