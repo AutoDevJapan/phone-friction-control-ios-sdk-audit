@@ -137,9 +137,18 @@ jobs:
             XCODE_ROOT="$RUNNER_TEMP/rust-xcode-host"
             mkdir -p "$XCODE_ROOT/Probe.xcodeproj"
             cp "$PROBE_APP/Info.plist" "$XCODE_ROOT/Info.plist"
-            # Xcode sets MinimumOSVersion from IPHONEOS_DEPLOYMENT_TARGET.
+            # Xcode sets these from the target's deployment/device settings.
             /usr/libexec/PlistBuddy -c 'Delete :MinimumOSVersion' "$XCODE_ROOT/Info.plist"
-            rustc tools/ios-abi-probe.rs --crate-name ios_xcode_probe --crate-type staticlib --edition 2024 --cfg runtime_probe --cfg auth_request --cfg uikit_host --cfg xcode_host --target aarch64-apple-ios-sim -o "$XCODE_ROOT/libprobe.a"
+            /usr/libexec/PlistBuddy -c 'Delete :UIDeviceFamily' "$XCODE_ROOT/Info.plist"
+            # An object input is required: Xcode deliberately skips the link
+            # when a target has libraries but no compiled/linked object files.
+            # Emit our Rust object and its dependency archive in one invocation.
+            rustc tools/ios-abi-probe.rs --crate-name ios_xcode_probe --crate-type staticlib --edition 2024 --cfg runtime_probe --cfg auth_request --cfg uikit_host --cfg xcode_host --target aarch64-apple-ios-sim --emit="obj=$XCODE_ROOT/probe.o,link" --print native-static-libs -o "$XCODE_ROOT/libprobe.a" 2> "$OUT/rust-static-link.txt"
+            test "$(grep -c '^note: native-static-libs: ' "$OUT/rust-static-link.txt")" = 1
+            NATIVE_LIBS=$(sed -n 's/^note: native-static-libs: //p' "$OUT/rust-static-link.txt")
+            test -n "$NATIVE_LIBS"
+            xcrun nm -gU "$XCODE_ROOT/probe.o" > "$OUT/rust-object-symbols.txt"
+            grep -E '[[:space:]]T[[:space:]]+_main$' "$OUT/rust-object-symbols.txt"
             cat > "$XCODE_ROOT/Entitlements.plist" <<'PLIST'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -147,7 +156,7 @@ jobs:
           <key>com.apple.developer.family-controls</key><true/>
           </dict></plist>
           PLIST
-            # Native application target, with Rust archive in the link phase.
+            # Native application target, with Rust object and dependency archive.
             # No Swift, Objective-C, or C source is generated or compiled.
             cat > "$XCODE_ROOT/Probe.xcodeproj/project.pbxproj" <<'PROJECT'
           // !$*UTF8*$!
@@ -157,26 +166,34 @@ jobs:
             objectVersion = 56;
             objects = {
               A00000000000000000000001 = {isa = PBXProject; attributes = {LastUpgradeCheck = 1540; TargetAttributes = {A00000000000000000000002 = {SystemCapabilities = {com.apple.FamilyControls = {enabled = 1;};};};};}; buildConfigurationList = A00000000000000000000003; compatibilityVersion = "Xcode 14.0"; developmentRegion = en; hasScannedForEncodings = 0; knownRegions = (en, Base); mainGroup = A00000000000000000000004; productRefGroup = A00000000000000000000005; projectDirPath = ""; projectRoot = ""; targets = (A00000000000000000000002);};
-              A00000000000000000000002 = {isa = PBXNativeTarget; buildConfigurationList = A00000000000000000000006; buildPhases = (A00000000000000000000007); buildRules = (); dependencies = (); name = "authorization-center-probe"; productName = "authorization-center-probe"; productReference = A00000000000000000000008; productType = "com.apple.product-type.application";};
+              A00000000000000000000002 = {isa = PBXNativeTarget; buildConfigurationList = A00000000000000000000006; buildPhases = (A00000000000000000000013, A00000000000000000000007); buildRules = (); dependencies = (); name = "authorization-center-probe"; productName = "authorization-center-probe"; productReference = A00000000000000000000008; productType = "com.apple.product-type.application";};
               A00000000000000000000003 = {isa = XCConfigurationList; buildConfigurations = (A00000000000000000000009); defaultConfigurationIsVisible = 0; defaultConfigurationName = Debug;};
-              A00000000000000000000004 = {isa = PBXGroup; children = (A00000000000000000000010, A00000000000000000000005); sourceTree = "<group>";};
+              A00000000000000000000004 = {isa = PBXGroup; children = (A00000000000000000000010, A00000000000000000000014, A00000000000000000000005); sourceTree = "<group>";};
               A00000000000000000000005 = {isa = PBXGroup; children = (A00000000000000000000008); name = Products; sourceTree = "<group>";};
               A00000000000000000000006 = {isa = XCConfigurationList; buildConfigurations = (A00000000000000000000011); defaultConfigurationIsVisible = 0; defaultConfigurationName = Debug;};
-              A00000000000000000000007 = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (A00000000000000000000012); runOnlyForDeploymentPostprocessing = 0;};
+              A00000000000000000000007 = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (A00000000000000000000015, A00000000000000000000012); runOnlyForDeploymentPostprocessing = 0;};
               A00000000000000000000008 = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "authorization-center-probe.app"; sourceTree = BUILT_PRODUCTS_DIR;};
               A00000000000000000000009 = {isa = XCBuildConfiguration; buildSettings = {SDKROOT = iphonesimulator; IPHONEOS_DEPLOYMENT_TARGET = 17.5; CLANG_ENABLE_MODULES = YES;}; name = Debug;};
               A00000000000000000000010 = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = libprobe.a; sourceTree = "<group>";};
-              A00000000000000000000011 = {isa = XCBuildConfiguration; buildSettings = {ARCHS = arm64; CODE_SIGN_STYLE = Automatic; CODE_SIGN_IDENTITY = "-"; CODE_SIGN_ENTITLEMENTS = Entitlements.plist; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = Info.plist; PRODUCT_BUNDLE_IDENTIFIER = com.autodevjapan.phonecontrol1614abiprobe; PRODUCT_NAME = "authorization-center-probe"; CURRENT_PROJECT_VERSION = 1; MARKETING_VERSION = 0.1.0; TARGETED_DEVICE_FAMILY = 1; SUPPORTED_PLATFORMS = iphonesimulator; SKIP_INSTALL = NO; LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "/usr/lib/swift"); OTHER_LDFLAGS = ("-L$(SDKROOT)/usr/lib/swift", "-lswift_Concurrency", "-lswiftCore", "-lobjc", "-lSystem", "-framework", FamilyControls, "-framework", Foundation, "-framework", CoreFoundation, "-framework", UIKit);}; name = Debug;};
+              A00000000000000000000011 = {isa = XCBuildConfiguration; buildSettings = {ARCHS = arm64; CODE_SIGN_STYLE = Automatic; CODE_SIGN_IDENTITY = "-"; CODE_SIGN_ENTITLEMENTS = Entitlements.plist; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = Info.plist; PRODUCT_BUNDLE_IDENTIFIER = com.autodevjapan.phonecontrol1614abiprobe; PRODUCT_NAME = "authorization-center-probe"; CURRENT_PROJECT_VERSION = 1; MARKETING_VERSION = 0.1.0; TARGETED_DEVICE_FAMILY = 1; SUPPORTED_PLATFORMS = iphonesimulator; SKIP_INSTALL = NO; LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "/usr/lib/swift");}; name = Debug;};
               A00000000000000000000012 = {isa = PBXBuildFile; fileRef = A00000000000000000000010;};
+              A00000000000000000000013 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0;};
+              A00000000000000000000014 = {isa = PBXFileReference; lastKnownFileType = "compiled.mach-o.objfile"; path = probe.o; sourceTree = "<group>";};
+              A00000000000000000000015 = {isa = PBXBuildFile; fileRef = A00000000000000000000014;};
             };
             rootObject = A00000000000000000000001;
           }
           PROJECT
             plutil -lint "$XCODE_ROOT/Probe.xcodeproj/project.pbxproj" "$XCODE_ROOT/Info.plist" "$XCODE_ROOT/Entitlements.plist"
             # No provisioning update, login, new certificate, or paid account.
-            xcodebuild -project "$XCODE_ROOT/Probe.xcodeproj" -target authorization-center-probe -configuration Debug -sdk iphonesimulator SYMROOT="$OUT/xcode-products" OBJROOT="$RUNNER_TEMP/xcode-objects" > "$OUT/xcode-build.txt" 2>&1
+            xcodebuild -project "$XCODE_ROOT/Probe.xcodeproj" -target authorization-center-probe -configuration Debug -sdk iphonesimulator SYMROOT="$OUT/xcode-products" OBJROOT="$RUNNER_TEMP/xcode-objects" "OTHER_LDFLAGS=\$(inherited) -L$SDK/usr/lib/swift $NATIVE_LIBS" > "$OUT/xcode-build.txt" 2>&1
             PROBE_APP="$OUT/xcode-products/Debug-iphonesimulator/authorization-center-probe.app"
             test -x "$PROBE_APP/authorization-center-probe"
+            file "$PROBE_APP/authorization-center-probe" > "$OUT/xcode-executable-type.txt"
+            grep -F 'Mach-O 64-bit executable arm64' "$OUT/xcode-executable-type.txt"
+            xcrun nm -gU "$PROBE_APP/authorization-center-probe" > "$OUT/xcode-executable-symbols.txt"
+            grep -E '[[:space:]]T[[:space:]]+_main$' "$OUT/xcode-executable-symbols.txt"
+            grep -E '^Ld ' "$OUT/xcode-build.txt"
           else
             codesign --sign - "$PROBE_APP"
           fi
