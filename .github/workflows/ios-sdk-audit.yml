@@ -26,6 +26,10 @@ on:
         description: Read public Binding accessor entries and their first same-image BL prefixes without invoking them
         type: boolean
         default: false
+      category_init_entry_probe:
+        description: Inspect only the public Bool category initializer prefix; never invoke it
+        type: boolean
+        default: false
 permissions:
   contents: read
 jobs:
@@ -46,6 +50,10 @@ jobs:
           mkdir "$OUT"
           if [ '${{ inputs.binding_entry_probe }}' = true ]; then test '${{ inputs.selection_layout_probe }}' = true; fi
           if [ '${{ inputs.selection_value_probe }}' = true ]; then test '${{ inputs.selection_layout_probe }}' = true; fi
+          if [ '${{ inputs.category_init_entry_probe }}' = true ]; then
+            test '${{ inputs.selection_layout_probe }}' = true
+            test '${{ inputs.selection_value_probe }}' = false
+          fi
           if [ '${{ inputs.selection_layout_probe }}' = true ]; then
             test '${{ inputs.native_uikit_host }}' = true
             test '${{ inputs.authorization_probe }}' = true
@@ -163,6 +171,11 @@ jobs:
             # Verify the Darwin special dlsym handle against this SDK as well.
             grep -Eq '^#define[[:space:]]+RTLD_DEFAULT[[:space:]]+\(\(void[[:space:]]*\*\)[[:space:]]*-2\)' "$SDK/usr/include/dlfcn.h"
             SELECTION_ARGS=(--cfg selection_layout_probe)
+            if [ '${{ inputs.category_init_entry_probe }}' = true ]; then
+              export SELECTION_CATEGORY_INIT_SYMBOL=$(jq -er '[.[] | select(.name == "FamilyActivitySelection") | .members[] | select(.kind == "Constructor" and .printedName == "init(includeEntireCategory:)" and .moduleName == "FamilyControls" and .throwing != true and (.children | map(.usr)) == ["s:14FamilyControls0A17ActivitySelectionV", "s:Sb"] and .mangledName == "\u0024s14FamilyControls0A17ActivitySelectionV21includeEntireCategoryACSb_tcfc") | .mangledName | sub("cfc$"; "cfC")] | if length == 1 then .[0] else error("expected one public category Bool initializer") end' "$OUT/FamilyControls-selected-declarations.json")
+              grep -Fx "$SELECTION_CATEGORY_INIT_SYMBOL" "$RUNNER_TEMP/selection-candidate-exports.txt" > "$OUT/selection-category-init-export.txt"
+              SELECTION_ARGS+=(--cfg category_init_entry_probe)
+            fi
             if [ '${{ inputs.selection_value_probe }}' = true ]; then
               SELECTION_ARGS+=(--cfg selection_value_probe)
             fi
@@ -289,7 +302,13 @@ jobs:
             grep -F 'Selection box: buffer_aligned=true; project_matches=true; uninitialized_deallocated=true' "$OUT/selection-layout.txt"
             grep -F 'Selection layout inspection complete; phase=layout; selection_values_constructed=0; selection_values_read=0; initializer_calls=0; closure_calls=0; value_witness_calls=0; authorization_requests=0;' "$OUT/selection-layout.txt"
             test "$(grep -c '^Selection layout:' "$OUT/selection-layout.txt")" = 2
-            test "$(grep -Ec '^Selection entry bytes: (FamilyActivitySelection\.|Binding<FamilyActivitySelection>\.|Binding.init\(get:set:\) without Transaction;)' "$OUT/selection-layout.txt")" = 6
+            EXPECTED_ENTRIES=6
+            if [ '${{ inputs.category_init_entry_probe }}' = true ]; then
+              EXPECTED_ENTRIES=7
+              grep -F 'Selection entry bytes: FamilyActivitySelection.init(includeEntireCategory:);' "$OUT/selection-layout.txt" > "$OUT/selection-category-init-prefix.txt"
+              grep -F 'Selection category entry inspected; initializer_calls=0; category_values_constructed=0' "$OUT/singleton-runtime.txt" > "$OUT/selection-category-init-scope.txt"
+            fi
+            test "$(grep -Ec '^Selection entry bytes: (FamilyActivitySelection\.|Binding<FamilyActivitySelection>\.|Binding.init\(get:set:\) without Transaction;)' "$OUT/selection-layout.txt")" = "$EXPECTED_ENTRIES"
             if [ '${{ inputs.binding_entry_probe }}' = true ]; then
               grep -F 'Binding accessor inspection complete; helper_calls=0; getter_calls=0; setter_calls=0; closure_calls=0; ownership_verified=false' "$OUT/selection-layout.txt"
               test "$(grep -c '^Selection entry bytes: Binding.wrappedValue getter;' "$OUT/selection-layout.txt")" = 1
@@ -367,6 +386,16 @@ jobs:
         with:
           name: ios-selection-value-audit
           path: ${{ runner.temp }}/ios-sdk-audit/selection-value-results.txt
+          retention-days: 1
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always() && inputs.category_init_entry_probe
+        with:
+          name: ios-selection-category-entry-audit
+          path: |
+            ${{ runner.temp }}/ios-sdk-audit/selection-category-init-export.txt
+            ${{ runner.temp }}/ios-sdk-audit/selection-category-init-prefix.txt
+            ${{ runner.temp }}/ios-sdk-audit/selection-category-init-scope.txt
           retention-days: 1
           if-no-files-found: error
       - uses: actions/upload-artifact@v4

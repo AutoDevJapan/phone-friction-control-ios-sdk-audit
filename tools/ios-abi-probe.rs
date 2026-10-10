@@ -129,6 +129,8 @@ compile_error!("selection layout inspection requires the Xcode UIKit authorizati
 compile_error!("binding entry inspection requires the selection layout mode");
 #[cfg(all(selection_value_probe, not(selection_layout_probe)))]
 compile_error!("selection value lifecycle requires the selection layout mode");
+#[cfg(all(category_init_entry_probe, not(selection_layout_probe)))]
+compile_error!("category initializer entry inspection requires the layout mode");
 
 // Layout and entry-byte evidence only; no Selection or Binding value is built.
 #[cfg(selection_layout_probe)]
@@ -422,6 +424,17 @@ mod selection_layout {
             resolve(env!("SELECTION_INIT_SYMBOL")),
             page,
         );
+        #[cfg(category_init_entry_probe)]
+        {
+            entry_bytes(
+                "FamilyActivitySelection.init(includeEntireCategory:)",
+                resolve(env!("SELECTION_CATEGORY_INIT_SYMBOL")),
+                page,
+            );
+            println!(
+                "Selection category entry inspected; initializer_calls=0; category_values_constructed=0"
+            );
+        }
         entry_bytes(
             "Binding.init(get:set:) without Transaction",
             resolve(env!("BINDING_INIT_SYMBOL")),
