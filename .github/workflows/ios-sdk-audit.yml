@@ -388,8 +388,11 @@ jobs:
               grep -Fx 'raw_value_getter_calls=1' "$OUT/public-authorization-result.txt"
               grep -Fx 'enum_case_name_calls=1' "$OUT/public-authorization-result.txt"
               if [ '${{ inputs.ui_continue }}' = false ]; then
-                grep -Fx 'status_raw_value=1' "$OUT/public-authorization-result.txt"
-                grep -Fx 'status_label=denied' "$OUT/public-authorization-result.txt"
+                # SDK17.5 individual cancellation returned error + notDetermined
+                # in run38081982214. Refusal must never count as approved; the
+                # Rust reader already checks the exact raw/reflected-case pair.
+                grep -Eq '^status_raw_value=[01]$' "$OUT/public-authorization-result.txt"
+                grep -Eq '^status_label=(notDetermined|denied)$' "$OUT/public-authorization-result.txt"
               else
                 grep -Fx 'status_raw_value=2' "$OUT/public-authorization-result.txt"
                 grep -Fx 'status_label=approved' "$OUT/public-authorization-result.txt"
