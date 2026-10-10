@@ -6,6 +6,12 @@
 #![cfg_attr(xcode_host, no_main)]
 
 #[cfg(all(
+    ui_test_bundle,
+    not(all(target_os = "ios", target_arch = "aarch64", target_abi = "sim"))
+))]
+compile_error!("the permission UI fixture is limited to arm64 iOS Simulator");
+
+#[cfg(all(
     ui_test_host,
     not(all(runtime_probe, uikit_host, auth_request, xcode_host))
 ))]
@@ -799,7 +805,27 @@ mod ui_authorization_test {
                 }
                 action(allow_button.0, c"tap");
                 println!(
-                    "XCTest second Screen Time authorization button tap returned; passcode_entries=0; authorization_status_verified=false"
+                    "XCTest second Screen Time authorization button tap returned; authorization_status_verified=false"
+                );
+                // Each run creates a new disposable Simulator. Use one non-secret
+                // synthetic fixture through its ordinary OS authentication UI.
+                let passcode_label = string(c"Passcode field");
+                let fields = retained_object(system_app.0, c"secureTextFields");
+                let field_query =
+                    retained_object_arg(fields.0, c"matchingIdentifier:", passcode_label.0);
+                let field = retained_object(field_query.0, c"firstMatch");
+                if !wait_for(field.0, 10.0) {
+                    describe_system(system_app.0);
+                    fail(test, c"Observed Simulator passcode field missing");
+                    return;
+                }
+                action(field.0, c"tap");
+                let fixture = string(c"1614\n");
+                let type_text: unsafe extern "C" fn(Id, Sel, Id) =
+                    std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+                type_text(field.0, sel_registerName(c"typeText:".as_ptr()), fixture.0);
+                println!(
+                    "XCTest disposable Simulator synthetic fixture submitted once; authorization_status_verified=false"
                 );
             }
             // This marker is set only after the host's public continuation and

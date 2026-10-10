@@ -65,6 +65,11 @@ jobs:
             for SELECTOR in initWithBundleIdentifier waitForExistenceWithTimeout matchingIdentifier recordFailureWithDescription; do
               grep -F "$SELECTOR" "$OUT/xctest-selected-headers.txt"
             done
+            if [ '${{ inputs.ui_continue }}' = true ]; then
+              grep -R -n -A 3 -B 2 -E 'typeText:|@property.*secureTextFields' "$TEST_HEADERS" > "$OUT/xctest-fixture-input-headers.txt"
+              grep -Eq '\(void\)[[:space:]]*typeText:[[:space:]]*\(NSString[[:space:]]*\*\)' "$OUT/xctest-fixture-input-headers.txt"
+              grep -Eq '@property.*XCUIElementQuery[[:space:]]*\*[[:space:]]*secureTextFields' "$OUT/xctest-fixture-input-headers.txt"
+            fi
             if [ '${{ inputs.ui_consent_test }}' = true ]; then
               UIKIT_HEADERS="$SDK/System/Library/Frameworks/UIKit.framework/Headers"
               grep -n -A 5 -B 3 -E 'UIButtonTypeSystem|buttonWithType:|setTitle:.*forState:' "$UIKIT_HEADERS/UIButton.h" > "$OUT/uikit-test-button-declarations.txt"
