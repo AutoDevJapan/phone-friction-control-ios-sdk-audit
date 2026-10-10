@@ -121,8 +121,7 @@ fn main() {
         let object = inspect_singleton();
         #[cfg(authorization_status_entry_probe)]
         {
-            let _ = object;
-            authorization_status_entry::inspect();
+            authorization_status_entry::inspect(object);
         }
         #[cfg(not(authorization_status_entry_probe))]
         async_inspection::inspect();
@@ -140,6 +139,14 @@ mod authorization_status_entry {
     unsafe extern "C" {
         fn dlsym(handle: *mut c_void, name: *const c_char) -> *mut c_void;
         fn getpagesize() -> i32;
+        fn dladdr(address: *const c_void, information: *mut DlInfo) -> i32;
+    }
+    #[repr(C)]
+    struct DlInfo {
+        filename: *const c_char,
+        base: *const c_void,
+        symbol: *const c_char,
+        symbol_address: *const c_void,
     }
     fn resolve(symbol: &str) -> *const c_void {
         let name = CString::new(symbol).unwrap();
@@ -166,7 +173,20 @@ mod authorization_status_entry {
         );
         unsafe { pointer.read() }
     }
-    pub(super) fn inspect() {
+    fn prefix(label: &str, entry: *const c_void, page: usize) {
+        assert!(
+            !entry.is_null() && entry.addr() % 4 == 0,
+            "invalid status code entry"
+        );
+        let length = 128.min(page - entry.addr() % page);
+        let bytes = unsafe { std::slice::from_raw_parts(entry.cast::<u8>(), length) };
+        print!("Authorization status {label}: length={length}; hex=");
+        for byte in bytes {
+            print!("{byte:02x}");
+        }
+        println!();
+    }
+    pub(super) fn inspect(object: *mut c_void) {
         let page = unsafe { getpagesize() };
         assert!(page > 0, "invalid page size");
         let page = page as usize;
@@ -203,13 +223,64 @@ mod authorization_status_entry {
             "Authorization status layout: size={size}; stride={stride}; alignment={alignment}; metadata_complete=true; kind_enum=true"
         );
         let getter = resolve(env!("AUTH_STATUS_GET_SYMBOL"));
-        let length = 128.min(page - getter.addr() % page);
-        let bytes = unsafe { std::slice::from_raw_parts(getter.cast::<u8>(), length) };
-        print!("Authorization status getter entry: length={length}; hex=");
-        for byte in bytes {
-            print!("{byte:02x}");
-        }
-        println!();
+        prefix("getter entry", getter, page);
+        // Actual SDK17.5 public dispatch thunk (run38077790004):
+        // ldr x9,[x20]; ldr x0,[x9,#slot]; br x0. Validate that exact
+        // instruction shape before deriving the slot; never invoke either entry.
+        let instructions = getter.cast::<u32>();
+        assert!(
+            unsafe { read(instructions, page) } == 0xf940_0289,
+            "getter class load changed"
+        );
+        let load = unsafe { read(instructions.wrapping_add(1), page) };
+        assert!(
+            load & 0xffc0_03ff == 0xf940_0120,
+            "getter slot load changed"
+        );
+        assert!(
+            unsafe { read(instructions.wrapping_add(2), page) } == 0xd61f_0000,
+            "getter branch changed"
+        );
+        let slot = ((load >> 10) & 0xfff) as usize * 8;
+        let class = unsafe { super::object_getClass(object) };
+        assert!(!class.is_null(), "status center class missing");
+        assert!(
+            unsafe { read(object.cast::<*const c_void>(), page) } == class,
+            "getter requires an unpacked Swift class reference"
+        );
+        let target = unsafe {
+            read(
+                class
+                    .cast::<u8>()
+                    .wrapping_add(slot)
+                    .cast::<*const c_void>(),
+                page,
+            )
+        };
+        let info = || DlInfo {
+            filename: std::ptr::null(),
+            base: std::ptr::null(),
+            symbol: std::ptr::null(),
+            symbol_address: std::ptr::null(),
+        };
+        let mut source_info = info();
+        let mut target_info = info();
+        assert!(
+            unsafe { dladdr(getter, &mut source_info) } != 0
+                && unsafe { dladdr(target, &mut target_info) } != 0
+                && !source_info.base.is_null()
+                && source_info.base == target_info.base,
+            "status getter implementation image differs"
+        );
+        prefix("getter implementation", target, page);
+        prefix(
+            "raw value getter entry",
+            resolve(env!("AUTH_STATUS_RAW_GET_SYMBOL")),
+            page,
+        );
+        println!(
+            "Authorization status dispatch observed: same_image=true; slot_derived=true; implementation_calls=0; raw_value_getter_calls=0"
+        );
         println!(
             "Authorization status entry inspection complete; status_getter_calls=0; enum_values_constructed=0; value_witness_calls=0; authorization_requests=0; grant_verified=false"
         );

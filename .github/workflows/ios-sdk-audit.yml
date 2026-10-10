@@ -101,7 +101,7 @@ jobs:
             xcrun swift-api-digester -dump-sdk -module "$MODULE" -sdk "$SDK" -target "$TARGET" -o "$RUNNER_TEMP/$MODULE.json"
             jq '[.. | objects | select(.name? | IN("AuthorizationCenter", "shared", "requestAuthorization", "FamilyActivityPicker", "FamilyActivitySelection", "DeviceActivityCenter", "startMonitoring", "DeviceActivityEvent", "DeviceActivityMonitor", "ManagedSettingsStore", "ShieldSettings", "applications")) | {kind, name, printedName, usr, mangledName}]' "$RUNNER_TEMP/$MODULE.json" > "$OUT/$MODULE-symbols.json"
             test "$(jq length "$OUT/$MODULE-symbols.json")" -gt 0
-            jq '[.. | objects | select(.kind? == "TypeDecl" and (.name? | IN("AuthorizationCenter", "AuthorizationStatus", "FamilyActivityPicker", "FamilyActivitySelection", "DeviceActivityCenter", "DeviceActivityMonitor", "DeviceActivityEvent", "ManagedSettingsStore", "ShieldSettings"))) | {name, usr, declKind, genericSig, members: [.children[]? | select(.name? | IN("shared", "requestAuthorization", "authorizationStatus", "notDetermined", "denied", "approved", "init", "startMonitoring", "intervalDidStart", "intervalDidEnd", "eventDidReachThreshold", "shield", "applications"))]}]' "$RUNNER_TEMP/$MODULE.json" > "$OUT/$MODULE-selected-declarations.json"
+            jq '[.. | objects | select(.kind? == "TypeDecl" and (.name? | IN("AuthorizationCenter", "AuthorizationStatus", "FamilyActivityPicker", "FamilyActivitySelection", "DeviceActivityCenter", "DeviceActivityMonitor", "DeviceActivityEvent", "ManagedSettingsStore", "ShieldSettings"))) | {name, usr, declKind, genericSig, members: [.children[]? | select(.name? | IN("shared", "requestAuthorization", "authorizationStatus", "notDetermined", "denied", "approved", "rawValue", "init", "startMonitoring", "intervalDidStart", "intervalDidEnd", "eventDidReachThreshold", "shield", "applications"))]}]' "$RUNNER_TEMP/$MODULE.json" > "$OUT/$MODULE-selected-declarations.json"
             if [ "$MODULE" = FamilyControls ]; then
               grep -oE '\$s14FamilyControls19AuthorizationCenterC[[:alnum:]_]+' "$FRAMEWORK/$MODULE.tbd" | sort -u > "$OUT/authorization-center-exports.txt"
               test -s "$OUT/authorization-center-exports.txt"
@@ -153,10 +153,13 @@ jobs:
           if [ '${{ inputs.authorization_status_entry_probe }}' = true ]; then
             export AUTH_STATUS_METADATA_SYMBOL=$(jq -er '[.[] | select(.name == "AuthorizationStatus" and .declKind == "Enum" and .genericSig == null and .usr == "s:14FamilyControls19AuthorizationStatusO") | .usr | sub("^s:"; "\u0024s") + "Ma"] | if length == 1 then .[0] else error("expected public status enum metadata") end' "$OUT/FamilyControls-selected-declarations.json")
             export AUTH_STATUS_GET_SYMBOL=$(jq -er '[.[] | select(.name == "AuthorizationCenter") | .members[] | select(.name == "authorizationStatus" and .children[0].usr == "s:14FamilyControls19AuthorizationStatusO") | .accessors[] | select(.accessorKind == "get" and .mangledName == "\u0024s14FamilyControls19AuthorizationCenterC19authorizationStatusAA0cF0Ovg") | .mangledName + "Tj"] | if length == 1 then .[0] else error("expected public status getter") end' "$OUT/FamilyControls-selected-declarations.json")
+            export AUTH_STATUS_RAW_GET_SYMBOL=$(jq -er '[.[] | select(.name == "AuthorizationStatus") | .members[] | select(.name == "rawValue" and .children[0].printedName == "Swift.Int") | .accessors[] | select(.accessorKind == "get" and .mangledName == "\u0024s14FamilyControls19AuthorizationStatusO8rawValueSivg") | .mangledName] | if length == 1 then .[0] else error("expected public status raw value getter") end' "$OUT/FamilyControls-selected-declarations.json")
             grep -oE '\$s14FamilyControls19AuthorizationStatusO[[:alnum:]_]+' "$SDK/System/Library/Frameworks/FamilyControls.framework/FamilyControls.tbd" | sort -u > "$RUNNER_TEMP/status-candidate-exports.txt"
-            { grep -Fx "$AUTH_STATUS_METADATA_SYMBOL" "$RUNNER_TEMP/status-candidate-exports.txt"; grep -Fx "$AUTH_STATUS_GET_SYMBOL" "$OUT/authorization-center-exports.txt"; } > "$OUT/authorization-status-public-entries.txt"
-            test "$(wc -l < "$OUT/authorization-status-public-entries.txt" | tr -d ' ')" = 2
+            { grep -Fx "$AUTH_STATUS_METADATA_SYMBOL" "$RUNNER_TEMP/status-candidate-exports.txt"; grep -Fx "$AUTH_STATUS_GET_SYMBOL" "$OUT/authorization-center-exports.txt"; grep -Fx "$AUTH_STATUS_RAW_GET_SYMBOL" "$RUNNER_TEMP/status-candidate-exports.txt"; } > "$OUT/authorization-status-public-entries.txt"
+            test "$(wc -l < "$OUT/authorization-status-public-entries.txt" | tr -d ' ')" = 3
             grep -Eq '^#define[[:space:]]+RTLD_DEFAULT[[:space:]]+\(\(void[[:space:]]*\*\)[[:space:]]*-2\)' "$SDK/usr/include/dlfcn.h"
+            grep -n -A 12 -B 3 'dli_fname' "$SDK/usr/include/dlfcn.h" > "$OUT/status-dladdr-declaration.txt"
+            grep -n -A 18 -B 2 'public enum AuthorizationStatus :' "$SDK/System/Library/Frameworks/FamilyControls.framework/Modules/FamilyControls.swiftmodule/arm64-apple-ios-simulator.swiftinterface" > "$OUT/authorization-status-enum-definition.txt"
             REQUEST_ARGS=(--cfg authorization_status_entry_probe)
           fi
           if [ '${{ inputs.authorization_probe }}' = true ]; then
@@ -306,9 +309,12 @@ jobs:
           if [ '${{ inputs.authorization_status_entry_probe }}' = true ]; then
             xcrun simctl launch --console "$SIM_ID" com.autodevjapan.phonecontrol1614abiprobe > "$OUT/singleton-runtime.txt" 2>&1
             grep -F 'SDK singleton class: FamilyControls.AuthorizationCenter' "$OUT/singleton-runtime.txt"
-            grep -E '^Authorization status (layout:|getter entry:|entry inspection complete;)' "$OUT/singleton-runtime.txt" > "$OUT/authorization-status-entry.txt"
+            grep -E '^Authorization status (layout:|getter entry:|getter implementation:|raw value getter entry:|dispatch observed:|entry inspection complete;)' "$OUT/singleton-runtime.txt" > "$OUT/authorization-status-entry.txt"
             test "$(grep -c '^Authorization status layout:' "$OUT/authorization-status-entry.txt")" = 1
             test "$(grep -c '^Authorization status getter entry:' "$OUT/authorization-status-entry.txt")" = 1
+            test "$(grep -c '^Authorization status getter implementation:' "$OUT/authorization-status-entry.txt")" = 1
+            test "$(grep -c '^Authorization status raw value getter entry:' "$OUT/authorization-status-entry.txt")" = 1
+            grep -Fx 'Authorization status dispatch observed: same_image=true; slot_derived=true; implementation_calls=0; raw_value_getter_calls=0' "$OUT/authorization-status-entry.txt"
             grep -Fx 'Authorization status entry inspection complete; status_getter_calls=0; enum_values_constructed=0; value_witness_calls=0; authorization_requests=0; grant_verified=false' "$OUT/authorization-status-entry.txt"
             if grep -Eq 'Public individual authorization request starting;|Rust async task entry observed;' "$OUT/singleton-runtime.txt"; then exit 1; fi
             printf 'status_metadata_verified=true\nstatus_getter_called=false\nauthorization_requested=false\nauthorization_status_verified=false\ngrant_verified=false\nmonitoring=false\nshielding=false\n' > "$OUT/authorization-status-entry-scope.txt"
