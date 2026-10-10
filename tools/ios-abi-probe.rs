@@ -1,9 +1,19 @@
 //! Default mode: compiler experiment with an undefined external symbol.
 //! runtime_probe mode: isolated Simulator getter and async runtime inspection.
-//! No authorization request is made by this inspection stage.
-#![cfg_attr(not(runtime_probe), no_std)]
-#![feature(abi_swift)]
+//! Authorization requests require the explicit auth_request mode.
+#![cfg_attr(not(any(runtime_probe, ui_test_bundle)), no_std)]
+#![cfg_attr(not(ui_test_bundle), feature(abi_swift))]
 #![cfg_attr(xcode_host, no_main)]
+
+#[cfg(all(
+    ui_test_host,
+    not(all(runtime_probe, uikit_host, auth_request, xcode_host))
+))]
+compile_error!("the UI test host requires the Xcode UIKit authorization mode");
+#[cfg(all(ui_test_continue, not(ui_test_bundle)))]
+compile_error!("the Continue test mode requires the isolated XCTest bundle");
+#[cfg(all(ui_test_bundle, runtime_probe))]
+compile_error!("the XCTest bundle and inspected application are separate products");
 
 #[cfg(all(
     runtime_probe,
@@ -11,13 +21,13 @@
 ))]
 compile_error!("runtime inspection is limited to arm64 iOS Simulator");
 
-#[cfg(not(runtime_probe))]
+#[cfg(not(any(runtime_probe, ui_test_bundle)))]
 unsafe extern "Swift" {
     fn abi_probe_external();
 }
 
 #[unsafe(no_mangle)]
-#[cfg(not(runtime_probe))]
+#[cfg(not(any(runtime_probe, ui_test_bundle)))]
 pub unsafe extern "C" fn rust_calls_swift_probe() {
     unsafe { abi_probe_external() };
 }
@@ -536,7 +546,10 @@ mod request_probe {
 
     #[cfg(uikit_host)]
     pub(super) fn wait_from_worker(owner: TaskOwner, started: Instant) -> bool {
-        let deadline = started + Duration::from_secs(20);
+        // The UI test runner has to launch the host before it can choose the
+        // ordinary OS consent button. Keep the default inspection deadline.
+        let wait_seconds = if cfg!(ui_test_host) { 90 } else { 20 };
+        let deadline = started + Duration::from_secs(wait_seconds);
         while RESULT.load(Ordering::Acquire) == 0 && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(50));
         }
@@ -555,8 +568,209 @@ mod request_probe {
             result == 2
         );
         println!("authorization_status_verified=false; monitoring=false; shielding=false");
+        #[cfg(ui_test_host)]
+        {
+            // Diagnostic output in this disposable test app's own container.
+            // It contains no account details, tokens, or activity selection.
+            let home = std::env::var_os("HOME").expect("test app container HOME missing");
+            let documents = std::path::PathBuf::from(home).join("Documents");
+            std::fs::create_dir_all(&documents).expect("create test output directory");
+            std::fs::write(
+                documents.join("public-authorization-result.txt"),
+                format!("public_authorization_continuation_observed=true\nerror_present={}\nauthorization_status_verified=false\nmonitoring=false\nshielding=false\n", result == 2),
+            ).expect("write public authorization test result");
+        }
         true
     }
+}
+
+// This module is loaded only in Xcode's isolated XCTest UI test bundle. It
+// performs public XCUIElement taps in the disposable Simulator, never in the
+// product process or an owner's device. No authorization API is substituted.
+#[cfg(ui_test_bundle)]
+mod ui_authorization_test {
+    use std::ffi::{c_char, c_void};
+
+    type Id = *mut c_void;
+    type Sel = *const c_void;
+
+    #[link(name = "objc")]
+    unsafe extern "C" {
+        fn objc_getClass(name: *const c_char) -> Id;
+        fn objc_allocateClassPair(parent: Id, name: *const c_char, extra: usize) -> Id;
+        fn objc_registerClassPair(class: Id);
+        fn class_addMethod(
+            class: Id,
+            selector: Sel,
+            implementation: *const c_void,
+            types: *const c_char,
+        ) -> bool;
+        fn sel_registerName(name: *const c_char) -> Sel;
+        fn objc_msgSend();
+        fn objc_release(object: Id);
+    }
+
+    // Xcode links XCTest into the runner's test bundle. The explicit framework
+    // dependency makes its public Objective-C classes available at bundle load.
+    #[link(name = "XCTest", kind = "framework")]
+    unsafe extern "C" {}
+
+    unsafe fn object(receiver: Id, selector: &std::ffi::CStr) -> Id {
+        let send: unsafe extern "C" fn(Id, Sel) -> Id =
+            unsafe { std::mem::transmute(objc_msgSend as unsafe extern "C" fn()) };
+        unsafe { send(receiver, sel_registerName(selector.as_ptr())) }
+    }
+
+    unsafe fn object_arg(receiver: Id, selector: &std::ffi::CStr, argument: Id) -> Id {
+        let send: unsafe extern "C" fn(Id, Sel, Id) -> Id =
+            unsafe { std::mem::transmute(objc_msgSend as unsafe extern "C" fn()) };
+        unsafe { send(receiver, sel_registerName(selector.as_ptr()), argument) }
+    }
+
+    unsafe fn action(receiver: Id, selector: &std::ffi::CStr) {
+        let send: unsafe extern "C" fn(Id, Sel) =
+            unsafe { std::mem::transmute(objc_msgSend as unsafe extern "C" fn()) };
+        unsafe { send(receiver, sel_registerName(selector.as_ptr())) };
+    }
+
+    struct Owned(Id);
+    impl Drop for Owned {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                unsafe { objc_release(self.0) };
+            }
+        }
+    }
+
+    unsafe fn string(text: &std::ffi::CStr) -> Owned {
+        let class = unsafe { objc_getClass(c"NSString".as_ptr()) };
+        let send: unsafe extern "C" fn(Id, Sel, *const c_char) -> Id =
+            unsafe { std::mem::transmute(objc_msgSend as unsafe extern "C" fn()) };
+        Owned(unsafe {
+            send(
+                object(class, c"alloc"),
+                sel_registerName(c"initWithUTF8String:".as_ptr()),
+                text.as_ptr(),
+            )
+        })
+    }
+
+    unsafe fn fail(test: Id, message: &std::ffi::CStr) {
+        let description = unsafe { string(message) };
+        let file = unsafe { string(c"ios-abi-probe.rs") };
+        let send: unsafe extern "C" fn(Id, Sel, Id, Id, usize, bool) =
+            unsafe { std::mem::transmute(objc_msgSend as unsafe extern "C" fn()) };
+        unsafe {
+            send(
+                test,
+                sel_registerName(c"recordFailureWithDescription:inFile:atLine:expected:".as_ptr()),
+                description.0,
+                file.0,
+                line!() as usize,
+                true,
+            )
+        };
+    }
+
+    unsafe fn wait_for(element: Id, seconds: f64) -> bool {
+        let send: unsafe extern "C" fn(Id, Sel, f64) -> bool =
+            unsafe { std::mem::transmute(objc_msgSend as unsafe extern "C" fn()) };
+        unsafe {
+            send(
+                element,
+                sel_registerName(c"waitForExistenceWithTimeout:".as_ptr()),
+                seconds,
+            )
+        }
+    }
+
+    unsafe extern "C" fn choose_consent(test: Id, _: Sel) {
+        unsafe {
+            let application_class = objc_getClass(c"XCUIApplication".as_ptr());
+            if application_class.is_null() {
+                fail(test, c"Public XCUIApplication class missing");
+                return;
+            }
+            let identifier = string(c"com.autodevjapan.phonecontrol1614abiprobe");
+            let app = Owned(object_arg(
+                object(application_class, c"alloc"),
+                c"initWithBundleIdentifier:",
+                identifier.0,
+            ));
+            if app.0.is_null() {
+                fail(test, c"Cannot construct test application");
+                return;
+            }
+            action(app.0, c"launch");
+            let alert = object(object(app.0, c"alerts"), c"firstMatch");
+            if !wait_for(alert, 30.0) {
+                fail(test, c"Screen Time consent alert not observed");
+                return;
+            }
+            let label = string(if cfg!(ui_test_continue) {
+                c"Continue"
+            } else {
+                c"Don’t Allow"
+            });
+            let mut button = object(
+                object_arg(object(alert, c"buttons"), c"matchingIdentifier:", label.0),
+                c"firstMatch",
+            );
+            if !cfg!(ui_test_continue) && !wait_for(button, 0.1) {
+                let ascii_label = string(c"Don't Allow");
+                button = object(
+                    object_arg(
+                        object(alert, c"buttons"),
+                        c"matchingIdentifier:",
+                        ascii_label.0,
+                    ),
+                    c"firstMatch",
+                );
+            }
+            if !wait_for(button, 5.0) {
+                fail(test, c"Expected OS consent button not observed");
+                return;
+            }
+            println!(
+                "XCTest ordinary Screen Time consent button observed; continue={}",
+                cfg!(ui_test_continue)
+            );
+            action(button, c"tap");
+            println!(
+                "XCTest ordinary Screen Time consent button tap returned; authorization_status_verified=false"
+            );
+            // A returned tap is not an authorization result. The host's public
+            // API continuation and status remain separate acceptance checks.
+            std::thread::sleep(std::time::Duration::from_secs(8));
+        }
+    }
+
+    unsafe extern "C" fn register() {
+        unsafe {
+            let parent = objc_getClass(c"XCTestCase".as_ptr());
+            if parent.is_null() {
+                eprintln!("Public XCTestCase class missing at bundle load");
+                std::process::exit(1);
+            }
+            let class = objc_allocateClassPair(parent, c"RustScreenTimeConsentTests".as_ptr(), 0);
+            if class.is_null()
+                || !class_addMethod(
+                    class,
+                    sel_registerName(c"testPermissionDecision".as_ptr()),
+                    choose_consent as *const c_void,
+                    c"v@:".as_ptr(),
+                )
+            {
+                eprintln!("Cannot register isolated XCTest case");
+                std::process::exit(1);
+            }
+            objc_registerClassPair(class);
+        }
+    }
+
+    #[used]
+    #[unsafe(link_section = "__DATA,__mod_init_func,mod_init_funcs")]
+    static REGISTER: unsafe extern "C" fn() = register;
 }
 
 #[cfg(all(runtime_probe, uikit_host, auth_request))]

@@ -14,6 +14,18 @@ on:
         description: Link the Rust static library in an Xcode Simulator app target with Family Controls
         type: boolean
         default: false
+      ui_consent_test:
+        description: Use a Rust XCTest bundle to choose the OS permission button in the disposable Simulator
+        type: boolean
+        default: false
+      ui_continue:
+        description: Choose Continue instead of Don't Allow in the isolated UI test
+        type: boolean
+        default: false
+      collect_xctest_headers:
+        description: Inspect the selected public XCTest declarations before executing UI tests
+        type: boolean
+        default: false
 permissions:
   contents: read
 jobs:
@@ -37,6 +49,27 @@ jobs:
           rustc --version --verbose >> "$OUT/versions.txt"
           SDK=$(xcrun --sdk iphonesimulator --show-sdk-path)
           VERSION=$(xcrun --sdk iphonesimulator --show-sdk-version)
+          if [ '${{ inputs.ui_consent_test }}' = true ]; then
+            test '${{ inputs.xcode_signed_host }}' = true
+            test '${{ inputs.native_uikit_host }}' = true
+            test '${{ inputs.authorization_probe }}' = true
+          else
+            test '${{ inputs.ui_continue }}' = false
+          fi
+          if [ '${{ inputs.ui_consent_test }}' = true ] || [ '${{ inputs.collect_xctest_headers }}' = true ]; then
+            TEST_FRAMEWORKS="$(xcode-select -p)/Platforms/iPhoneSimulator.platform/Developer/Library/Frameworks"
+            TEST_HEADERS="$TEST_FRAMEWORKS/XCTest.framework/Headers"
+            test -d "$TEST_HEADERS"
+            # Inspect only the public declarations used by the Rust test bundle.
+            grep -R -n -A 5 -B 3 -E 'initWithBundleIdentifier:|waitForExistenceWithTimeout:|matchingIdentifier:|recordFailureWithDescription:|@property.*(alerts|buttons|firstMatch)|- \(void\)(tap|launch)' "$TEST_HEADERS" > "$OUT/xctest-selected-headers.txt"
+            for SELECTOR in initWithBundleIdentifier waitForExistenceWithTimeout matchingIdentifier recordFailureWithDescription; do
+              grep -F "$SELECTOR" "$OUT/xctest-selected-headers.txt"
+            done
+          fi
+          if [ '${{ inputs.collect_xctest_headers }}' = true ] && [ '${{ inputs.ui_consent_test }}' = false ]; then
+            printf 'xctest_public_headers_collected=true\nui_test_executed=false\nauthorization_requested=false\n' > "$OUT/xctest-header-scope.txt"
+            exit 0
+          fi
           printf 'Simulator SDK: %s\n' "$VERSION" >> "$OUT/versions.txt"
           test "$VERSION" = 17.5
           grep -F 'Swift version 5.10' "$OUT/versions.txt"
@@ -78,6 +111,7 @@ jobs:
           done
           printf 'compiler_codegen=true\nsdk_declarations_collected=true\ncodegen_framework_linked=false\ncodegen_os_executed=false\nauthorization=false\nmonitoring=false\nshielding=false\n' > "$OUT/scope.txt"
       - name: Inspect the public SDK singleton from a Rust Simulator process
+        if: ${{ !inputs.collect_xctest_headers || inputs.ui_consent_test }}
         shell: bash
         run: |
           set -euo pipefail
@@ -140,13 +174,23 @@ jobs:
             # Xcode sets these from the target's deployment/device settings.
             /usr/libexec/PlistBuddy -c 'Delete :MinimumOSVersion' "$XCODE_ROOT/Info.plist"
             /usr/libexec/PlistBuddy -c 'Delete :UIDeviceFamily' "$XCODE_ROOT/Info.plist"
+            UI_HOST_ARGS=()
+            if [ '${{ inputs.ui_consent_test }}' = true ]; then UI_HOST_ARGS=(--cfg ui_test_host); fi
             # An object input is required: Xcode deliberately skips the link
             # when a target has libraries but no compiled/linked object files.
             # Emit our Rust object and its dependency archive in one invocation.
-            rustc tools/ios-abi-probe.rs --crate-name ios_xcode_probe --crate-type staticlib --edition 2024 --cfg runtime_probe --cfg auth_request --cfg uikit_host --cfg xcode_host --target aarch64-apple-ios-sim --emit="obj=$XCODE_ROOT/probe.o,link" --print native-static-libs -o "$XCODE_ROOT/libprobe.a" 2> "$OUT/rust-static-link.txt"
+            rustc tools/ios-abi-probe.rs --crate-name ios_xcode_probe --crate-type staticlib --edition 2024 --cfg runtime_probe --cfg auth_request --cfg uikit_host --cfg xcode_host "${UI_HOST_ARGS[@]}" --target aarch64-apple-ios-sim --emit="obj=$XCODE_ROOT/probe.o,link" --print native-static-libs -o "$XCODE_ROOT/libprobe.a" 2> "$OUT/rust-static-link.txt"
             test "$(grep -c '^note: native-static-libs: ' "$OUT/rust-static-link.txt")" = 1
             NATIVE_LIBS=$(sed -n 's/^note: native-static-libs: //p' "$OUT/rust-static-link.txt")
             test -n "$NATIVE_LIBS"
+            if [ '${{ inputs.ui_consent_test }}' = true ]; then
+              UI_TEST_ARGS=()
+              if [ '${{ inputs.ui_continue }}' = true ]; then UI_TEST_ARGS=(--cfg ui_test_continue); fi
+              rustc tools/ios-abi-probe.rs --crate-name ios_consent_ui_test --crate-type staticlib --edition 2024 --cfg ui_test_bundle "${UI_TEST_ARGS[@]}" --target aarch64-apple-ios-sim --emit="obj=$XCODE_ROOT/ui-test.o,link" --print native-static-libs -o "$XCODE_ROOT/libui-test.a" 2> "$OUT/rust-ui-test-link.txt"
+              test "$(grep -c '^note: native-static-libs: ' "$OUT/rust-ui-test-link.txt")" = 1
+              UI_NATIVE_LIBS=$(sed -n 's/^note: native-static-libs: //p' "$OUT/rust-ui-test-link.txt")
+              test -n "$UI_NATIVE_LIBS"
+            fi
             xcrun nm -gU "$XCODE_ROOT/probe.o" > "$OUT/rust-object-symbols.txt"
             grep -E '[[:space:]]T[[:space:]]+_main$' "$OUT/rust-object-symbols.txt"
             cat > "$XCODE_ROOT/Entitlements.plist" <<'PLIST'
@@ -165,11 +209,11 @@ jobs:
             classes = {};
             objectVersion = 56;
             objects = {
-              A00000000000000000000001 = {isa = PBXProject; attributes = {LastUpgradeCheck = 1540; TargetAttributes = {A00000000000000000000002 = {SystemCapabilities = {com.apple.FamilyControls = {enabled = 1;};};};};}; buildConfigurationList = A00000000000000000000003; compatibilityVersion = "Xcode 14.0"; developmentRegion = en; hasScannedForEncodings = 0; knownRegions = (en, Base); mainGroup = A00000000000000000000004; productRefGroup = A00000000000000000000005; projectDirPath = ""; projectRoot = ""; targets = (A00000000000000000000002);};
+              A00000000000000000000001 = {isa = PBXProject; attributes = {LastUpgradeCheck = 1540; TargetAttributes = {A00000000000000000000002 = {SystemCapabilities = {com.apple.FamilyControls = {enabled = 1;};};}; A00000000000000000000016 = {TestTargetID = A00000000000000000000002;};};}; buildConfigurationList = A00000000000000000000003; compatibilityVersion = "Xcode 14.0"; developmentRegion = en; hasScannedForEncodings = 0; knownRegions = (en, Base); mainGroup = A00000000000000000000004; productRefGroup = A00000000000000000000005; projectDirPath = ""; projectRoot = ""; targets = (A00000000000000000000002, A00000000000000000000016);};
               A00000000000000000000002 = {isa = PBXNativeTarget; buildConfigurationList = A00000000000000000000006; buildPhases = (A00000000000000000000013, A00000000000000000000007); buildRules = (); dependencies = (); name = "authorization-center-probe"; productName = "authorization-center-probe"; productReference = A00000000000000000000008; productType = "com.apple.product-type.application";};
               A00000000000000000000003 = {isa = XCConfigurationList; buildConfigurations = (A00000000000000000000009); defaultConfigurationIsVisible = 0; defaultConfigurationName = Debug;};
-              A00000000000000000000004 = {isa = PBXGroup; children = (A00000000000000000000010, A00000000000000000000014, A00000000000000000000005); sourceTree = "<group>";};
-              A00000000000000000000005 = {isa = PBXGroup; children = (A00000000000000000000008); name = Products; sourceTree = "<group>";};
+              A00000000000000000000004 = {isa = PBXGroup; children = (A00000000000000000000010, A00000000000000000000014, A00000000000000000000022, A00000000000000000000023, A00000000000000000000005); sourceTree = "<group>";};
+              A00000000000000000000005 = {isa = PBXGroup; children = (A00000000000000000000008, A00000000000000000000017); name = Products; sourceTree = "<group>";};
               A00000000000000000000006 = {isa = XCConfigurationList; buildConfigurations = (A00000000000000000000011); defaultConfigurationIsVisible = 0; defaultConfigurationName = Debug;};
               A00000000000000000000007 = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (A00000000000000000000015, A00000000000000000000012); runOnlyForDeploymentPostprocessing = 0;};
               A00000000000000000000008 = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "authorization-center-probe.app"; sourceTree = BUILT_PRODUCTS_DIR;};
@@ -180,6 +224,16 @@ jobs:
               A00000000000000000000013 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0;};
               A00000000000000000000014 = {isa = PBXFileReference; lastKnownFileType = "compiled.mach-o.objfile"; path = probe.o; sourceTree = "<group>";};
               A00000000000000000000015 = {isa = PBXBuildFile; fileRef = A00000000000000000000014;};
+              A00000000000000000000016 = {isa = PBXNativeTarget; buildConfigurationList = A00000000000000000000018; buildPhases = (A00000000000000000000019, A00000000000000000000020); buildRules = (); dependencies = (); name = ProbeUITests; productName = ProbeUITests; productReference = A00000000000000000000017; productType = "com.apple.product-type.bundle.ui-testing";};
+              A00000000000000000000017 = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ProbeUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR;};
+              A00000000000000000000018 = {isa = XCConfigurationList; buildConfigurations = (A00000000000000000000021); defaultConfigurationIsVisible = 0; defaultConfigurationName = Debug;};
+              A00000000000000000000019 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0;};
+              A00000000000000000000020 = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (A00000000000000000000024, A00000000000000000000025); runOnlyForDeploymentPostprocessing = 0;};
+              A00000000000000000000021 = {isa = XCBuildConfiguration; buildSettings = {ARCHS = arm64; CODE_SIGN_STYLE = Automatic; CODE_SIGN_IDENTITY = "-"; GENERATE_INFOPLIST_FILE = YES; PRODUCT_BUNDLE_IDENTIFIER = com.autodevjapan.phonecontrol1614consenttests; PRODUCT_NAME = ProbeUITests; TARGETED_DEVICE_FAMILY = 1; SUPPORTED_PLATFORMS = iphonesimulator; TEST_TARGET_NAME = "authorization-center-probe"; LIBRARY_SEARCH_PATHS = ("$(inherited)", "$(SRCROOT)"); FRAMEWORK_SEARCH_PATHS = ("$(inherited)", "$(PLATFORM_DIR)/Developer/Library/Frameworks"); LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks", "@loader_path/Frameworks", "/usr/lib/swift");}; name = Debug;};
+              A00000000000000000000022 = {isa = PBXFileReference; lastKnownFileType = "compiled.mach-o.objfile"; path = "ui-test.o"; sourceTree = "<group>";};
+              A00000000000000000000023 = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = "libui-test.a"; sourceTree = "<group>";};
+              A00000000000000000000024 = {isa = PBXBuildFile; fileRef = A00000000000000000000022;};
+              A00000000000000000000025 = {isa = PBXBuildFile; fileRef = A00000000000000000000023;};
             };
             rootObject = A00000000000000000000001;
           }
@@ -204,6 +258,34 @@ jobs:
           xcrun simctl boot "$SIM_ID"
           xcrun simctl bootstatus "$SIM_ID" -b
           xcrun simctl install "$SIM_ID" "$PROBE_APP"
+          if [ '${{ inputs.ui_consent_test }}' = true ]; then
+            TEST_FRAMEWORKS="$(xcode-select -p)/Platforms/iPhoneSimulator.platform/Developer/Library/Frameworks"
+            mkdir -p "$XCODE_ROOT/Probe.xcodeproj/xcshareddata/xcschemes"
+            cat > "$XCODE_ROOT/Probe.xcodeproj/xcshareddata/xcschemes/Probe.xcscheme" <<'SCHEME'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <Scheme LastUpgradeVersion="1540" version="1.3">
+            <BuildAction parallelizeBuildables="NO" buildImplicitDependencies="YES"><BuildActionEntries>
+              <BuildActionEntry buildForTesting="YES" buildForRunning="YES" buildForProfiling="NO" buildForArchiving="NO" buildForAnalyzing="YES"><BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="A00000000000000000000002" BuildableName="authorization-center-probe.app" BlueprintName="authorization-center-probe" ReferencedContainer="container:Probe.xcodeproj"/></BuildActionEntry>
+              <BuildActionEntry buildForTesting="YES" buildForRunning="NO" buildForProfiling="NO" buildForArchiving="NO" buildForAnalyzing="YES"><BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="A00000000000000000000016" BuildableName="ProbeUITests.xctest" BlueprintName="ProbeUITests" ReferencedContainer="container:Probe.xcodeproj"/></BuildActionEntry>
+            </BuildActionEntries></BuildAction>
+            <TestAction buildConfiguration="Debug" selectedDebuggerIdentifier="Xcode.DebuggerFoundation.Debugger.LLDB" selectedLauncherIdentifier="Xcode.IDEFoundation.Launcher.LLDB" shouldUseLaunchSchemeArgsEnv="YES"><Testables><TestableReference skipped="NO"><BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="A00000000000000000000016" BuildableName="ProbeUITests.xctest" BlueprintName="ProbeUITests" ReferencedContainer="container:Probe.xcodeproj"/></TestableReference></Testables></TestAction>
+          </Scheme>
+          SCHEME
+            if xcodebuild -project "$XCODE_ROOT/Probe.xcodeproj" -scheme Probe -configuration Debug -sdk iphonesimulator -destination "id=$SIM_ID" -parallel-testing-enabled NO -resultBundlePath "$OUT/consent-ui.xcresult" SYMROOT="$OUT/xcode-products" OBJROOT="$RUNNER_TEMP/xcode-objects" "OTHER_LDFLAGS=\$(inherited) -L$SDK/usr/lib/swift -F$TEST_FRAMEWORKS $NATIVE_LIBS $UI_NATIVE_LIBS" test > "$OUT/xcode-ui-test.txt" 2>&1; then UI_TEST_STATUS=0; else UI_TEST_STATUS=$?; fi
+            xcrun simctl io "$SIM_ID" screenshot "$OUT/consent-after-test.png"
+            xcrun simctl spawn "$SIM_ID" log show --last 2m --style compact --predicate 'process == "authorization-center-probe" OR process == "FamilyControlsAgent"' > "$OUT/authorization-process-log.txt" 2>&1
+            test "$UI_TEST_STATUS" = 0
+            DATA=$(xcrun simctl get_app_container "$SIM_ID" com.autodevjapan.phonecontrol1614abiprobe data)
+            cp "$DATA/Documents/public-authorization-result.txt" "$OUT/public-authorization-result.txt"
+            grep -Fx 'public_authorization_continuation_observed=true' "$OUT/public-authorization-result.txt"
+            if [ '${{ inputs.ui_continue }}' = false ]; then
+              grep -Fx 'error_present=true' "$OUT/public-authorization-result.txt"
+            else
+              grep -Fx 'error_present=false' "$OUT/public-authorization-result.txt"
+            fi
+            printf 'xcode_host_launched=true\nordinary_permission_button_tested=true\nauthorization_status_verified=false\nmonitoring=false\nshielding=false\n' > "$OUT/consent-ui-scope.txt"
+            exit 0
+          fi
           if [ '${{ inputs.xcode_signed_host }}' = true ]; then
             # Observe the ordinary permission UI; do not approve or bypass it.
             xcrun simctl launch --console "$SIM_ID" com.autodevjapan.phonecontrol1614abiprobe > "$OUT/singleton-runtime.txt" 2>&1 &
