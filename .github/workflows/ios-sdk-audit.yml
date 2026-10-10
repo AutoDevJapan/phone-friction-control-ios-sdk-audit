@@ -25,6 +25,8 @@ jobs:
           SDK=$(xcrun --sdk iphonesimulator --show-sdk-path)
           VERSION=$(xcrun --sdk iphonesimulator --show-sdk-version)
           printf 'Simulator SDK: %s\n' "$VERSION" >> "$OUT/versions.txt"
+          test "$VERSION" = 17.5
+          grep -F 'Swift version 5.10' "$OUT/versions.txt"
           TARGET="arm64-apple-ios${VERSION%%.*}.0-simulator"
           for MODULE in FamilyControls DeviceActivity ManagedSettings; do
             FRAMEWORK="$SDK/System/Library/Frameworks/$MODULE.framework"
@@ -40,6 +42,15 @@ jobs:
               xcrun swift-demangle --compact < "$OUT/authorization-center-exports.txt" > "$OUT/authorization-center-demangled.txt"
             fi
           done
+          # Collect the SDK's own enum declaration, not inferred raw values.
+          FRAMEWORK="$SDK/System/Library/Frameworks/FamilyControls.framework"
+          if grep -R -n -A 12 -B 3 'FamilyControlsMember' "$FRAMEWORK/Headers" > "$OUT/family-controls-member-header.txt"; then
+            printf 'member_definition_source=Headers\n' > "$OUT/member-definition-scope.txt"
+          else
+            grep -R -n -A 12 -B 3 'FamilyControlsMember' "$FRAMEWORK/Modules" > "$OUT/family-controls-member-header.txt"
+            printf 'member_definition_source=Modules\n' > "$OUT/member-definition-scope.txt"
+          fi
+          test -s "$OUT/family-controls-member-header.txt"
           for TARGET in aarch64-apple-ios aarch64-apple-ios-sim; do
             mkdir "$OUT/$TARGET"
             rustc tools/ios-abi-probe.rs --crate-name ios_abi_probe --crate-type lib --target "$TARGET" --emit llvm-ir,asm,obj --out-dir "$OUT/$TARGET"
@@ -60,9 +71,12 @@ jobs:
           grep -Fx "$AUTH_SHARED_SYMBOL" "$OUT/authorization-center-exports.txt"
           export AUTH_METADATA_SYMBOL=$(jq -er '[.[] | select(.name == "AuthorizationCenter") | .usr | sub("^s:"; "\u0024s") + "Ma"] | if length == 1 then .[0] else error("expected one class metadata accessor") end' "$OUT/FamilyControls-selected-declarations.json")
           grep -Fx "$AUTH_METADATA_SYMBOL" "$OUT/authorization-center-exports.txt"
+          AUTH_REQUEST_SYMBOL=$(jq -er '[.[] | select(.name == "AuthorizationCenter") | .members[] | select(.name == "requestAuthorization" and .printedName == "requestAuthorization(for:)" and .throwing == true) | .mangledName] | if length == 1 then .[0] else error("expected one public individual async request") end' "$OUT/FamilyControls-selected-declarations.json")
+          export AUTH_ASYNC_SYMBOL="${AUTH_REQUEST_SYMBOL}TjTu"
+          grep -Fx "$AUTH_ASYNC_SYMBOL" "$OUT/authorization-center-exports.txt"
           PROBE_APP="$OUT/authorization-center-probe.app"
           mkdir "$PROBE_APP"
-          rustc tools/ios-abi-probe.rs --crate-name ios_runtime_probe --edition 2024 --cfg runtime_probe --target aarch64-apple-ios-sim --emit llvm-ir,asm,link -o "$PROBE_APP/authorization-center-probe"
+          rustc tools/ios-abi-probe.rs --crate-name ios_runtime_probe --edition 2024 --cfg runtime_probe --target aarch64-apple-ios-sim --emit "llvm-ir=$OUT/ios_runtime_probe.ll,asm=$OUT/ios_runtime_probe.s,link" -L "native=$SDK/usr/lib/swift" -C link-arg=-Wl,-rpath,/usr/lib/swift -o "$PROBE_APP/authorization-center-probe"
           cat > "$PROBE_APP/Info.plist" <<'PLIST'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -87,7 +101,8 @@ jobs:
           xcrun simctl install "$SIM_ID" "$PROBE_APP"
           xcrun simctl launch --console "$SIM_ID" com.autodevjapan.phonecontrol1614abiprobe > "$OUT/singleton-runtime.txt" 2>&1
           grep -F 'SDK singleton class: FamilyControls.AuthorizationCenter' "$OUT/singleton-runtime.txt"
-          printf 'simulator_process_executed=true\npublic_singleton_called=true\nauthorization_requested=false\nmonitoring=false\nshielding=false\n' > "$OUT/singleton-runtime-scope.txt"
+          grep -F 'Rust async task entry observed; authorization_requested=false' "$OUT/singleton-runtime.txt"
+          printf 'simulator_process_executed=true\npublic_singleton_called=true\npublic_async_descriptor_read=true\nrust_async_task_entry_observed=true\nruntime_teardown_verified=false\nauthorization_requested=false\nmonitoring=false\nshielding=false\n' > "$OUT/singleton-runtime-scope.txt"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
