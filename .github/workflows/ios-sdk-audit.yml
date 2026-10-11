@@ -342,7 +342,9 @@ jobs:
             grep -nE '(mainScreen|CGRect[[:space:]]+bounds|initWithFrame:|layoutIfNeeded|UIWindow.*window|isHidden|rootViewController|makeKeyAndVisible|UIView.*view;|parentViewController)' "$HEADERS/$HEADER.h" >> "$OUT/picker-hosting-uikit-candidates.txt" || true
           done
           require() {
-            if ! grep -E "$2" "$1" >> "$OUT/picker-hosting-uikit-declarations.txt"; then
+            # C/ObjC declaration whitespace is insignificant. Canonicalize
+            # horizontal blanks per line before matching the same type/name.
+            if ! sed -E 's/[[:blank:]]+/ /g' "$1" | grep -E "$2" >> "$OUT/picker-hosting-uikit-declarations.txt"; then
               printf 'Required public declaration missing: %s; pattern=%s\n' "${1##*/}" "$2" >&2
               exit 1
             fi
