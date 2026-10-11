@@ -403,7 +403,10 @@ jobs:
           # Semantic method types from actual SDK Clang AST, independent of
           # property spelling, annotations, horizontal spacing or line breaks.
           xcrun clang -target arm64-apple-ios17.5-simulator -isysroot "$SDK" -F "$(dirname "$(dirname "$TEST_HEADERS")")" -x objective-c -fsyntax-only -Xclang -ast-dump=json "$TEST_HEADERS/XCTest.h" > "$RUNNER_TEMP/xctest-selection-ast.json"
-          jq '[.. | objects | select(.kind? == "ObjCMethodDecl" and (.name? | IN("isHittable", "cells", "buttons", "searchFields", "textFields", "count", "firstMatch", "typeText:", "label"))) | {name, instance, returnType, parameters: [.inner[]? | select(.kind == "ParmVarDecl") | .type.qualType]}] | unique' "$RUNNER_TEMP/xctest-selection-ast.json" > "$OUT/xctest-selection-method-types.json"
+          jq '[.. | objects | select(.kind? == "ObjCMethodDecl" and (.name? | IN("isHittable", "cells", "buttons", "searchFields", "textFields", "count", "firstMatch", "typeText:", "label", "coordinateWithNormalizedOffset:"))) | {name, instance, returnType, parameters: [.inner[]? | select(.kind == "ParmVarDecl") | .type.qualType]}] | unique' "$RUNNER_TEMP/xctest-selection-ast.json" > "$OUT/xctest-selection-method-types.json"
+          jq -e 'def abi_type: gsub("(_Nullable|_Nonnull|_Null_unspecified)"; "") | gsub("[[:space:]]+"; " ") | gsub("^ | $"; ""); [.[] | select(.name == "coordinateWithNormalizedOffset:" and .instance == true and (.returnType.qualType | abi_type) == "XCUIElementCoordinate *" and .parameters == ["CGVector"])] | length > 0' "$OUT/xctest-selection-method-types.json"
+          jq '[.. | objects | select(.kind? == "ObjCInterfaceDecl" and .name? == "XCUIElementCoordinate") | .inner[]? | select(.kind == "ObjCMethodDecl" and .name == "tap") | {name, instance, returnType, parameters: [.inner[]? | select(.kind == "ParmVarDecl") | .type.qualType]}] | unique' "$RUNNER_TEMP/xctest-selection-ast.json" > "$OUT/xctest-coordinate-method-types.json"
+          jq -e '[.[] | select(.name == "tap" and .instance == true and .returnType.qualType == "void" and .parameters == [])] | length > 0' "$OUT/xctest-coordinate-method-types.json"
           jq -e 'def abi_type: gsub("(_Nullable|_Nonnull|_Null_unspecified)"; "") | gsub("[[:space:]]+"; " ") | gsub("^ | $"; ""); [.[] | select(.name == "label" and .instance == true and .parameters == [] and (.returnType.qualType | abi_type) == "NSString *")] | length > 0' "$OUT/xctest-selection-method-types.json"
           jq -e 'def abi_type: gsub("(_Nullable|_Nonnull|_Null_unspecified)"; "") | gsub("[[:space:]]+"; " ") | gsub("^ | $"; ""); ([.[] | select(.name == "isHittable" and .instance == true and ((.returnType.desugaredQualType // .returnType.qualType | abi_type) | IN("bool", "_Bool")))] | length > 0) and ([.[] | select((.name | IN("cells", "buttons", "searchFields", "textFields")) and .instance == true and (.returnType.qualType | abi_type) == "XCUIElementQuery *") | .name] | unique | length == 4) and ([.[] | select(.name == "typeText:" and .instance == true and .returnType.qualType == "void" and ([.parameters[] | abi_type] == ["NSString *"]))] | length > 0)' "$OUT/xctest-selection-method-types.json"
           jq '[.. | objects | select(.kind? == "ObjCInterfaceDecl" and .name? == "XCUIElementQuery") | .inner[]? | select(.kind == "ObjCMethodDecl" and (.name | IN("count", "firstMatch"))) | {name, instance, returnType, parameters: [.inner[]? | select(.kind == "ParmVarDecl") | .type.qualType]}] | unique' "$RUNNER_TEMP/xctest-selection-ast.json" > "$OUT/xctest-selection-query-method-types.json"
@@ -470,6 +473,9 @@ jobs:
           require_record CGPoint '[{"name":"x","type":"double"},{"name":"y","type":"double"}]'
           require_record CGSize '[{"name":"width","type":"double"},{"name":"height","type":"double"}]'
           require_record CGRect '[{"name":"origin","type":"struct CGPoint"},{"name":"size","type":"struct CGSize"}]'
+          if [ '${{ inputs.selection_inspection_mode }}' = consent-selection-acceptance ]; then
+            require_record CGVector '[{"name":"dx","type":"double"},{"name":"dy","type":"double"}]'
+          fi
           grep -oE '_swift_unknownObjectRelease([[:space:],]|$)' "$SDK/usr/lib/swift/libswiftCore.tbd" | sed -E 's/[[:space:],]+$//' | sort -u > "$OUT/picker-hosting-release-export.txt"
           test "$(cat "$OUT/picker-hosting-release-export.txt")" = _swift_unknownObjectRelease
           # Primary compiler rules: generic class metatype fulfills Content and
@@ -717,13 +723,13 @@ jobs:
           SIM_ID=$1
           OUT="$RUNNER_TEMP/ios-sdk-audit"
           if [ '${{ inputs.selection_inspection_mode }}' = consent-selection-acceptance ]; then
-            # Finite official fixture acquisition: built-in Safari in this NEW
+            # Finite official fixture acquisition: built-in Messages in this NEW
             # Simulator only. No third-party app download/account/playback.
             xcrun simctl listapps "$SIM_ID" > "$RUNNER_TEMP/official-simulator-apps.plist"
             plutil -convert json -o "$RUNNER_TEMP/official-simulator-apps.json" "$RUNNER_TEMP/official-simulator-apps.plist"
-            jq -e 'has("com.apple.mobilesafari")' "$RUNNER_TEMP/official-simulator-apps.json" > "$OUT/official-simulator-app-fixture.txt"
-            xcrun simctl launch "$SIM_ID" com.apple.mobilesafari > "$RUNNER_TEMP/safari-fixture-launch.txt"
-            xcrun simctl terminate "$SIM_ID" com.apple.mobilesafari
+            jq -e 'has("com.apple.MobileSMS")' "$RUNNER_TEMP/official-simulator-apps.json" > "$OUT/official-simulator-app-fixture.txt"
+            xcrun simctl launch "$SIM_ID" com.apple.MobileSMS > "$RUNNER_TEMP/messages-fixture-launch.txt"
+            xcrun simctl terminate "$SIM_ID" com.apple.MobileSMS
             printf 'fixture_source=official_fresh_simulator\nfixture_acquisition_attempts=1\nthird_party_playback_verified=false\n' >> "$OUT/official-simulator-app-fixture.txt"
           fi
           xcodebuild -project "$XCODE_ROOT/Probe.xcodeproj" -scheme Probe -configuration Debug -sdk iphonesimulator -destination "id=$SIM_ID" -parallel-testing-enabled NO SYMROOT="$OUT/xcode-products" OBJROOT="$RUNNER_TEMP/xcode-objects" build-for-testing > "$OUT/xcode-ui-build.txt" 2>&1
@@ -745,41 +751,6 @@ jobs:
             fi
             grep '^XCTest consent-selection:' "$OUT/xcode-ui-test.txt" > "$OUT/consent-selection-xctest-observations.txt" || true
             xcrun simctl io "$SIM_ID" screenshot "$OUT/consent-selection-after-test.png" || true
-            # The test terminates its disposable app before the workflow screenshot.
-            # Export only PNG/JPEG diagnostics already recorded by XCTest, using
-            # Xcode 15.4's public xcresulttool. No AX contents or app labels are dumped.
-            # Diagnostic export cannot turn a failed test into acceptance.
-            RESULT="$OUT/consent-ui.xcresult"
-            EVIDENCE="$RUNNER_TEMP/choice-evidence"
-            mkdir -p "$EVIDENCE"
-            IMAGES=0
-            : > "$OUT/consent-selection-image-export.txt"
-            if xcrun xcresulttool get --path "$RESULT" --format json > "$EVIDENCE/root.json"; then
-              jq -r '[.actions._values[]?.actionResult.testsRef.id._value // empty] | unique | .[:2][]' "$EVIDENCE/root.json" > "$EVIDENCE/tests-ids.txt"
-              while IFS= read -r TESTS_ID; do
-                if xcrun xcresulttool get --path "$RESULT" --id "$TESTS_ID" --format json > "$EVIDENCE/tests.json"; then
-                  jq -r '[.. | objects | .summaryRef?.id?._value? // empty] | unique | .[:4][]' "$EVIDENCE/tests.json" > "$EVIDENCE/summary-ids.txt"
-                  while IFS= read -r SUMMARY_ID; do
-                    if xcrun xcresulttool get --path "$RESULT" --id "$SUMMARY_ID" --format json > "$EVIDENCE/summary.json"; then
-                      jq -r '[.. | objects | .attachments?._values[]? | select(.uniformTypeIdentifier._value == "public.png" or .uniformTypeIdentifier._value == "public.jpeg") | [.payloadRef.id._value, .uniformTypeIdentifier._value]] | unique | .[:8][] | @tsv' "$EVIDENCE/summary.json" > "$EVIDENCE/image-ids.txt"
-                      while IFS=$'\t' read -r IMAGE_ID IMAGE_TYPE; do
-                        if [ "$IMAGES" -ge 8 ]; then break; fi
-                        EXT=png
-                        if [ "$IMAGE_TYPE" = public.jpeg ]; then EXT=jpg; fi
-                        if xcrun xcresulttool export --path "$RESULT" --id "$IMAGE_ID" --type file --output-path "$OUT/consent-selection-fixture-$IMAGES.$EXT"; then
-                          IMAGES=$((IMAGES+1))
-                        else
-                          printf 'image_export_failed=true\n' >> "$OUT/consent-selection-image-export.txt"
-                        fi
-                      done < "$EVIDENCE/image-ids.txt"
-                    fi
-                  done < "$EVIDENCE/summary-ids.txt"
-                fi
-              done < "$EVIDENCE/tests-ids.txt"
-            else
-              printf 'result_metadata_unavailable=true\n' >> "$OUT/consent-selection-image-export.txt"
-            fi
-            printf 'fixture_images_exported=%s\nacceptance_decided_by_images=false\n' "$IMAGES" >> "$OUT/consent-selection-image-export.txt"
             # Category-only, callback-only, and ABI-pending runs all fail closed.
             test "$UI_TEST_STATUS" = 0
             grep -Fx 'error_present=false' "$OUT/public-authorization-result.txt"
@@ -1028,7 +999,6 @@ jobs:
             ${{ runner.temp }}/ios-sdk-audit/consent-ui.xcresult
             ${{ runner.temp }}/ios-sdk-audit/consent-selection-*.txt
             ${{ runner.temp }}/ios-sdk-audit/consent-selection-*.png
-            ${{ runner.temp }}/ios-sdk-audit/consent-selection-*.jpg
             ${{ runner.temp }}/ios-sdk-audit/selection-count-*.txt
             ${{ runner.temp }}/ios-sdk-audit/Swift-set-selected-declarations.json
             ${{ runner.temp }}/ios-sdk-audit/ManagedSettings-Application-selected-declarations.json
@@ -1039,6 +1009,8 @@ jobs:
             ${{ runner.temp }}/ios-sdk-audit/xctest-selection-control-headers.txt
             ${{ runner.temp }}/ios-sdk-audit/xctest-selection-method-types.json
             ${{ runner.temp }}/ios-sdk-audit/xctest-selection-query-method-types.json
+            ${{ runner.temp }}/ios-sdk-audit/xctest-coordinate-method-types.json
+            ${{ runner.temp }}/ios-sdk-audit/record-CGVector-layout.json
             ${{ runner.temp }}/ios-sdk-audit/xcode-ui-*.txt
             ${{ runner.temp }}/ios-sdk-audit/picker-hosting-uikit-declarations.txt
             ${{ runner.temp }}/ios-sdk-audit/versions.txt

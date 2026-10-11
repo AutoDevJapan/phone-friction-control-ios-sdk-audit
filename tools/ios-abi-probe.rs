@@ -4174,41 +4174,29 @@ mod ui_authorization_test {
         }
     }
 
-    // Parent reviews these new typed public XCTest messages before Mac.
-    // Roles are read directly from the actual Picker observers, without a
-    // guessed identifier. SDK AST guards count:NSUInteger and firstMatch.
     #[cfg(ui_test_selection_acceptance)]
-    unsafe fn unique_search(application: Id, observer: usize, diagnostics: bool) -> Option<Owned> {
+    #[repr(C)]
+    struct DisclosureOffset {
+        dx: f64,
+        dy: f64,
+    }
+    #[cfg(ui_test_selection_acceptance)]
+    unsafe fn open_disclosure(element: Id) {
+        // The observed Social row has a disclosure on its right edge. Target
+        // that edge relative to the actual hittable element, not its checkbox.
+        // Workflow guards public CGVector layout and this exact method type.
         unsafe {
-            let count: unsafe extern "C" fn(Id, Sel) -> usize =
+            let coordinate: unsafe extern "C" fn(Id, Sel, DisclosureOffset) -> Id =
                 std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
-            let boolean: unsafe extern "C" fn(Id, Sel) -> bool =
-                std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
-            for role in [c"searchFields", c"textFields"] {
-                let query = retained_object(application, role);
-                let number = count(query.0, sel_registerName(c"count".as_ptr()));
-                // Only aggregate ROLE counts: no AX dump, app label, input
-                // value, placeholder contents, selected names or tokens.
-                if diagnostics {
-                    println!(
-                        "XCTest consent-selection search roles: observer={observer}; role={}; count={number}",
-                        role.to_str().unwrap()
-                    );
-                }
-                if number != 1 {
-                    continue;
-                }
-                let field = retained_object(query.0, c"firstMatch");
-                if wait_for(field.0, 0.2)
-                    && boolean(field.0, sel_registerName(c"isHittable".as_ptr()))
-                {
-                    return Some(field);
-                }
-            }
-            None
+            let point = Owned(objc_retain(coordinate(
+                element,
+                sel_registerName(c"coordinateWithNormalizedOffset:".as_ptr()),
+                DisclosureOffset { dx: 0.95, dy: 0.5 },
+            )));
+            assert!(!point.0.is_null());
+            action(point.0, c"tap");
         }
     }
-
     #[cfg(ui_test_selection_acceptance)]
     unsafe fn selection_snapshot(element: Id) -> Option<(usize, usize, usize)> {
         unsafe {
@@ -4249,42 +4237,50 @@ mod ui_authorization_test {
                 return;
             }
             println!("XCTest consent-selection: approved_picker_marker_observed=true");
-            // Search only an actually observed editable control. Category rows
-            // are not toggled as a substitute for choosing an application.
-            let mut search = None;
-            let search_deadline = std::time::Instant::now() + std::time::Duration::from_secs(12);
-            while search.is_none() && std::time::Instant::now() < search_deadline {
-                for (index, observer) in [app, system].into_iter().enumerate() {
-                    search = unique_search(observer, index, false);
-                    if search.is_some() {
+            // Safari produced a visibly empty search result in run38169768885.
+            // Navigate the actually observed Social disclosure first, without
+            // treating a category toggle as application selection.
+            let Some(before_navigation) = selection_snapshot(ready.0) else {
+                fail(test, c"Pre-navigation aggregate unavailable");
+                return;
+            };
+            let mut category = None;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(12);
+            while category.is_none() && std::time::Instant::now() < deadline {
+                for observer in [app, system] {
+                    category = available_control(observer, c"Social", &[c"buttons", c"cells"]);
+                    if category.is_some() {
                         break;
                     }
                 }
             }
-            let Some(search) = search else {
-                for (index, observer) in [app, system].into_iter().enumerate() {
-                    let _ = unique_search(observer, index, true);
-                }
-                fail(test, c"Picker search control not observed");
+            let Some(category) = category else {
+                fail(test, c"Observed Social disclosure unavailable");
                 return;
             };
-            action(search.0, c"tap");
-            let fixture_name = string(c"Safari");
-            let type_text: unsafe extern "C" fn(Id, Sel, Id) =
-                std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
-            type_text(
-                search.0,
-                sel_registerName(c"typeText:".as_ptr()),
-                fixture_name.0,
-            );
+            open_disclosure(category.0);
+            let Some(after_navigation) = selection_snapshot(ready.0) else {
+                fail(test, c"Post-navigation aggregate unavailable");
+                return;
+            };
+            if after_navigation != before_navigation
+                || after_navigation.1 != 0
+                || after_navigation.2 != 0
+            {
+                fail(
+                    test,
+                    c"Disclosure navigation changed selection; category choice cannot pass",
+                );
+                return;
+            }
             println!(
-                "XCTest consent-selection: observed_search_used=true; selection_contents_output=false"
+                "XCTest consent-selection: observed_disclosure_navigation=true; navigation_setter_delta=0; navigation_applications_count=0"
             );
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(12);
             let mut candidate = None;
             while candidate.is_none() && std::time::Instant::now() < deadline {
                 for observer in [app, system] {
-                    candidate = available_control(observer, c"Safari", &[c"buttons", c"cells"]);
+                    candidate = available_control(observer, c"Messages", &[c"buttons", c"cells"]);
                     if candidate.is_some() {
                         break;
                     }
