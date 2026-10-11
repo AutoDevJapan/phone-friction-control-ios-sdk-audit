@@ -359,8 +359,18 @@ jobs:
           require "$HEADERS/UIWindow.h" '\-.*\(void\)makeKeyAndVisible;'
           require "$HEADERS/UIViewController.h" '@property.*UIView \*view([[:space:]]+(API_|NS_)[^;]*)?;'
           require "$HEADERS/UIViewController.h" '@property.*UIViewController \*parentViewController([[:space:]]+(API_|NS_)[^;]*)?;'
-          require "$SDK/usr/include/objc/runtime.h" 'Class _Nullable object_getClass\(id _Nullable obj\)'
-          require "$SDK/usr/include/objc/runtime.h" 'Class _Nullable class_getSuperclass\(Class _Nullable cls\)'
+          # Inspect semantic declarations from the existing vendor header only.
+          # No authored C/ObjC input, object, executable, or new SDK call.
+          RUNTIME_HEADER="$SDK/usr/include/objc/runtime.h"
+          require_runtime_function() {
+            local SYMBOL=$1 EXPECTED=$2 RAW_AST="$RUNNER_TEMP/runtime-$1-ast.json" SELECTED="$OUT/runtime-$1-signature.json"
+            xcrun clang -target arm64-apple-ios17.5-simulator -isysroot "$SDK" -x objective-c -fsyntax-only -Wno-pragma-once-outside-header -Xclang -ast-dump=json -Xclang "-ast-dump-filter=$SYMBOL" "$RUNTIME_HEADER" > "$RAW_AST"
+            jq -s --arg symbol "$SYMBOL" '[.[] | select(.kind == "FunctionDecl" and .name == $symbol) | {name, type: .type.qualType, parameters: [.inner[]? | select(.kind == "ParmVarDecl") | .type.qualType]}] | if length > 0 then . else error("public runtime declaration absent") end' "$RAW_AST" > "$SELECTED"
+            jq -e --arg expected "$EXPECTED" 'def abi_type: gsub("(_Nullable|_Nonnull|_Null_unspecified)"; "") | gsub("[[:space:]]+"; " ") | gsub("^ | $"; "") | gsub(" [)]"; ")"); all(.[]; (.type | abi_type) == $expected and (.parameters | length) == 1)' "$SELECTED"
+            printf 'public_runtime_function=%s; semantic_type=%s\n' "$SYMBOL" "$EXPECTED" >> "$OUT/picker-hosting-uikit-declarations.txt"
+          }
+          require_runtime_function object_getClass 'Class (id)'
+          require_runtime_function class_getSuperclass 'Class (Class)'
           GEOMETRY="$SDK/System/Library/Frameworks/CoreGraphics.framework/Headers/CGGeometry.h"
           for PATTERN in 'struct CGPoint' 'CGFloat x;' 'CGFloat y;' 'struct CGSize' 'CGFloat width;' 'CGFloat height;' 'struct CGRect' 'CGPoint origin;' 'CGSize size;'; do require "$GEOMETRY" "$PATTERN"; done
           grep -oE '_swift_unknownObjectRelease([[:space:],]|$)' "$SDK/usr/lib/swift/libswiftCore.tbd" | sed -E 's/[[:space:],]+$//' | sort -u > "$OUT/picker-hosting-release-export.txt"
@@ -847,6 +857,8 @@ jobs:
             ${{ runner.temp }}/ios-sdk-audit/picker-hosting-bl24-entry.txt
             ${{ runner.temp }}/ios-sdk-audit/picker-hosting-uikit-declarations.txt
             ${{ runner.temp }}/ios-sdk-audit/picker-hosting-uikit-candidates.txt
+            ${{ runner.temp }}/ios-sdk-audit/runtime-object_getClass-signature.json
+            ${{ runner.temp }}/ios-sdk-audit/runtime-class_getSuperclass-signature.json
             ${{ runner.temp }}/ios-sdk-audit/picker-hosting-generic-abi-primary.txt
             ${{ runner.temp }}/ios-sdk-audit/picker-hosting-release-primary.txt
             ${{ runner.temp }}/ios-sdk-audit/picker-hosting-release-export.txt
