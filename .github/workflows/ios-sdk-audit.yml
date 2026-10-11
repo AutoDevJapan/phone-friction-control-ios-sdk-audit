@@ -357,6 +357,7 @@ jobs:
           SET_METADATA_SYMBOL=$(jq -er '[.[] | select(.name == "Set" and .declKind == "Struct") | .usr | sub("^s:"; "\u0024s") + "Ma"] | if length == 1 then .[0] else error("expected public Set metadata accessor") end' "$OUT/Swift-set-selected-declarations.json")
           SET_DESCRIPTOR_SYMBOL="${SET_METADATA_SYMBOL%Ma}Mn"
           SET_COUNT_SYMBOL=$(jq -er '[.[] | select(.name == "Set") | .members[] | select(.kind == "Var" and .name == "count" and .static != true and .children[0].printedName == "Swift.Int") | .accessors[] | select(.accessorKind == "get") | .mangledName] | unique | if length == 1 then .[0] else error("expected public Set.count -> Int getter") end' "$OUT/Swift-set-selected-declarations.json")
+          jq -e '([.[] | select(.name == "Set" and .usr == "s:Sh" and .genericSig == "<Element where Element : Swift.Hashable>")] | length == 1) and ([.[] | select(.name == "Set") | .members[] | select(.name == "count") | .accessors[] | select(.accessorKind == "get" and .genericSig == "<Element where Element : Swift.Hashable>" and .mangledName == "\u0024sSh5countSivg")] | length == 1)' "$OUT/Swift-set-selected-declarations.json"
           APPLICATIONS_SYMBOL=$(jq -er '[.[] | select(.name == "FamilyActivitySelection") | .members[] | select(.kind == "Var" and .name == "applications" and .static != true and .children[0].printedName == "Swift.Set<ManagedSettings.Application>") | .accessors[] | select(.accessorKind == "get") | .mangledName] | if length == 1 then .[0] else error("expected exact public applications Set<Application> getter") end' "$OUT/FamilyControls-selected-declarations.json")
           for MODULE in Swift ManagedSettings FamilyControls; do
             if [ "$MODULE" = Swift ]; then TBD="$SDK/usr/lib/swift/libswiftCore.tbd"; else TBD="$SDK/System/Library/Frameworks/$MODULE.framework/$MODULE.tbd"; fi
@@ -386,24 +387,28 @@ jobs:
           cut -d '|' -f 2 "$OUT/selection-count-abi-manifest.txt" | xcrun swift-demangle --compact > "$OUT/selection-count-public-demangled.txt"
           grep -F 'Hashable' "$OUT/selection-count-public-demangled.txt"
           SELECTION_COUNT_ABI_MANIFEST=$(cat "$OUT/selection-count-abi-manifest.txt")
-          export APPLICATION_METADATA_SYMBOL HASHABLE_PROTOCOL_SYMBOL SELECTION_COUNT_ABI_MANIFEST
-          declare -p APPLICATION_METADATA_SYMBOL HASHABLE_PROTOCOL_SYMBOL SELECTION_COUNT_ABI_MANIFEST >> "$RUNNER_TEMP/ios-probe-build-env.sh"
+          export APPLICATION_METADATA_SYMBOL HASHABLE_PROTOCOL_SYMBOL SELECTION_COUNT_ABI_MANIFEST SET_METADATA_SYMBOL SET_DESCRIPTOR_SYMBOL SET_COUNT_SYMBOL APPLICATIONS_SYMBOL
+          declare -p APPLICATION_METADATA_SYMBOL HASHABLE_PROTOCOL_SYMBOL SELECTION_COUNT_ABI_MANIFEST SET_METADATA_SYMBOL SET_DESCRIPTOR_SYMBOL SET_COUNT_SYMBOL APPLICATIONS_SYMBOL >> "$RUNNER_TEMP/ios-probe-build-env.sh"
           # Primary Swift 5.10 lowering/layout evidence accompanies actual SDK
-          # prefixes. The generic receiver/metadata convention stays gated.
-          for FILE in stdlib/public/core/Set.swift lib/IRGen/GenCall.cpp lib/IRGen/GenType.cpp include/swift/ABI/Metadata.h include/swift/Runtime/Metadata.h; do
+          # prefixes. Rust anchors those bytes and runtime descriptor/layout
+          # BEFORE enabling any newly reviewed public getter/count call.
+          for FILE in stdlib/public/core/Set.swift lib/IRGen/GenCall.cpp lib/IRGen/GenType.cpp lib/IRGen/GenProto.cpp lib/SIL/IR/SILFunctionType.cpp include/swift/ABI/GenericContext.h include/swift/ABI/Metadata.h include/swift/Runtime/Metadata.h; do
             NAME=${FILE##*/}
             if [ "$FILE" = include/swift/Runtime/Metadata.h ]; then NAME=Runtime-Metadata.h; fi
             curl --fail --silent --show-error --location "https://raw.githubusercontent.com/swiftlang/swift/swift-5.10-RELEASE/$FILE" -o "$RUNNER_TEMP/count-$NAME"
-            awk '/var count:|emitPolymorphicArguments|emitGenericArguments|emitTypeMetadataRef|GenericMetadataAccessFunction|TargetWitnessTable|TargetGenericContextDescriptorHeader/ { remaining=24 } remaining > 0 { line=NR ":" $0; bytes+=length(line)+1; if (bytes <= 48000) print line; remaining-- }' "$RUNNER_TEMP/count-$NAME" > "$OUT/selection-count-primary-$NAME.txt"
+            awk '/var count:|public struct Set|@frozen|emitPolymorphicArguments|emitGenericArguments|emitTypeMetadataRef|GenericMetadataAccessFunction|MetadataAccessFunction|TargetWitnessTable|TargetGenericContextDescriptorHeader|NumKeyArguments|TargetStructDescriptor|TargetStructMetadata|hasSelfContextParameter|NativeConventionSchema::NativeConventionSchema|DefaultConventions|enumerateUnfulfilledRequirements|PolymorphicConvention::considerParameter/ { remaining=48 } remaining > 0 { line=NR ":" $0; bytes+=length(line)+1; if (bytes <= 48000) print line; remaining-- }' "$RUNNER_TEMP/count-$NAME" > "$OUT/selection-count-primary-$NAME.txt"
           done
           TEST_HEADERS="$(xcode-select -p)/Platforms/iPhoneSimulator.platform/Developer/Library/Frameworks/XCTest.framework/Headers"
-          grep -R -n -A 4 -B 2 -E 'isHittable|typeText:|XCUIElementQuery.*(cells|buttons|searchFields|textFields)' "$TEST_HEADERS" > "$OUT/xctest-selection-control-headers.txt"
+          grep -R -n -A 4 -B 2 -E 'isHittable|typeText:|NSUInteger.*count|firstMatch|XCUIElementQuery.*(cells|buttons|searchFields|textFields)' "$TEST_HEADERS" > "$OUT/xctest-selection-control-headers.txt"
           # Semantic method types from actual SDK Clang AST, independent of
           # property spelling, annotations, horizontal spacing or line breaks.
           xcrun clang -target arm64-apple-ios17.5-simulator -isysroot "$SDK" -F "$(dirname "$(dirname "$TEST_HEADERS")")" -x objective-c -fsyntax-only -Xclang -ast-dump=json "$TEST_HEADERS/XCTest.h" > "$RUNNER_TEMP/xctest-selection-ast.json"
-          jq '[.. | objects | select(.kind? == "ObjCMethodDecl" and (.name? | IN("isHittable", "cells", "buttons", "searchFields", "textFields", "typeText:"))) | {name, instance, returnType, parameters: [.inner[]? | select(.kind == "ParmVarDecl") | .type.qualType]}] | unique' "$RUNNER_TEMP/xctest-selection-ast.json" > "$OUT/xctest-selection-method-types.json"
+          jq '[.. | objects | select(.kind? == "ObjCMethodDecl" and (.name? | IN("isHittable", "cells", "buttons", "searchFields", "textFields", "count", "firstMatch", "typeText:", "label"))) | {name, instance, returnType, parameters: [.inner[]? | select(.kind == "ParmVarDecl") | .type.qualType]}] | unique' "$RUNNER_TEMP/xctest-selection-ast.json" > "$OUT/xctest-selection-method-types.json"
+          jq -e 'def abi_type: gsub("(_Nullable|_Nonnull|_Null_unspecified)"; "") | gsub("[[:space:]]+"; " ") | gsub("^ | $"; ""); [.[] | select(.name == "label" and .instance == true and .parameters == [] and (.returnType.qualType | abi_type) == "NSString *")] | length > 0' "$OUT/xctest-selection-method-types.json"
           jq -e 'def abi_type: gsub("(_Nullable|_Nonnull|_Null_unspecified)"; "") | gsub("[[:space:]]+"; " ") | gsub("^ | $"; ""); ([.[] | select(.name == "isHittable" and .instance == true and ((.returnType.desugaredQualType // .returnType.qualType | abi_type) | IN("bool", "_Bool")))] | length > 0) and ([.[] | select((.name | IN("cells", "buttons", "searchFields", "textFields")) and .instance == true and (.returnType.qualType | abi_type) == "XCUIElementQuery *") | .name] | unique | length == 4) and ([.[] | select(.name == "typeText:" and .instance == true and .returnType.qualType == "void" and ([.parameters[] | abi_type] == ["NSString *"]))] | length > 0)' "$OUT/xctest-selection-method-types.json"
-          printf 'applications_getter_called=false\nset_metadata_called=false\ncount_getter_called=false\nsemantic_selection_verified=false\npending_boundary=applications_return_set_specialization_count_receiver_and_ownership\n' > "$OUT/selection-count-abi-scope.txt"
+          jq '[.. | objects | select(.kind? == "ObjCInterfaceDecl" and .name? == "XCUIElementQuery") | .inner[]? | select(.kind == "ObjCMethodDecl" and (.name | IN("count", "firstMatch"))) | {name, instance, returnType, parameters: [.inner[]? | select(.kind == "ParmVarDecl") | .type.qualType]}] | unique' "$RUNNER_TEMP/xctest-selection-ast.json" > "$OUT/xctest-selection-query-method-types.json"
+          jq -e 'def abi_type: gsub("(_Nullable|_Nonnull|_Null_unspecified)"; "") | gsub("[[:space:]]+"; " ") | gsub("^ | $"; ""); ([.[] | select(.name == "count" and .instance == true and .parameters == [] and .returnType.qualType == "NSUInteger" and .returnType.desugaredQualType == "unsigned long")] | length > 0) and ([.[] | select(.name == "firstMatch" and .instance == true and .parameters == [] and (.returnType.qualType | abi_type) == "XCUIElement *")] | length > 0)' "$OUT/xctest-selection-query-method-types.json"
+          printf 'abi_review_required_before_mac=true\nset_specialization_guard=actual_descriptor_two_key_arguments\napplications_getter_guard=actual_sdk_prefix_and_concrete_owned_scalar_return\ncount_getter_guard=actual_native_x0_entry_and_return\nsemantic_selection_verified=false\n' > "$OUT/selection-count-abi-scope.txt"
       - name: Require exact public hosting UIKit signatures
         if: inputs.selection_inspection_mode == 'picker-hosting' || inputs.selection_inspection_mode == 'consent-selection-acceptance'
         shell: bash
@@ -736,6 +741,7 @@ jobs:
               done
             fi
             grep '^XCTest consent-selection:' "$OUT/xcode-ui-test.txt" > "$OUT/consent-selection-xctest-observations.txt" || true
+            xcrun simctl io "$SIM_ID" screenshot "$OUT/consent-selection-after-test.png" || true
             # Category-only, callback-only, and ABI-pending runs all fail closed.
             test "$UI_TEST_STATUS" = 0
             grep -Fx 'error_present=false' "$OUT/public-authorization-result.txt"
@@ -743,11 +749,28 @@ jobs:
             grep -Fx 'status_read_on_main_thread=true' "$OUT/public-authorization-result.txt"
             grep -Eq '^rust_setter_calls=[1-9][0-9]*$' "$OUT/consent-selection-result.txt"
             grep -Fx 'application_choice_armed=true' "$OUT/consent-selection-result.txt"
-            grep -Eq '^rust_setter_calls_after_app_choice=[1-9][0-9]*$' "$OUT/consent-selection-result.txt"
+            grep -Eq '^rust_setter_calls_after_picker_presentation=[1-9][0-9]*$' "$OUT/consent-selection-result.txt"
             grep -Fx 'initial_applications_count=0' "$OUT/consent-selection-result.txt"
             grep -Eq '^selected_applications_count=[1-9][0-9]*$' "$OUT/consent-selection-result.txt"
             grep -Fx 'applications_count_abi_verified=true' "$OUT/consent-selection-result.txt"
             grep -Fx 'semantic_app_selection_verified=true' "$OUT/consent-selection-result.txt"
+            grep -Fx 'count_read_on_main_thread=true' "$OUT/consent-selection-result.txt"
+            grep -Fx 'owned_set_vwt_copy_destroy=true' "$OUT/consent-selection-result.txt"
+            grep -Eq '^applications_getter_calls=[0-9]+$' "$OUT/consent-selection-result.txt"
+            GETTER_CALLS=$(sed -n 's/^applications_getter_calls=//p' "$OUT/consent-selection-result.txt")
+            COUNT_CALLS=$(sed -n 's/^count_getter_calls=//p' "$OUT/consent-selection-result.txt")
+            test "$GETTER_CALLS" -ge 2
+            test "$GETTER_CALLS" = "$COUNT_CALLS"
+            grep -F 'available_app_control_observed=true' "$OUT/consent-selection-xctest-observations.txt"
+            grep -F 'actual_app_control_tap_returned=true' "$OUT/consent-selection-xctest-observations.txt"
+            PRE=$(sed -n 's/^XCTest consent-selection: pre_tap_setter_calls=\([0-9][0-9]*\); pre_tap_applications_count=0$/\1/p' "$OUT/consent-selection-xctest-observations.txt")
+            POST=$(sed -n 's/^XCTest consent-selection: post_tap_setter_calls=\([0-9][0-9]*\); post_tap_setter_delta=[1-9][0-9]*; post_tap_applications_count=[1-9][0-9]*; semantic_app_selection_verified=true$/\1/p' "$OUT/consent-selection-xctest-observations.txt")
+            DELTA=$(sed -n 's/^XCTest consent-selection: post_tap_setter_calls=[0-9][0-9]*; post_tap_setter_delta=\([1-9][0-9]*\); post_tap_applications_count=[1-9][0-9]*; semantic_app_selection_verified=true$/\1/p' "$OUT/consent-selection-xctest-observations.txt")
+            test "$POST" -gt "$PRE"
+            test "$((POST-PRE))" = "$DELTA"
+            HOST_SETTERS=$(sed -n 's/^rust_setter_calls=//p' "$OUT/consent-selection-result.txt")
+            test "$HOST_SETTERS" -ge "$POST"
+            printf 'xctest_exit_status=0\nmac_acceptance_verified=true\nmonitoring_verified=false\nshielding_verified=false\nproduct_release_verified=false\n' > "$OUT/consent-selection-test-status.txt"
             exit 0
           fi
           xcrun simctl io "$SIM_ID" screenshot "$OUT/consent-after-test.png"
@@ -974,6 +997,8 @@ jobs:
             ${{ runner.temp }}/ios-sdk-audit/public-authorization-result.txt
             ${{ runner.temp }}/ios-sdk-audit/official-simulator-app-fixture.txt
             ${{ runner.temp }}/ios-sdk-audit/xctest-selection-control-headers.txt
+            ${{ runner.temp }}/ios-sdk-audit/xctest-selection-method-types.json
+            ${{ runner.temp }}/ios-sdk-audit/xctest-selection-query-method-types.json
             ${{ runner.temp }}/ios-sdk-audit/xcode-ui-*.txt
             ${{ runner.temp }}/ios-sdk-audit/picker-hosting-uikit-declarations.txt
             ${{ runner.temp }}/ios-sdk-audit/versions.txt
