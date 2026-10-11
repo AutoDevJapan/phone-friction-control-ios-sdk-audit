@@ -5,6 +5,64 @@
 #![cfg_attr(not(ui_test_bundle), feature(abi_swift))]
 #![cfg_attr(xcode_host, no_main)]
 
+// This is a distinct consent process, never an exception for ordinary probes.
+#[cfg(all(
+    consent_selection_acceptance,
+    not(all(
+        runtime_probe,
+        uikit_host,
+        xcode_host,
+        ui_test_host,
+        auth_request,
+        authorization_status_consent_probe,
+        selection_layout_probe,
+        picker_value_probe,
+        picker_hosting_probe
+    ))
+))]
+compile_error!("consent selection requires the complete explicit consent host configuration");
+#[cfg(all(
+    consent_selection_acceptance,
+    any(
+        ui_test_bundle,
+        ui_test_continue,
+        authorization_status_entry_probe,
+        authorization_status_value_probe,
+        picker_entry_probe,
+        binding_entry_probe,
+        selection_value_probe,
+        mutable_binding_probe
+    )
+))]
+compile_error!("consent selection excludes all other experiments");
+#[cfg(all(
+    ui_test_selection_acceptance,
+    not(all(ui_test_bundle, ui_test_continue))
+))]
+compile_error!("selection XCTest requires explicit Continue in the separate test bundle");
+#[cfg(all(
+    ui_test_selection_acceptance,
+    any(
+        runtime_probe,
+        auth_request,
+        uikit_host,
+        xcode_host,
+        ui_test_host,
+        authorization_status_entry_probe,
+        authorization_status_value_probe,
+        authorization_status_consent_probe,
+        selection_layout_probe,
+        binding_entry_probe,
+        selection_value_probe,
+        mutable_binding_probe,
+        picker_entry_probe,
+        picker_value_probe,
+        picker_hosting_probe,
+        consent_selection_acceptance
+    )
+))]
+compile_error!("selection XCTest is a separate test product without host or inspection modes");
+
 #[cfg(all(authorization_status_entry_probe, not(runtime_probe)))]
 compile_error!("status entry inspection requires the isolated runtime probe");
 #[cfg(all(
@@ -69,7 +127,13 @@ struct MetadataResponse {
     state: usize,
 }
 
-#[cfg(all(runtime_probe, not(any(picker_entry_probe, picker_value_probe))))]
+#[cfg(all(
+    runtime_probe,
+    any(
+        consent_selection_acceptance,
+        not(any(picker_entry_probe, picker_value_probe))
+    )
+))]
 #[link(name = "FamilyControls", kind = "framework")]
 unsafe extern "Swift" {
     // Non-generic accessor: MetadataRequest -> MetadataResponse (Swift 5.10 ABI).
@@ -81,7 +145,13 @@ unsafe extern "Swift" {
 // on Darwin arm64. This Rust-owned assembly boundary preserves the C caller's
 // callee-saved x20 and return address. It makes no type-layout assumptions about
 // the Swift object beyond its documented single class-reference pointer.
-#[cfg(all(runtime_probe, not(any(picker_entry_probe, picker_value_probe))))]
+#[cfg(all(
+    runtime_probe,
+    any(
+        consent_selection_acceptance,
+        not(any(picker_entry_probe, picker_value_probe))
+    )
+))]
 core::arch::global_asm!(concat!(
     ".text\n.p2align 2\n.globl _rust_shared_with_metadata\n",
     "_rust_shared_with_metadata:\n.cfi_startproc\n",
@@ -93,19 +163,37 @@ core::arch::global_asm!(concat!(
     ".cfi_def_cfa_offset 0\nret\n.cfi_endproc\n",
 ));
 
-#[cfg(all(runtime_probe, not(any(picker_entry_probe, picker_value_probe))))]
+#[cfg(all(
+    runtime_probe,
+    any(
+        consent_selection_acceptance,
+        not(any(picker_entry_probe, picker_value_probe))
+    )
+))]
 unsafe extern "C" {
     fn rust_shared_with_metadata(metadata: *const std::ffi::c_void) -> *mut std::ffi::c_void;
 }
 
-#[cfg(all(runtime_probe, not(any(picker_entry_probe, picker_value_probe))))]
+#[cfg(all(
+    runtime_probe,
+    any(
+        consent_selection_acceptance,
+        not(any(picker_entry_probe, picker_value_probe))
+    )
+))]
 #[link(name = "objc")]
 unsafe extern "C" {
     fn object_getClass(object: *mut std::ffi::c_void) -> *const std::ffi::c_void;
     fn class_getName(class: *const std::ffi::c_void) -> *const std::ffi::c_char;
 }
 
-#[cfg(all(runtime_probe, not(any(picker_entry_probe, picker_value_probe))))]
+#[cfg(all(
+    runtime_probe,
+    any(
+        consent_selection_acceptance,
+        not(any(picker_entry_probe, picker_value_probe))
+    )
+))]
 fn inspect_singleton() -> *mut std::ffi::c_void {
     // This deliberately does not request authorization or read another app's data.
     // Request 0 means a blocking request for complete metadata.
@@ -219,6 +307,23 @@ mod authorization_status_entry {
             print!("{byte:02x}");
         }
         println!();
+        #[cfg(consent_selection_acceptance)]
+        {
+            use std::io::Write;
+            let home = std::env::var_os("HOME").expect("host container HOME missing");
+            let documents = std::path::PathBuf::from(home).join("Documents");
+            std::fs::create_dir_all(&documents).expect("create ABI evidence directory");
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(documents.join("selection-count-entry-prefixes.txt"))
+                .expect("open ABI evidence");
+            write!(file, "Authorization status: {label}; length={length}; hex=").unwrap();
+            for byte in bytes {
+                write!(file, "{byte:02x}").unwrap();
+            }
+            writeln!(file).unwrap();
+        }
     }
     pub(super) fn inspect(object: *mut c_void) -> *const c_void {
         let page = unsafe { getpagesize() };
@@ -470,6 +575,7 @@ compile_error!("Xcode static library host requires the UIKit authorization mode"
         picker_entry_probe,
         picker_value_probe
     ),
+    not(consent_selection_acceptance),
     any(
         ui_test_host,
         ui_test_bundle,
@@ -507,7 +613,7 @@ compile_error!("picker entry inspection requires the selection layout mode");
     any(mutable_binding_probe, selection_value_probe, binding_entry_probe)
 ))]
 compile_error!("picker entry inspection is a separate metadata-only experiment");
-#[cfg(all(picker_value_probe, auth_request))]
+#[cfg(all(picker_value_probe, auth_request, not(consent_selection_acceptance)))]
 compile_error!("picker value inspection excludes authorization request code");
 #[cfg(all(
     picker_hosting_probe,
@@ -562,6 +668,10 @@ mod selection_layout {
     }
     #[link(name = "FamilyControls", kind = "framework")]
     #[link(name = "SwiftUI", kind = "framework")]
+    #[cfg_attr(
+        consent_selection_acceptance,
+        link(name = "ManagedSettings", kind = "framework")
+    )]
     unsafe extern "C" {}
     #[link(name = "swiftCore")]
     unsafe extern "Swift" {
@@ -577,10 +687,10 @@ mod selection_layout {
     unsafe extern "C" {
         fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
         fn getpagesize() -> i32;
-        #[cfg(any(binding_entry_probe, picker_entry_probe))]
+        #[cfg(any(binding_entry_probe, picker_entry_probe, consent_selection_acceptance))]
         fn dladdr(address: *const c_void, information: *mut DlInfo) -> i32;
     }
-    #[cfg(any(binding_entry_probe, picker_entry_probe))]
+    #[cfg(any(binding_entry_probe, picker_entry_probe, consent_selection_acceptance))]
     #[repr(C)]
     struct DlInfo {
         filename: *const c_char,
@@ -642,12 +752,29 @@ mod selection_layout {
             print!("{byte:02x}");
         }
         println!();
+        #[cfg(consent_selection_acceptance)]
+        {
+            use std::io::Write;
+            let home = std::env::var_os("HOME").expect("host container HOME missing");
+            let documents = std::path::PathBuf::from(home).join("Documents");
+            std::fs::create_dir_all(&documents).expect("create ABI evidence directory");
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(documents.join("selection-count-entry-prefixes.txt"))
+                .expect("open ABI evidence");
+            write!(file, "{scope}: {label}; length={count}; hex=").unwrap();
+            for byte in bytes {
+                write!(file, "{byte:02x}").unwrap();
+            }
+            writeln!(file).unwrap();
+        }
     }
     #[cfg(binding_entry_probe)]
     fn control_transfer_prefixes(label: &str, entry: *const c_void, page: usize) {
         bounded_control_transfer_prefixes("Binding", "Selection", label, entry, page, false);
     }
-    #[cfg(any(binding_entry_probe, picker_entry_probe))]
+    #[cfg(any(binding_entry_probe, picker_entry_probe, consent_selection_acceptance))]
     pub(super) fn bounded_control_transfer_prefixes(
         scope: &str,
         byte_scope: &str,
@@ -748,7 +875,7 @@ mod selection_layout {
         println!("{scope} control transfer: {label}; straight_line_prefix_end=true");
     }
 
-    fn layout(label: &str, response: MetadataResponse, page: usize) -> usize {
+    pub(super) fn layout(label: &str, response: MetadataResponse, page: usize) -> usize {
         assert!(response.state == 0, "incomplete selection metadata");
         assert!(!response.value.is_null(), "null selection metadata");
         let metadata = response.value.cast::<usize>();
@@ -780,6 +907,12 @@ mod selection_layout {
         println!(
             "Selection layout: {label}; size={size}; stride={stride}; alignment={alignment}; metadata_complete=true; kind_struct=true"
         );
+        #[cfg(consent_selection_acceptance)]
+        {
+            let home = std::env::var_os("HOME").expect("host container HOME missing");
+            std::fs::write(std::path::PathBuf::from(home).join("Documents/selection-count-layout.txt"),
+                format!("type={label}\nsize={size}\nstride={stride}\nalignment={alignment}\nmetadata_complete=true\nkind_struct=true\n")).expect("write Application metadata evidence");
+        }
         // Slots 2 and 3 are initializeWithCopy and assignWithCopy. Read only
         // their addresses; no VWT function is called and no value is accessed.
         for (slot, name) in [(2, "initializeWithCopy"), (3, "assignWithCopy")] {
@@ -1686,7 +1819,12 @@ mod mutable_binding {
                 "mutable binding requires the main thread"
             );
             assert!(
-                self.started.elapsed() < Duration::from_secs(30),
+                self.started.elapsed()
+                    < Duration::from_secs(if cfg!(consent_selection_acceptance) {
+                        90
+                    } else {
+                        30
+                    }),
                 "mutable binding deadline exceeded"
             );
         }
@@ -1813,7 +1951,12 @@ mod mutable_binding {
                 let finished = wake
                     .wait_timeout_while(
                         lock.lock().unwrap(),
-                        Duration::from_secs(30).saturating_sub(proof.started.elapsed()),
+                        Duration::from_secs(if cfg!(consent_selection_acceptance) {
+                            90
+                        } else {
+                            30
+                        })
+                        .saturating_sub(proof.started.elapsed()),
                         |done| !*done,
                     )
                     .unwrap();
@@ -2052,6 +2195,11 @@ mod mutable_binding {
                 unsafe { pthread_main_np() } == 1,
                 "foreign mutable callback thread"
             );
+            #[cfg(consent_selection_acceptance)]
+            assert!(
+                !COUNT_READING.load(Ordering::Acquire),
+                "Binding callback during semantic Set read"
+            );
             let p = STATE.load(Ordering::SeqCst);
             assert!(!p.is_null(), "mutable callback without initialized state");
             let state = unsafe { &*p.cast::<State<'_>>() };
@@ -2089,6 +2237,15 @@ mod mutable_binding {
                 "mutable closure witness destination changed"
             );
             state.proof.inc(Count::Returned);
+            #[cfg(consent_selection_acceptance)]
+            if !getter {
+                drop(value);
+                // Finish the existing foreign callback's mutation before any
+                // semantic getter or UIKit badge work. No RefCell borrow or
+                // active-callback guard escapes into the count reader.
+                drop(_active);
+                super::native_host::selection_updated();
+            }
         });
         if outcome.is_err() {
             if let Some(proof) = diagnostics {
@@ -2429,6 +2586,8 @@ mod mutable_binding {
         stable.category(false, category);
         let _state: &'static Installed<'static> =
             Box::leak(Box::new(Installed::install(stable, proof)));
+        #[cfg(consent_selection_acceptance)]
+        collect_selection_abi(page);
         let mut binding = Value::allocate(binding_type, proof, true);
         proof.inc(Count::BindingInit);
         picker_values::initialize_binding(
@@ -2454,6 +2613,384 @@ mod mutable_binding {
         println!("Picker hosting result: extra_generic_arguments=0");
         println!("Picker hosting result: returned_reference_ownership=plus_one");
         controller
+    }
+    // Parent must review ALL new unsafe below BEFORE Mac execution.
+    // Evidence: run38164298930 selection-count-entry-prefixes.txt; Swift 5.10
+    // Metadata.h:1287-1367,3449-3549; GenericContext.h:34-94;
+    // GenCall.cpp:749-763,1629-1726; GenProto.cpp:383-447,3505-3514;
+    // SILFunctionType.cpp DefaultConventions:2518-2574. No private helper calls.
+    #[cfg(consent_selection_acceptance)]
+    core::arch::global_asm!(
+        ".text",
+        ".p2align 2",
+        ".globl _rust_selection_applications",
+        "_rust_selection_applications:",
+        ".cfi_startproc",
+        "stp x20, x30, [sp, #-16]!",
+        ".cfi_def_cfa_offset 16",
+        ".cfi_offset 20, -16",
+        ".cfi_offset 30, -8",
+        "mov x20, x0",
+        "blr x1",
+        "ldp x20, x30, [sp], #16",
+        ".cfi_restore 20",
+        ".cfi_restore 30",
+        ".cfi_def_cfa_offset 0",
+        "ret",
+        ".cfi_endproc",
+    );
+    #[cfg(consent_selection_acceptance)]
+    unsafe extern "C" {
+        // Non-frozen Selection: Indirect_In_Guaranteed Self -> swiftself x20.
+        // Concrete frozen Set's checked one-word result is Owned in x0, NOT x8.
+        fn rust_selection_applications(selection: *const c_void, entry: *const c_void) -> usize;
+    }
+    #[cfg(consent_selection_acceptance)]
+    struct ApplicationCount {
+        set: Witnesses,
+        application: *const c_void,
+        hashable: *const c_void,
+        applications: *const c_void,
+        count: unsafe extern "Swift" fn(usize, *const c_void, *const c_void) -> isize,
+        page: usize,
+    }
+    #[cfg(consent_selection_acceptance)]
+    static COUNT_PLAN: AtomicPtr<ApplicationCount> = AtomicPtr::new(std::ptr::null_mut());
+    #[cfg(consent_selection_acceptance)]
+    static COUNT_READING: AtomicBool = AtomicBool::new(false);
+    #[cfg(consent_selection_acceptance)]
+    static INITIAL_APPS: AtomicUsize = AtomicUsize::new(0);
+    #[cfg(consent_selection_acceptance)]
+    static CURRENT_APPS: AtomicUsize = AtomicUsize::new(0);
+    #[cfg(consent_selection_acceptance)]
+    static COUNTED_SETTERS: AtomicUsize = AtomicUsize::new(0);
+    #[cfg(consent_selection_acceptance)]
+    static APPLICATIONS_CALLS: AtomicUsize = AtomicUsize::new(0);
+    #[cfg(consent_selection_acceptance)]
+    static COUNT_CALLS: AtomicUsize = AtomicUsize::new(0);
+    #[cfg(consent_selection_acceptance)]
+    static COUNT_BASELINE_READY: AtomicBool = AtomicBool::new(false);
+    #[cfg(consent_selection_acceptance)]
+    struct CountReading;
+    #[cfg(consent_selection_acceptance)]
+    impl Drop for CountReading {
+        fn drop(&mut self) {
+            COUNT_READING.store(false, Ordering::Release);
+        }
+    }
+    #[cfg(consent_selection_acceptance)]
+    impl ApplicationCount {
+        fn read(&self) -> usize {
+            assert!(unsafe { pthread_main_np() } == 1);
+            assert!(
+                !COUNT_READING.swap(true, Ordering::AcqRel),
+                "semantic read reentry"
+            );
+            let _reading = CountReading;
+            let state = STATE.load(Ordering::Acquire);
+            assert!(!state.is_null());
+            let state = unsafe { &*state.cast::<State<'static>>() };
+            state.proof.check();
+            assert!(state.proof.n(Count::Active) == 0);
+            let source = {
+                let value = state.value.borrow();
+                assert!(value.initialized && !value.binding && value.witnesses.size == 56);
+                value.ptr()
+            }; // no RefCell borrow across either SDK call
+            let mut returned = Value::allocate(&self.set, state.proof, false);
+            APPLICATIONS_CALLS.fetch_add(1, Ordering::SeqCst);
+            let scalar = unsafe { rust_selection_applications(source, self.applications) };
+            // Reexplode the WHOLE checked 8-byte Set result into owned storage.
+            // This is not a Selection field/padding read or a fabricated Set.
+            unsafe { returned.ptr().cast::<usize>().write(scalar) };
+            returned.initialized = true;
+            let mut copied = Value::allocate(&self.set, state.proof, false);
+            copied.copy(&returned); // the real specialized Set VWT retains it
+            drop(returned); // exactly one destroy of the getter's owned result
+            let receiver = unsafe { read(copied.ptr().cast::<usize>(), self.page) };
+            // The actual first TST/BEQ selects the fully captured native path.
+            // Never follow an unreviewed Cocoa/ObjC bridge or inspect storage.
+            assert!(
+                receiver != 0 && receiver & 0xc000_0000_0000_0001 == 0,
+                "applications Set is not the audited native representation"
+            );
+            COUNT_CALLS.fetch_add(1, Ordering::SeqCst);
+            // GenCall expands direct Set Self first; GenProto cannot fulfill
+            // generics from a direct struct, so Element metadata and Hashable
+            // WT follow in x1/x2. Set metadata and x20 are NOT count's receiver.
+            let count = unsafe { (self.count)(receiver, self.application, self.hashable) };
+            assert!(count >= 0, "public Set.count returned a negative Int");
+            drop(copied); // its full VWT destroy, then free its Rust allocation
+            count as usize
+        }
+    }
+
+    #[cfg(consent_selection_acceptance)]
+    fn collect_selection_abi(page: usize) {
+        for line in env!("SELECTION_COUNT_ABI_MANIFEST").lines() {
+            let (kind, symbol) = line.split_once('|').expect("ABI manifest record");
+            let entry = resolve(symbol);
+            super::selection_layout::prefix_bytes("Selection count ABI", symbol, entry, page);
+            if kind == "function" {
+                super::selection_layout::bounded_control_transfer_prefixes(
+                    "Selection count ABI",
+                    "Selection count ABI",
+                    symbol,
+                    entry,
+                    page,
+                    false,
+                );
+            } else {
+                assert!(kind == "descriptor");
+            }
+        }
+        let accessor: unsafe extern "Swift" fn(usize) -> MetadataResponse =
+            unsafe { std::mem::transmute(resolve(env!("APPLICATION_METADATA_SYMBOL"))) };
+        let application = unsafe { accessor(0) };
+        assert!(application.state == 0 && !application.value.is_null());
+        let application_metadata = application.value;
+        let _application_layout = Witnesses::load(application_metadata, 48, page);
+        super::selection_layout::layout("ManagedSettings.Application", application, page);
+        // The returned metadata and conformance are process-static runtime data.
+        #[link(name = "swiftCore")]
+        unsafe extern "C" {
+            fn swift_conformsToProtocol(
+                metadata: *const c_void,
+                protocol: *const c_void,
+            ) -> *const c_void;
+        }
+        let witness = unsafe {
+            swift_conformsToProtocol(
+                application_metadata,
+                resolve(env!("HASHABLE_PROTOCOL_SYMBOL")),
+            )
+        };
+        assert!(
+            !witness.is_null(),
+            "public Application Hashable conformance missing"
+        );
+        let descriptor = unsafe { read(witness.cast::<*const c_void>(), page) };
+        assert!(
+            descriptor == resolve("$s15ManagedSettings11ApplicationVSHAAMc"),
+            "Hashable WT header does not identify the public Application conformance"
+        );
+        super::selection_layout::prefix_bytes(
+            "Selection count ABI",
+            "Application.Hashable witness descriptor",
+            descriptor,
+            page,
+        );
+        // Actual Set descriptor: Type header 28 bytes, cache/pattern 8 bytes,
+        // then GenericContext {NumParams=1,NumRequirements=1,NumKeyArguments=2,
+        // Flags=0}; one key type parameter at 44, key Protocol requirement at 48.
+        let set_descriptor = resolve(env!("SET_DESCRIPTOR_SYMBOL"));
+        assert!(unsafe { read(set_descriptor.cast::<u32>(), page) } == 0x0008_00d1);
+        for (offset, expected) in [
+            (20, 1u32),
+            (24, 4),
+            (36, 0x0001_0001),
+            (40, 2),
+            (44, 0x80),
+            (48, 0x80),
+        ] {
+            assert!(
+                word(set_descriptor, offset, page) == expected,
+                "Set generic descriptor changed"
+            );
+        }
+        let protocol_field = set_descriptor.cast::<u8>().wrapping_add(56);
+        let relative = unsafe { read(protocol_field.cast::<i32>(), page) };
+        assert!(
+            relative & 1 == 0
+                && protocol_field
+                    .wrapping_offset(relative as isize)
+                    .cast::<c_void>()
+                    == resolve(env!("HASHABLE_PROTOCOL_SYMBOL")),
+            "Set key requirement is not the actual Hashable descriptor"
+        );
+        // Hashable's actual protocol has four requirements. We pass the WT
+        // opaquely; ONLY its documented header was read, never guessed slots.
+        let protocol = resolve(env!("HASHABLE_PROTOCOL_SYMBOL"));
+        assert!(word(protocol, 12, page) == 1 && word(protocol, 16, page) == 4);
+        let set_accessor = resolve(env!("SET_METADATA_SYMBOL"));
+        for (offset, mask, expected) in [
+            (0, 0x9f00_001f, 0x9000_0004),
+            (4, 0xffc0_03ff, 0x9100_0084),
+            (8, 0x9f00_001f, 0x9000_0005),
+            (12, 0xffc0_03ff, 0x9100_00a5),
+        ] {
+            assert!(
+                word(set_accessor, offset, page) & mask == expected,
+                "Set Ma argument forwarding changed"
+            );
+        }
+        let helper = branch(set_accessor, 16, false, page);
+        for (offset, expected) in [
+            (0, 0xd100_c3ff),
+            (4, 0xa902_7bfd),
+            (8, 0x9100_83fd),
+            (12, 0xa900_8be1),
+            (16, 0xf900_0fe3),
+            (20, 0x9100_23e1),
+            (24, 0xaa04_03e2),
+            (28, 0xaa05_03e3),
+        ] {
+            assert!(
+                word(helper, offset, page) == expected,
+                "Set Ma shared helper prefix changed"
+            );
+        }
+        // Shared helper spills three physical registers, but the DESCRIPTOR
+        // above requires only TWO arguments. MetadataAccessFunction Fn2 is exact.
+        let accessor: unsafe extern "Swift" fn(
+            usize,
+            *const c_void,
+            *const c_void,
+        ) -> MetadataResponse = unsafe { std::mem::transmute(set_accessor) };
+        let set = unsafe { accessor(0, application_metadata, witness) };
+        assert!(set.state == 0 && !set.value.is_null());
+        assert!(
+            unsafe { read(set.value.cast::<*const c_void>().wrapping_add(1), page) }
+                == set_descriptor
+        );
+        assert!(
+            unsafe { read(set.value.cast::<*const c_void>().wrapping_add(2), page) }
+                == application_metadata
+        );
+        assert!(
+            unsafe { read(set.value.cast::<*const c_void>().wrapping_add(3), page) } == witness
+        );
+        let table = unsafe {
+            read(
+                set.value.cast::<*const ValueWitnessTable>().wrapping_sub(1),
+                page,
+            )
+        };
+        assert!(
+            !table.is_null() && unsafe { read(&raw const (*table).flags, page) } & 0x0001_0000 != 0,
+            "Set is not the expected non-POD owned scalar result"
+        );
+        let set = Witnesses::load(set.value, 8, page); // kind, size, stride, alignment, completeness BEFORE getter
+        let count_entry = resolve(env!("SET_COUNT_SYMBOL"));
+        for (offset, expected) in [
+            (0, 0xf242_081f),
+            (4, 0x5400_00e0),
+            (32, 0xf940_0800),
+            (36, 0xd65f_03c0),
+        ] {
+            assert!(
+                word(count_entry, offset, page) == expected,
+                "public Set.count native path changed"
+            );
+        }
+        let applications = resolve(env!("APPLICATIONS_SYMBOL"));
+        // Actual nongeneric getter preserves swiftself x20, ignores x8 result,
+        // and starts constructing its concrete result using public metadata.
+        for (offset, expected) in [
+            (0, 0xa9ba_6ffc),
+            (4, 0xa901_67fa),
+            (8, 0xa902_5ff8),
+            (12, 0xa903_57f6),
+            (16, 0xa904_4ff4),
+            (20, 0xa905_7bfd),
+            (24, 0x9101_43fd),
+            (28, 0xd101_03ff),
+            (32, 0xd280_0000),
+            (40, 0xf85f_8008),
+        ] {
+            assert!(
+                word(applications, offset, page) == expected,
+                "applications getter prefix changed"
+            );
+        }
+        let plan = Box::leak(Box::new(ApplicationCount {
+            set,
+            application: application_metadata,
+            hashable: witness,
+            applications,
+            count: unsafe { std::mem::transmute(count_entry) },
+            page,
+        }));
+        assert!(
+            COUNT_PLAN
+                .compare_exchange(
+                    std::ptr::null_mut(),
+                    plan,
+                    Ordering::AcqRel,
+                    Ordering::Acquire
+                )
+                .is_ok()
+        );
+        let initial = plan.read();
+        assert!(
+            initial == 0,
+            "fresh Selection applications are not initially empty"
+        );
+        INITIAL_APPS.store(initial, Ordering::Release);
+        CURRENT_APPS.store(initial, Ordering::Release);
+        COUNTED_SETTERS.store(setter_calls(), Ordering::Release);
+        COUNT_BASELINE_READY.store(true, Ordering::Release);
+        {
+            use std::io::Write;
+            let home = std::env::var_os("HOME").expect("host container HOME missing");
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(std::path::PathBuf::from(home).join("Documents/selection-count-layout.txt"))
+                .expect("open conformance evidence");
+            writeln!(file, "application_hashable_witness_present=true\ngeneric_set_metadata_called=true\nset_generic_key_arguments=2\nspecialized_set_layout_verified=true\nset_size=8\nset_stride=8\nset_alignment=8\ninitial_applications_count={initial}").unwrap();
+        }
+        println!(
+            "Selection count ABI: application_metadata_complete=true; hashable_witness_present=true; generic_set_metadata_called=true; specialized_set_layout_verified=true; baseline_read_on_main=true"
+        );
+    }
+
+    #[cfg(consent_selection_acceptance)]
+    pub(super) fn setter_calls() -> usize {
+        DIAGNOSTICS
+            .lock()
+            .unwrap()
+            .as_ref()
+            .expect("pinned diagnostics missing")
+            .n(Count::ClosureSet)
+    }
+    #[cfg(consent_selection_acceptance)]
+    pub(super) fn selection_evidence() -> String {
+        assert!(unsafe { pthread_main_np() } == 1);
+        let proof = DIAGNOSTICS
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("pinned diagnostics missing");
+        proof.check();
+        assert!(COUNT_BASELINE_READY.load(Ordering::Acquire));
+        let calls = proof.n(Count::ClosureSet);
+        let previous = COUNTED_SETTERS.load(Ordering::Acquire);
+        assert!(calls >= previous);
+        if calls > previous {
+            let plan = COUNT_PLAN.load(Ordering::Acquire);
+            assert!(!plan.is_null());
+            let count = unsafe { &*plan }.read();
+            CURRENT_APPS.store(count, Ordering::Release);
+            COUNTED_SETTERS.store(calls, Ordering::Release);
+        }
+        let initial = INITIAL_APPS.load(Ordering::Acquire);
+        let selected = CURRENT_APPS.load(Ordering::Acquire);
+        let semantic = initial == 0 && selected > initial && calls > 0;
+        format!(
+            "rust_setter_calls={calls}\nselection_state_pinned=true\nfull_teardown_verified=false\napplications_count_abi_verified=true\napplications_getter_calls={}\ncount_getter_calls={}\ninitial_applications_count={initial}\nselected_applications_count={selected}\nsemantic_app_selection_verified={semantic}\nselection_contents_output=false\ncount_read_on_main_thread=true\nowned_set_vwt_copy_destroy=true\n",
+            APPLICATIONS_CALLS.load(Ordering::Acquire),
+            COUNT_CALLS.load(Ordering::Acquire)
+        )
+    }
+    #[cfg(consent_selection_acceptance)]
+    pub(super) fn selection_snapshot() -> (usize, usize, usize) {
+        assert!(unsafe { pthread_main_np() } == 1);
+        assert!(COUNT_BASELINE_READY.load(Ordering::Acquire));
+        (
+            setter_calls(),
+            INITIAL_APPS.load(Ordering::Acquire),
+            CURRENT_APPS.load(Ordering::Acquire),
+        )
     }
     #[cfg(picker_hosting_probe)]
     pub(super) fn hosting_results() {
@@ -3010,7 +3547,10 @@ mod mutable_binding {
     }
 }
 
-#[cfg(all(runtime_probe, not(picker_value_probe)))]
+#[cfg(all(
+    runtime_probe,
+    any(consent_selection_acceptance, not(picker_value_probe))
+))]
 #[cfg_attr(any(uikit_host, authorization_status_entry_probe), allow(dead_code))]
 mod async_inspection {
     use std::ffi::c_void;
@@ -3586,15 +4126,293 @@ mod ui_authorization_test {
     }
 
     unsafe fn describe_system(application: Id) {
-        let description = unsafe { retained_object(application, c"debugDescription") };
-        if !description.0.is_null() {
-            let text = unsafe { object(description.0, c"UTF8String") }.cast::<c_char>();
-            if !text.is_null() {
+        #[cfg(ui_test_selection_acceptance)]
+        {
+            // Consent/Picker failures must never dump selection labels or AX trees.
+            let _ = application;
+            println!("XCTest consent-selection system observation: contents_output=false");
+            return;
+        }
+        #[cfg(not(ui_test_selection_acceptance))]
+        {
+            let description = unsafe { retained_object(application, c"debugDescription") };
+            if !description.0.is_null() {
+                let text = unsafe { object(description.0, c"UTF8String") }.cast::<c_char>();
+                if !text.is_null() {
+                    println!(
+                        "System UI observation: {}",
+                        unsafe { std::ffi::CStr::from_ptr(text) }.to_string_lossy()
+                    );
+                }
+            }
+        }
+    }
+
+    #[cfg(ui_test_selection_acceptance)]
+    unsafe fn utf8_string(receiver: Id) -> *const c_char {
+        let send: unsafe extern "C" fn(Id, Sel) -> *const c_char =
+            unsafe { std::mem::transmute(objc_msgSend as unsafe extern "C" fn()) };
+        unsafe { send(receiver, sel_registerName(c"UTF8String".as_ptr())) }
+    }
+
+    #[cfg(ui_test_selection_acceptance)]
+    unsafe fn observe_fixture_roles(application: Id, observer: &str) {
+        // Diagnostic only in the fresh, disposable CI Simulator. Record role
+        // counts and frames of the already pictured Social fixture; never
+        // export the AX tree, arbitrary labels, identifiers or selected values.
+        unsafe {
+            let count: unsafe extern "C" fn(Id, Sel) -> usize =
+                std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+            let boolean: unsafe extern "C" fn(Id, Sel) -> bool =
+                std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+            let name = string(c"Social");
+            for kind in [c"otherElements", c"cells", c"buttons", c"staticTexts"] {
+                let elements = retained_object(application, kind);
+                let query = retained_object_arg(elements.0, c"matchingIdentifier:", name.0);
+                let element = retained_object(query.0, c"firstMatch");
+                let exists = wait_for(element.0, 0.2);
+                let hittable =
+                    exists && boolean(element.0, sel_registerName(c"isHittable".as_ptr()));
                 println!(
-                    "System UI observation: {}",
-                    unsafe { std::ffi::CStr::from_ptr(text) }.to_string_lossy()
+                    "XCTest fixture roles: observer={observer}; role={}; total={}; exact_social_exists={exists}; exact_social_hittable={hittable}",
+                    kind.to_str().expect("constant role"),
+                    count(elements.0, sel_registerName(c"count".as_ptr()))
                 );
             }
+            let description = retained_object(application, c"debugDescription");
+            if description.0.is_null() {
+                return;
+            }
+            let bytes = utf8_string(description.0);
+            if bytes.is_null() {
+                return;
+            }
+            let text = std::ffi::CStr::from_ptr(bytes).to_string_lossy();
+            let mut matches = 0;
+            for line in text.lines().take(2048) {
+                if !line.contains("label: 'Social") || matches >= 8 {
+                    continue;
+                }
+                // Preserve only the role and numeric frame. Do not print the
+                // original line, even if its label has unexpected suffixes.
+                let role = line.trim().split(',').next().unwrap_or("");
+                if !["Other", "Cell", "Button", "StaticText"].contains(&role) {
+                    continue;
+                }
+                let Some(start) = line.find("{{") else {
+                    continue;
+                };
+                let Some(end) = line[start..].find("}}") else {
+                    continue;
+                };
+                let frame = &line[start..start + end + 2];
+                if frame.len() <= 128
+                    && frame
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || b"{}, .-".contains(&b))
+                {
+                    println!(
+                        "XCTest fixture frame: observer={observer}; role={role}; frame={frame}; social_prefix_label=true"
+                    );
+                    matches += 1;
+                }
+            }
+            println!(
+                "XCTest fixture observation: observer={observer}; matched_frames={matches}; contents_output=false"
+            );
+        }
+    }
+
+    #[cfg(ui_test_selection_acceptance)]
+    unsafe fn available_control(
+        application: Id,
+        label: &std::ffi::CStr,
+        kinds: &[&std::ffi::CStr],
+    ) -> Option<Owned> {
+        // Each exact identifier is queried from the actual public AX tree.
+        // No coordinates, broad debugDescription, contents logging or row guesses.
+        unsafe {
+            let name = string(label);
+            for &kind in kinds {
+                let elements = retained_object(application, kind);
+                let query = retained_object_arg(elements.0, c"matchingIdentifier:", name.0);
+                let element = retained_object(query.0, c"firstMatch");
+                let boolean: unsafe extern "C" fn(Id, Sel) -> bool =
+                    std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+                if wait_for(element.0, 0.2)
+                    && boolean(element.0, sel_registerName(c"isHittable".as_ptr()))
+                {
+                    return Some(element);
+                }
+            }
+            None
+        }
+    }
+
+    #[cfg(ui_test_selection_acceptance)]
+    #[repr(C)]
+    struct DisclosureOffset {
+        dx: f64,
+        dy: f64,
+    }
+    #[cfg(ui_test_selection_acceptance)]
+    unsafe fn open_disclosure(element: Id) {
+        // The observed Social row has a disclosure on its right edge. Target
+        // that edge relative to the actual hittable element, not its checkbox.
+        // Workflow guards public CGVector layout and this exact method type.
+        unsafe {
+            let coordinate: unsafe extern "C" fn(Id, Sel, DisclosureOffset) -> Id =
+                std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+            let point = Owned(objc_retain(coordinate(
+                element,
+                sel_registerName(c"coordinateWithNormalizedOffset:".as_ptr()),
+                DisclosureOffset { dx: 0.95, dy: 0.5 },
+            )));
+            assert!(!point.0.is_null());
+            action(point.0, c"tap");
+        }
+    }
+    #[cfg(ui_test_selection_acceptance)]
+    unsafe fn selection_snapshot(element: Id) -> Option<(usize, usize, usize)> {
+        unsafe {
+            // Only our own aggregate badge, never Picker labels or app names.
+            // The public XCTest label getter is type-checked by the workflow.
+            let label = retained_object(element, c"label");
+            if label.0.is_null() {
+                return None;
+            }
+            let bytes = utf8_string(label.0);
+            if bytes.is_null() {
+                return None;
+            }
+            let text = std::ffi::CStr::from_ptr(bytes).to_str().ok()?;
+            let mut fields = text.strip_prefix("Selection snapshot ")?.split(' ');
+            let setters = fields.next()?.strip_prefix("setters=")?.parse().ok()?;
+            let initial = fields.next()?.strip_prefix("initial=")?.parse().ok()?;
+            let apps = fields.next()?.strip_prefix("apps=")?.parse().ok()?;
+            if fields.next().is_some() {
+                return None;
+            }
+            Some((setters, initial, apps))
+        }
+    }
+
+    #[cfg(ui_test_selection_acceptance)]
+    unsafe fn choose_application(test: Id, app: Id, system: Id) {
+        unsafe {
+            let ready_label = string(c"Rust selection aggregate snapshot");
+            let buttons = retained_object(app, c"buttons");
+            let ready_query = retained_object_arg(buttons.0, c"matchingIdentifier:", ready_label.0);
+            let ready = retained_object(ready_query.0, c"firstMatch");
+            if !wait_for(ready.0, 25.0) {
+                fail(
+                    test,
+                    c"Approved continuation followed by real Picker not observed",
+                );
+                return;
+            }
+            println!("XCTest consent-selection: approved_picker_marker_observed=true");
+            // Safari produced a visibly empty search result in run38169768885.
+            // Navigate the actually observed Social disclosure first, without
+            // treating a category toggle as application selection.
+            let Some(before_navigation) = selection_snapshot(ready.0) else {
+                fail(test, c"Pre-navigation aggregate unavailable");
+                return;
+            };
+            let mut category = None;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(12);
+            while category.is_none() && std::time::Instant::now() < deadline {
+                for observer in [app, system] {
+                    category = available_control(
+                        observer,
+                        c"Social",
+                        &[c"otherElements", c"cells", c"buttons"],
+                    );
+                    if category.is_some() {
+                        break;
+                    }
+                }
+            }
+            let Some(category) = category else {
+                observe_fixture_roles(app, "host");
+                observe_fixture_roles(system, "system");
+                fail(test, c"Observed Social disclosure unavailable");
+                return;
+            };
+            open_disclosure(category.0);
+            let Some(after_navigation) = selection_snapshot(ready.0) else {
+                fail(test, c"Post-navigation aggregate unavailable");
+                return;
+            };
+            if after_navigation != before_navigation
+                || after_navigation.1 != 0
+                || after_navigation.2 != 0
+            {
+                fail(
+                    test,
+                    c"Disclosure navigation changed selection; category choice cannot pass",
+                );
+                return;
+            }
+            println!(
+                "XCTest consent-selection: observed_disclosure_navigation=true; navigation_setter_delta=0; navigation_applications_count=0"
+            );
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(12);
+            let mut candidate = None;
+            while candidate.is_none() && std::time::Instant::now() < deadline {
+                for observer in [app, system] {
+                    candidate = available_control(
+                        observer,
+                        c"Messages",
+                        &[c"otherElements", c"cells", c"buttons"],
+                    );
+                    if candidate.is_some() {
+                        break;
+                    }
+                }
+            }
+            let before;
+            if let Some(application) = candidate {
+                println!(
+                    "XCTest consent-selection: available_app_control_observed=true; selection_contents_output=false"
+                );
+                // Sample immediately before the actual app tap. Pre-existing
+                // selection or an old successful badge must not pass.
+                let Some((setters, initial, apps)) = selection_snapshot(ready.0) else {
+                    fail(test, c"Pre-tap aggregate snapshot unavailable");
+                    return;
+                };
+                if initial != 0 || apps != 0 {
+                    fail(
+                        test,
+                        c"Application selection already positive before actual app tap",
+                    );
+                    return;
+                }
+                before = setters;
+                println!(
+                    "XCTest consent-selection: pre_tap_setter_calls={before}; pre_tap_applications_count=0"
+                );
+                action(application.0, c"tap");
+                println!("XCTest consent-selection: actual_app_control_tap_returned=true");
+            } else {
+                fail(test, c"Official Simulator app fixture unavailable in Picker; category choice is not app selection");
+                return;
+            }
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+            while std::time::Instant::now() < deadline {
+                if let Some((after, initial, apps)) = selection_snapshot(ready.0) {
+                    if after > before && initial == 0 && apps > 0 {
+                        println!(
+                            "XCTest consent-selection: post_tap_setter_calls={after}; post_tap_setter_delta={}; post_tap_applications_count={apps}; semantic_app_selection_verified=true",
+                            after - before
+                        );
+                        return;
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            fail(test, c"Actual app tap did not produce fresh setter delta plus positive applications count");
         }
     }
 
@@ -3735,18 +4553,27 @@ mod ui_authorization_test {
             }
             // This marker is set only after the host's public continuation and
             // its result file have been observed. A tap alone is insufficient.
-            let result_label = string(c"Authorization result received");
-            let result_buttons = retained_object(app.0, c"buttons");
-            let result_query =
-                retained_object_arg(result_buttons.0, c"matchingIdentifier:", result_label.0);
-            let result_button = retained_object(result_query.0, c"firstMatch");
-            if !wait_for(result_button.0, 30.0) {
-                describe_system(system_app.0);
-                fail(test, c"Public authorization continuation not observed");
+            #[cfg(ui_test_selection_acceptance)]
+            {
+                choose_application(test, app.0, system_app.0);
+                action(app.0, c"terminate");
                 return;
             }
-            println!("XCTest host public continuation marker observed");
-            action(app.0, c"terminate");
+            #[cfg(not(ui_test_selection_acceptance))]
+            {
+                let result_label = string(c"Authorization result received");
+                let result_buttons = retained_object(app.0, c"buttons");
+                let result_query =
+                    retained_object_arg(result_buttons.0, c"matchingIdentifier:", result_label.0);
+                let result_button = retained_object(result_query.0, c"firstMatch");
+                if !wait_for(result_button.0, 30.0) {
+                    describe_system(system_app.0);
+                    fail(test, c"Public authorization continuation not observed");
+                    return;
+                }
+                println!("XCTest host public continuation marker observed");
+                action(app.0, c"terminate");
+            }
         }
     }
 
@@ -3780,9 +4607,9 @@ mod ui_authorization_test {
 
 #[cfg(all(runtime_probe, uikit_host, any(auth_request, picker_value_probe)))]
 mod native_host {
-    #[cfg(not(picker_value_probe))]
+    #[cfg(any(consent_selection_acceptance, not(picker_value_probe)))]
     use super::request_probe::objc_msgSend;
-    #[cfg(picker_value_probe)]
+    #[cfg(all(picker_value_probe, not(consent_selection_acceptance)))]
     #[link(name = "objc")]
     unsafe extern "C" {
         fn objc_msgSend(object: *mut std::ffi::c_void, selector: *const std::ffi::c_void) -> usize;
@@ -3790,7 +4617,7 @@ mod native_host {
     use std::ffi::{CString, c_char, c_void};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Duration;
-    #[cfg(not(selection_layout_probe))]
+    #[cfg(any(consent_selection_acceptance, not(selection_layout_probe)))]
     use std::time::Instant;
     type Id = *mut c_void;
     type Sel = *const c_void;
@@ -3812,6 +4639,10 @@ mod native_host {
     static REQUESTED: AtomicBool = AtomicBool::new(false);
     #[cfg(ui_test_host)]
     static REQUEST_BUTTON: AtomicUsize = AtomicUsize::new(0);
+    #[cfg(consent_selection_acceptance)]
+    static CHOICE_ARMED: AtomicBool = AtomicBool::new(false);
+    #[cfg(consent_selection_acceptance)]
+    static SETTER_BASELINE: AtomicUsize = AtomicUsize::new(0);
     #[link(name = "UIKit", kind = "framework")]
     unsafe extern "C" {
         fn UIApplicationMain(argc: i32, argv: *mut *mut c_char, principal: Id, delegate: Id)
@@ -3835,7 +4666,7 @@ mod native_host {
         #[cfg(ui_test_host)]
         fn objc_release(object: Id);
     }
-    #[cfg(picker_hosting_probe)]
+    #[cfg(all(picker_hosting_probe, not(consent_selection_acceptance)))]
     #[link(name = "swiftCore")]
     unsafe extern "C" {
         // Swift 5.10 RuntimeFunctions.def:336 C_CC, VoidTy, one unknown
@@ -3889,7 +4720,22 @@ mod native_host {
                 string,
                 0,
             );
-            send_id(button, c"setAccessibilityIdentifier:", string);
+            #[cfg(consent_selection_acceptance)]
+            let identifier = if CHOICE_ARMED.load(Ordering::Acquire) {
+                make_string(
+                    send0(objc_getClass(c"NSString".as_ptr()), c"alloc"),
+                    sel_registerName(c"initWithUTF8String:".as_ptr()),
+                    c"Rust selection aggregate snapshot".as_ptr(),
+                )
+            } else {
+                string
+            };
+            #[cfg(not(consent_selection_acceptance))]
+            let identifier = string;
+            send_id(button, c"setAccessibilityIdentifier:", identifier);
+            if identifier != string {
+                objc_release(identifier);
+            }
             objc_release(string);
         }
     }
@@ -3920,13 +4766,80 @@ mod native_host {
                 documents.join("public-authorization-result.txt"),
                 format!("public_authorization_continuation_observed=true\nerror_present={error}\nauthorization_status_verified=true\nstatus_raw_value={}\nstatus_label={}\nstatus_getter_calls=1\nraw_value_getter_calls=1\nenum_case_name_calls=1\nstatus_read_on_main_thread=true\nmonitoring=false\nshielding=false\n", status.raw, status.label),
             ).expect("write public authorization and status test result");
+            #[cfg(consent_selection_acceptance)]
+            {
+                // A real continuation and the public status getter both precede
+                // every Picker/Binding/Selection construction, on MAIN.
+                if error || status.raw != 2 || status.label != "approved" {
+                    unsafe {
+                        test_button_title(
+                            REQUEST_BUTTON.load(Ordering::Acquire) as Id,
+                            c"Selection approval rejected",
+                        )
+                    };
+                    return;
+                }
+                let success = std::panic::catch_unwind(|| {
+                    let controller = super::mutable_binding::host();
+                    SETTER_BASELINE
+                        .store(super::mutable_binding::setter_calls(), Ordering::Release);
+                    CHOICE_ARMED.store(true, Ordering::Release);
+                    present_picker(controller);
+                    selection_updated();
+                })
+                .is_ok();
+                if !success {
+                    eprintln!(
+                        "Consent Picker construction failed; pinned state retained until exit"
+                    );
+                    unsafe {
+                        test_button_title(
+                            REQUEST_BUTTON.load(Ordering::Acquire) as Id,
+                            c"Selection construction failed",
+                        )
+                    };
+                }
+                return;
+            }
         }
+        #[cfg(not(consent_selection_acceptance))]
         unsafe {
             test_button_title(
                 REQUEST_BUTTON.load(Ordering::Acquire) as Id,
                 c"Authorization result received",
             )
         };
+    }
+    #[cfg(consent_selection_acceptance)]
+    pub(super) fn selection_updated() {
+        let mut evidence = super::mutable_binding::selection_evidence();
+        let calls = super::mutable_binding::setter_calls();
+        let armed = CHOICE_ARMED.load(Ordering::Acquire);
+        let after = if armed {
+            calls
+                .checked_sub(SETTER_BASELINE.load(Ordering::Acquire))
+                .expect("setter count regressed")
+        } else {
+            0
+        };
+        evidence.push_str(&format!(
+            "application_choice_armed={armed}\nrust_setter_calls_after_picker_presentation={after}\n"
+        ));
+        let home = std::env::var_os("HOME").expect("test app container HOME missing");
+        let documents = std::path::PathBuf::from(home).join("Documents");
+        std::fs::create_dir_all(&documents).expect("create acceptance output directory");
+        // Rewrite only aggregate counters in this disposable app's container.
+        std::fs::write(
+            documents.join("consent-selection-result.txt"),
+            evidence.clone(),
+        )
+        .expect("write selection evidence");
+        let (setters, initial, apps) = super::mutable_binding::selection_snapshot();
+        let title = CString::new(format!(
+            "Selection snapshot setters={setters} initial={initial} apps={apps}"
+        ))
+        .unwrap();
+        unsafe { test_button_title(REQUEST_BUTTON.load(Ordering::Acquire) as Id, &title) };
     }
     #[cfg(ui_test_host)]
     unsafe extern "C" fn request_clicked(_: Id, _: Sel, _: Id) {
@@ -3937,7 +4850,7 @@ mod native_host {
     unsafe extern "C" fn window(_: Id, _: Sel) -> Id {
         WINDOW.load(Ordering::Acquire) as Id
     }
-    #[cfg(picker_value_probe)]
+    #[cfg(all(picker_value_probe, not(consent_selection_acceptance)))]
     unsafe extern "C" fn launched(delegate: Id, _: Sel, _: Id, _: Id) -> bool {
         // UIApplication lifecycle only. No UIWindow, root controller, view,
         // attach/present or control action in the Picker value experiment.
@@ -3949,7 +4862,7 @@ mod native_host {
         println!("Rust UIKit launch callback observed; inspection_without_window=true");
         true
     }
-    #[cfg(not(picker_value_probe))]
+    #[cfg(any(consent_selection_acceptance, not(picker_value_probe)))]
     unsafe extern "C" fn launched(delegate: Id, _: Sel, _: Id, _: Id) -> bool {
         assert!(!delegate.is_null());
         DELEGATE.store(unsafe { objc_retain(delegate) }.addr(), Ordering::Release);
@@ -4032,16 +4945,22 @@ mod native_host {
             return;
         }
         println!("Rust UIKit active callback observed");
-        #[cfg(selection_layout_probe)]
+        #[cfg(all(selection_layout_probe, not(consent_selection_acceptance)))]
         {
             // Keep the getter's allocation reference for this bounded process,
             // as with its window/controller. This mode starts no Swift task.
             // Catch Rust validation failures before crossing the C callback;
             // value owners unwind and emit their partial lifecycle counts.
             let success = std::panic::catch_unwind(|| {
-                #[cfg(not(any(picker_entry_probe, picker_value_probe)))]
+                #[cfg(any(
+                    consent_selection_acceptance,
+                    not(any(picker_entry_probe, picker_value_probe))
+                ))]
                 let _ = super::inspect_singleton();
-                #[cfg(not(any(picker_entry_probe, picker_value_probe)))]
+                #[cfg(any(
+                    consent_selection_acceptance,
+                    not(any(picker_entry_probe, picker_value_probe))
+                ))]
                 let metadata = super::selection_layout::inspect();
                 #[cfg(picker_entry_probe)]
                 super::picker_entry::inspect();
@@ -4110,19 +5029,46 @@ mod native_host {
                 std::mem::transmute(objc_msgSend as unsafe extern "C" fn(Id, Sel) -> usize);
             let rect = bounds(screen, sel_registerName(c"bounds".as_ptr()));
             assert!(rect.width > 0.0 && rect.height > 0.0);
+            #[cfg(not(consent_selection_acceptance))]
             let init: unsafe extern "C" fn(Id, Sel, Rect) -> Id =
                 std::mem::transmute(objc_msgSend as unsafe extern "C" fn(Id, Sel) -> usize);
+            #[cfg(not(consent_selection_acceptance))]
             let window = init(
                 send0(objc_getClass(c"UIWindow".as_ptr()), c"alloc"),
                 sel_registerName(c"initWithFrame:".as_ptr()),
                 rect,
             );
+            #[cfg(consent_selection_acceptance)]
+            let window = WINDOW.load(Ordering::Acquire) as Id;
             assert!(!window.is_null());
             WINDOW.store(window.addr(), Ordering::Release);
             HOSTING_CONTROLLER.store(controller.addr(), Ordering::Release);
             send_id(window, c"setRootViewController:", controller);
             send_void(window, c"makeKeyAndVisible");
             send_void(send0(controller, c"view"), c"layoutIfNeeded");
+            #[cfg(consent_selection_acceptance)]
+            {
+                // Reuse the explicit host control as an aggregate test marker.
+                // The allocated original controller/window and all Swift state
+                // remain pinned; no timed detach before the actual choice.
+                let button = REQUEST_BUTTON.load(Ordering::Acquire) as Id;
+                let frame: unsafe extern "C" fn(Id, Sel, Rect) =
+                    std::mem::transmute(objc_msgSend as unsafe extern "C" fn(Id, Sel) -> usize);
+                frame(
+                    button,
+                    sel_registerName(c"setFrame:".as_ptr()),
+                    Rect {
+                        x: 12.0,
+                        y: 52.0,
+                        width: rect.width - 24.0,
+                        height: 44.0,
+                    },
+                );
+                // Keep the aggregate marker in our window above the Picker
+                // hierarchy; no UI action is needed to arm the baseline.
+                send_id(window, c"addSubview:", button);
+                send_id(window, c"bringSubviewToFront:", button);
+            }
             assert!(send0(window, c"rootViewController") == controller);
             assert!(send0(send0(controller, c"view"), c"window") == window);
             assert!(send0(controller, c"parentViewController").is_null());
@@ -4139,7 +5085,7 @@ mod native_host {
             );
         }
     }
-    #[cfg(picker_hosting_probe)]
+    #[cfg(all(picker_hosting_probe, not(consent_selection_acceptance)))]
     unsafe extern "C" fn finish_picker(_: *mut c_void) {
         let success = std::panic::catch_unwind(|| unsafe {
             let window = WINDOW.swap(0, Ordering::AcqRel) as Id;
@@ -4162,7 +5108,7 @@ mod native_host {
         .is_ok();
         std::process::exit(if success { 0 } else { 1 });
     }
-    #[cfg(not(selection_layout_probe))]
+    #[cfg(any(consent_selection_acceptance, not(selection_layout_probe)))]
     fn start_request(object: Id) {
         let started = Instant::now();
         let owner = super::request_probe::start(object);
@@ -4240,7 +5186,11 @@ mod native_host {
             );
             assert!(!delegate_name.is_null());
             std::thread::spawn(|| {
-                std::thread::sleep(Duration::from_secs(30));
+                std::thread::sleep(Duration::from_secs(if cfg!(consent_selection_acceptance) {
+                    180
+                } else {
+                    30
+                }));
                 #[cfg(selection_layout_probe)]
                 {
                     #[cfg(all(picker_value_probe, not(picker_hosting_probe)))]
