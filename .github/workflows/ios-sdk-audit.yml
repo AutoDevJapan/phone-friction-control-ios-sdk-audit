@@ -335,17 +335,28 @@ jobs:
           # Fail before compiling/executing if a required selector signature is
           # absent. No Swift, C, ObjC source or guessed selector type is generated.
           : > "$OUT/picker-hosting-uikit-declarations.txt"
-          require() { grep -E "$2" "$1" >> "$OUT/picker-hosting-uikit-declarations.txt"; }
+          # Gather only the selectors/types this probe uses before validation,
+          # so a failed declaration guard retains its actual SDK context.
+          : > "$OUT/picker-hosting-uikit-candidates.txt"
+          for HEADER in UIScreen UIView UIWindow UIViewController; do
+            grep -nE '(mainScreen|CGRect[[:space:]]+bounds|initWithFrame:|layoutIfNeeded|UIWindow.*window|isHidden|rootViewController|makeKeyAndVisible|UIView.*view;|parentViewController)' "$HEADERS/$HEADER.h" >> "$OUT/picker-hosting-uikit-candidates.txt" || true
+          done
+          require() {
+            if ! grep -E "$2" "$1" >> "$OUT/picker-hosting-uikit-declarations.txt"; then
+              printf 'Required public declaration missing: %s; pattern=%s\n' "${1##*/}" "$2" >&2
+              exit 1
+            fi
+          }
           require "$HEADERS/UIScreen.h" '(\+.*\(UIScreen \*\)mainScreen|@property\(class,.*UIScreen \*mainScreen)'
-          require "$HEADERS/UIScreen.h" '@property.*CGRect bounds;'
+          require "$HEADERS/UIScreen.h" '@property.*CGRect bounds([[:space:]]+(API_|NS_)[^;]*)?;'
           require "$HEADERS/UIView.h" '\-.*\(instancetype\)initWithFrame:\(CGRect\)frame'
           require "$HEADERS/UIView.h" '\-.*\(void\)layoutIfNeeded;'
-          require "$HEADERS/UIView.h" '@property.*UIWindow \*window;'
-          require "$HEADERS/UIView.h" '@property.*getter=isHidden.*BOOL hidden;'
-          require "$HEADERS/UIWindow.h" '@property.*strong.*UIViewController \*rootViewController;'
+          require "$HEADERS/UIView.h" '@property.*UIWindow \*window([[:space:]]+(API_|NS_)[^;]*)?;'
+          require "$HEADERS/UIView.h" '@property.*getter=isHidden.*BOOL hidden([[:space:]]+(API_|NS_)[^;]*)?;'
+          require "$HEADERS/UIWindow.h" '@property.*strong.*UIViewController \*rootViewController([[:space:]]+(API_|NS_)[^;]*)?;'
           require "$HEADERS/UIWindow.h" '\-.*\(void\)makeKeyAndVisible;'
-          require "$HEADERS/UIViewController.h" '@property.*UIView \*view;'
-          require "$HEADERS/UIViewController.h" '@property.*UIViewController \*parentViewController;'
+          require "$HEADERS/UIViewController.h" '@property.*UIView \*view([[:space:]]+(API_|NS_)[^;]*)?;'
+          require "$HEADERS/UIViewController.h" '@property.*UIViewController \*parentViewController([[:space:]]+(API_|NS_)[^;]*)?;'
           require "$SDK/usr/include/objc/runtime.h" 'Class _Nullable object_getClass\(id _Nullable obj\)'
           require "$SDK/usr/include/objc/runtime.h" 'Class _Nullable class_getSuperclass\(Class _Nullable cls\)'
           GEOMETRY="$SDK/System/Library/Frameworks/CoreGraphics.framework/Headers/CGGeometry.h"
@@ -833,6 +844,7 @@ jobs:
             ${{ runner.temp }}/ios-sdk-audit/picker-hosting-capture.txt
             ${{ runner.temp }}/ios-sdk-audit/picker-hosting-bl24-entry.txt
             ${{ runner.temp }}/ios-sdk-audit/picker-hosting-uikit-declarations.txt
+            ${{ runner.temp }}/ios-sdk-audit/picker-hosting-uikit-candidates.txt
             ${{ runner.temp }}/ios-sdk-audit/picker-hosting-generic-abi-primary.txt
             ${{ runner.temp }}/ios-sdk-audit/picker-hosting-release-primary.txt
             ${{ runner.temp }}/ios-sdk-audit/picker-hosting-release-export.txt
