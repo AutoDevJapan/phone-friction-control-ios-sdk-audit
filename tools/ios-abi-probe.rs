@@ -4248,7 +4248,11 @@ mod ui_authorization_test {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(12);
             while category.is_none() && std::time::Instant::now() < deadline {
                 for observer in [app, system] {
-                    category = available_control(observer, c"Social", &[c"buttons", c"cells"]);
+                    category = available_control(
+                        observer,
+                        c"Social",
+                        &[c"otherElements", c"cells", c"buttons"],
+                    );
                     if category.is_some() {
                         break;
                     }
@@ -4280,7 +4284,11 @@ mod ui_authorization_test {
             let mut candidate = None;
             while candidate.is_none() && std::time::Instant::now() < deadline {
                 for observer in [app, system] {
-                    candidate = available_control(observer, c"Messages", &[c"buttons", c"cells"]);
+                    candidate = available_control(
+                        observer,
+                        c"Messages",
+                        &[c"otherElements", c"cells", c"buttons"],
+                    );
                     if candidate.is_some() {
                         break;
                     }
