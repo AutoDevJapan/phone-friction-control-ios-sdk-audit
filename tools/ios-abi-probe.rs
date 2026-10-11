@@ -4149,6 +4149,81 @@ mod ui_authorization_test {
     }
 
     #[cfg(ui_test_selection_acceptance)]
+    unsafe fn utf8_string(receiver: Id) -> *const c_char {
+        let send: unsafe extern "C" fn(Id, Sel) -> *const c_char =
+            unsafe { std::mem::transmute(objc_msgSend as unsafe extern "C" fn()) };
+        unsafe { send(receiver, sel_registerName(c"UTF8String".as_ptr())) }
+    }
+
+    #[cfg(ui_test_selection_acceptance)]
+    unsafe fn observe_fixture_roles(application: Id, observer: &str) {
+        // Diagnostic only in the fresh, disposable CI Simulator. Record role
+        // counts and frames of the already pictured Social fixture; never
+        // export the AX tree, arbitrary labels, identifiers or selected values.
+        unsafe {
+            let count: unsafe extern "C" fn(Id, Sel) -> usize =
+                std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+            let boolean: unsafe extern "C" fn(Id, Sel) -> bool =
+                std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+            let name = string(c"Social");
+            for kind in [c"otherElements", c"cells", c"buttons", c"staticTexts"] {
+                let elements = retained_object(application, kind);
+                let query = retained_object_arg(elements.0, c"matchingIdentifier:", name.0);
+                let element = retained_object(query.0, c"firstMatch");
+                let exists = wait_for(element.0, 0.2);
+                let hittable =
+                    exists && boolean(element.0, sel_registerName(c"isHittable".as_ptr()));
+                println!(
+                    "XCTest fixture roles: observer={observer}; role={}; total={}; exact_social_exists={exists}; exact_social_hittable={hittable}",
+                    kind.to_str().expect("constant role"),
+                    count(elements.0, sel_registerName(c"count".as_ptr()))
+                );
+            }
+            let description = retained_object(application, c"debugDescription");
+            if description.0.is_null() {
+                return;
+            }
+            let bytes = utf8_string(description.0);
+            if bytes.is_null() {
+                return;
+            }
+            let text = std::ffi::CStr::from_ptr(bytes).to_string_lossy();
+            let mut matches = 0;
+            for line in text.lines().take(2048) {
+                if !line.contains("label: 'Social") || matches >= 8 {
+                    continue;
+                }
+                // Preserve only the role and numeric frame. Do not print the
+                // original line, even if its label has unexpected suffixes.
+                let role = line.trim().split(',').next().unwrap_or("");
+                if !["Other", "Cell", "Button", "StaticText"].contains(&role) {
+                    continue;
+                }
+                let Some(start) = line.find("{{") else {
+                    continue;
+                };
+                let Some(end) = line[start..].find("}}") else {
+                    continue;
+                };
+                let frame = &line[start..start + end + 2];
+                if frame.len() <= 128
+                    && frame
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || b"{}, .-".contains(&b))
+                {
+                    println!(
+                        "XCTest fixture frame: observer={observer}; role={role}; frame={frame}; social_prefix_label=true"
+                    );
+                    matches += 1;
+                }
+            }
+            println!(
+                "XCTest fixture observation: observer={observer}; matched_frames={matches}; contents_output=false"
+            );
+        }
+    }
+
+    #[cfg(ui_test_selection_acceptance)]
     unsafe fn available_control(
         application: Id,
         label: &std::ffi::CStr,
@@ -4206,7 +4281,7 @@ mod ui_authorization_test {
             if label.0.is_null() {
                 return None;
             }
-            let bytes = object(label.0, c"UTF8String").cast::<c_char>();
+            let bytes = utf8_string(label.0);
             if bytes.is_null() {
                 return None;
             }
@@ -4259,6 +4334,8 @@ mod ui_authorization_test {
                 }
             }
             let Some(category) = category else {
+                observe_fixture_roles(app, "host");
+                observe_fixture_roles(system, "system");
                 fail(test, c"Observed Social disclosure unavailable");
                 return;
             };
