@@ -372,7 +372,15 @@ jobs:
           require_runtime_function object_getClass 'Class (id)'
           require_runtime_function class_getSuperclass 'Class (Class)'
           GEOMETRY="$SDK/System/Library/Frameworks/CoreGraphics.framework/Headers/CGGeometry.h"
-          for PATTERN in 'struct CGPoint' 'CGFloat x;' 'CGFloat y;' 'struct CGSize' 'CGFloat width;' 'CGFloat height;' 'struct CGRect' 'CGPoint origin;' 'CGSize size;'; do require "$GEOMETRY" "$PATTERN"; done
+          require_record() {
+            local SYMBOL=$1 EXPECTED=$2 RAW_AST="$RUNNER_TEMP/record-$1-ast.json" SELECTED="$OUT/record-$1-layout.json"
+            xcrun clang -target arm64-apple-ios17.5-simulator -isysroot "$SDK" -x objective-c -fsyntax-only -Wno-pragma-once-outside-header -Xclang -ast-dump=json -Xclang "-ast-dump-filter=$SYMBOL" "$GEOMETRY" > "$RAW_AST"
+            jq -s --arg symbol "$SYMBOL" '[.[] | select(.kind == "RecordDecl" and .name == $symbol and .completeDefinition == true) | {name, tag: .tagUsed, unsafe_layout_attributes: [.inner[]? | select(.kind == "PackedAttr" or .kind == "AlignedAttr") | .kind], fields: [.inner[]? | select(.kind == "FieldDecl") | {name, type: (.type.desugaredQualType // .type.qualType), bitfield: (.isBitfield // false)}]}] | if length > 0 then . else error("public geometry record absent") end' "$RAW_AST" > "$SELECTED"
+            jq -e --argjson expected "$EXPECTED" 'all(.[]; .tag == "struct" and .unsafe_layout_attributes == [] and [.fields[] | {name, type}] == $expected and all(.fields[]; .bitfield == false))' "$SELECTED"
+          }
+          require_record CGPoint '[{"name":"x","type":"double"},{"name":"y","type":"double"}]'
+          require_record CGSize '[{"name":"width","type":"double"},{"name":"height","type":"double"}]'
+          require_record CGRect '[{"name":"origin","type":"struct CGPoint"},{"name":"size","type":"struct CGSize"}]'
           grep -oE '_swift_unknownObjectRelease([[:space:],]|$)' "$SDK/usr/lib/swift/libswiftCore.tbd" | sed -E 's/[[:space:],]+$//' | sort -u > "$OUT/picker-hosting-release-export.txt"
           test "$(cat "$OUT/picker-hosting-release-export.txt")" = _swift_unknownObjectRelease
           # Primary compiler rules: generic class metatype fulfills Content and
@@ -859,6 +867,9 @@ jobs:
             ${{ runner.temp }}/ios-sdk-audit/picker-hosting-uikit-candidates.txt
             ${{ runner.temp }}/ios-sdk-audit/runtime-object_getClass-signature.json
             ${{ runner.temp }}/ios-sdk-audit/runtime-class_getSuperclass-signature.json
+            ${{ runner.temp }}/ios-sdk-audit/record-CGPoint-layout.json
+            ${{ runner.temp }}/ios-sdk-audit/record-CGSize-layout.json
+            ${{ runner.temp }}/ios-sdk-audit/record-CGRect-layout.json
             ${{ runner.temp }}/ios-sdk-audit/picker-hosting-generic-abi-primary.txt
             ${{ runner.temp }}/ios-sdk-audit/picker-hosting-release-primary.txt
             ${{ runner.temp }}/ios-sdk-audit/picker-hosting-release-export.txt
