@@ -745,6 +745,41 @@ jobs:
             fi
             grep '^XCTest consent-selection:' "$OUT/xcode-ui-test.txt" > "$OUT/consent-selection-xctest-observations.txt" || true
             xcrun simctl io "$SIM_ID" screenshot "$OUT/consent-selection-after-test.png" || true
+            # The test terminates its disposable app before the workflow screenshot.
+            # Export only PNG/JPEG diagnostics already recorded by XCTest, using
+            # Xcode 15.4's public xcresulttool. No AX contents or app labels are dumped.
+            # Diagnostic export cannot turn a failed test into acceptance.
+            RESULT="$OUT/consent-ui.xcresult"
+            EVIDENCE="$RUNNER_TEMP/choice-evidence"
+            mkdir -p "$EVIDENCE"
+            IMAGES=0
+            : > "$OUT/consent-selection-image-export.txt"
+            if xcrun xcresulttool get --path "$RESULT" --format json > "$EVIDENCE/root.json"; then
+              jq -r '[.actions._values[]?.actionResult.testsRef.id._value // empty] | unique | .[:2][]' "$EVIDENCE/root.json" > "$EVIDENCE/tests-ids.txt"
+              while IFS= read -r TESTS_ID; do
+                if xcrun xcresulttool get --path "$RESULT" --id "$TESTS_ID" --format json > "$EVIDENCE/tests.json"; then
+                  jq -r '[.. | objects | .summaryRef?.id?._value? // empty] | unique | .[:4][]' "$EVIDENCE/tests.json" > "$EVIDENCE/summary-ids.txt"
+                  while IFS= read -r SUMMARY_ID; do
+                    if xcrun xcresulttool get --path "$RESULT" --id "$SUMMARY_ID" --format json > "$EVIDENCE/summary.json"; then
+                      jq -r '[.. | objects | .attachments?._values[]? | select(.uniformTypeIdentifier._value == "public.png" or .uniformTypeIdentifier._value == "public.jpeg") | [.payloadRef.id._value, .uniformTypeIdentifier._value]] | unique | .[:8][] | @tsv' "$EVIDENCE/summary.json" > "$EVIDENCE/image-ids.txt"
+                      while IFS=$'\t' read -r IMAGE_ID IMAGE_TYPE; do
+                        if [ "$IMAGES" -ge 8 ]; then break; fi
+                        EXT=png
+                        if [ "$IMAGE_TYPE" = public.jpeg ]; then EXT=jpg; fi
+                        if xcrun xcresulttool export --path "$RESULT" --id "$IMAGE_ID" --type file --output-path "$OUT/consent-selection-fixture-$IMAGES.$EXT"; then
+                          IMAGES=$((IMAGES+1))
+                        else
+                          printf 'image_export_failed=true\n' >> "$OUT/consent-selection-image-export.txt"
+                        fi
+                      done < "$EVIDENCE/image-ids.txt"
+                    fi
+                  done < "$EVIDENCE/summary-ids.txt"
+                fi
+              done < "$EVIDENCE/tests-ids.txt"
+            else
+              printf 'result_metadata_unavailable=true\n' >> "$OUT/consent-selection-image-export.txt"
+            fi
+            printf 'fixture_images_exported=%s\nacceptance_decided_by_images=false\n' "$IMAGES" >> "$OUT/consent-selection-image-export.txt"
             # Category-only, callback-only, and ABI-pending runs all fail closed.
             test "$UI_TEST_STATUS" = 0
             grep -Fx 'error_present=false' "$OUT/public-authorization-result.txt"
@@ -993,6 +1028,7 @@ jobs:
             ${{ runner.temp }}/ios-sdk-audit/consent-ui.xcresult
             ${{ runner.temp }}/ios-sdk-audit/consent-selection-*.txt
             ${{ runner.temp }}/ios-sdk-audit/consent-selection-*.png
+            ${{ runner.temp }}/ios-sdk-audit/consent-selection-*.jpg
             ${{ runner.temp }}/ios-sdk-audit/selection-count-*.txt
             ${{ runner.temp }}/ios-sdk-audit/Swift-set-selected-declarations.json
             ${{ runner.temp }}/ios-sdk-audit/ManagedSettings-Application-selected-declarations.json
