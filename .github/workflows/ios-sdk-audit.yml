@@ -404,7 +404,14 @@ jobs:
           # property spelling, annotations, horizontal spacing or line breaks.
           xcrun clang -target arm64-apple-ios17.5-simulator -isysroot "$SDK" -F "$(dirname "$(dirname "$TEST_HEADERS")")" -x objective-c -fsyntax-only -Xclang -ast-dump=json "$TEST_HEADERS/XCTest.h" > "$RUNNER_TEMP/xctest-selection-ast.json"
           jq '[.. | objects | select(.kind? == "ObjCMethodDecl" and (.name? | IN("isHittable", "cells", "buttons", "searchFields", "textFields", "count", "firstMatch", "typeText:", "label", "coordinateWithNormalizedOffset:"))) | {name, instance, returnType, parameters: [.inner[]? | select(.kind == "ParmVarDecl") | .type.qualType]}] | unique' "$RUNNER_TEMP/xctest-selection-ast.json" > "$OUT/xctest-selection-method-types.json"
-          jq '[.. | objects | select(.kind? == "ObjCInterfaceDecl" and .name? == "XCUICoordinate") | .inner[]? | select(.kind == "ObjCMethodDecl" and .name == "tap") | {name, instance, returnType, parameters: [.inner[]? | select(.kind == "ParmVarDecl") | .type.qualType]}] | unique' "$RUNNER_TEMP/xctest-selection-ast.json" > "$OUT/xctest-coordinate-method-types.json"
+          # UI actions may be declared in an Objective-C category, not the class
+          # body. Include the exact coordinate header and preserve declaration
+          # context; never infer a message type from an unrelated class.
+          grep -n -A 6 -B 2 -E 'coordinateWithNormalizedOffset:' "$TEST_HEADERS/XCUIElement.h" > "$OUT/xctest-coordinate-headers.txt"
+          grep -n -A 6 -B 2 -E 'XCUICoordinate|\(void\)tap' "$TEST_HEADERS/XCUICoordinate.h" >> "$OUT/xctest-coordinate-headers.txt"
+          xcrun clang -target arm64-apple-ios17.5-simulator -isysroot "$SDK" -F "$(dirname "$(dirname "$TEST_HEADERS")")" -x objective-c -fsyntax-only -Xclang -ast-dump=json "$TEST_HEADERS/XCUICoordinate.h" > "$RUNNER_TEMP/xctest-coordinate-ast.json"
+          jq '[.. | objects | select(.kind? == "ObjCInterfaceDecl" or .kind? == "ObjCCategoryDecl" or .kind? == "ObjCProtocolDecl") | {kind, name, interface, methods: [.inner[]? | select(.kind == "ObjCMethodDecl" and .name == "tap") | {name, instance, returnType, parameters: [.inner[]? | select(.kind == "ParmVarDecl") | .type.qualType]}]} | select(.methods | length > 0)]' "$RUNNER_TEMP/xctest-coordinate-ast.json" > "$OUT/xctest-coordinate-declaration-contexts.json"
+          jq '[.[] | select((.kind == "ObjCInterfaceDecl" and .name == "XCUICoordinate") or (.kind == "ObjCCategoryDecl" and .interface.name == "XCUICoordinate")) | .methods[]] | unique' "$OUT/xctest-coordinate-declaration-contexts.json" > "$OUT/xctest-coordinate-method-types.json"
           jq -e 'def abi_type: gsub("(_Nullable|_Nonnull|_Null_unspecified)"; "") | gsub("[[:space:]]+"; " ") | gsub("^ | $"; ""); [.[] | select(.name == "coordinateWithNormalizedOffset:" and .instance == true and (.returnType.qualType | abi_type) == "XCUICoordinate *" and .parameters == ["CGVector"])] | length > 0' "$OUT/xctest-selection-method-types.json"
           jq -e '[.[] | select(.name == "tap" and .instance == true and .returnType.qualType == "void" and .parameters == [])] | length > 0' "$OUT/xctest-coordinate-method-types.json"
           jq -e 'def abi_type: gsub("(_Nullable|_Nonnull|_Null_unspecified)"; "") | gsub("[[:space:]]+"; " ") | gsub("^ | $"; ""); [.[] | select(.name == "label" and .instance == true and .parameters == [] and (.returnType.qualType | abi_type) == "NSString *")] | length > 0' "$OUT/xctest-selection-method-types.json"
@@ -1010,6 +1017,8 @@ jobs:
             ${{ runner.temp }}/ios-sdk-audit/xctest-selection-method-types.json
             ${{ runner.temp }}/ios-sdk-audit/xctest-selection-query-method-types.json
             ${{ runner.temp }}/ios-sdk-audit/xctest-coordinate-method-types.json
+            ${{ runner.temp }}/ios-sdk-audit/xctest-coordinate-declaration-contexts.json
+            ${{ runner.temp }}/ios-sdk-audit/xctest-coordinate-headers.txt
             ${{ runner.temp }}/ios-sdk-audit/record-CGVector-layout.json
             ${{ runner.temp }}/ios-sdk-audit/xcode-ui-*.txt
             ${{ runner.temp }}/ios-sdk-audit/picker-hosting-uikit-declarations.txt
