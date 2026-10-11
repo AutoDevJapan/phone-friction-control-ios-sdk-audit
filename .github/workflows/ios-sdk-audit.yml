@@ -989,6 +989,7 @@ jobs:
           path: |
             ${{ runner.temp }}/ios-sdk-audit/consent-ui.xcresult
             ${{ runner.temp }}/ios-sdk-audit/consent-selection-*.txt
+            ${{ runner.temp }}/ios-sdk-audit/consent-selection-*.png
             ${{ runner.temp }}/ios-sdk-audit/selection-count-*.txt
             ${{ runner.temp }}/ios-sdk-audit/Swift-set-selected-declarations.json
             ${{ runner.temp }}/ios-sdk-audit/ManagedSettings-Application-selected-declarations.json
