@@ -39,7 +39,7 @@ on:
         type: boolean
         default: false
       selection_inspection_mode:
-        description: Inspect selection layout, entries, values, mutable Binding, or Picker/hosting metadata entries without requesting access
+        description: Inspect selection layout, entries, values, mutable Binding, or Picker entries/lifetime without requesting access
         type: choice
         default: none
         options:
@@ -49,6 +49,7 @@ on:
           - values
           - mutable
           - picker-entries
+          - picker-values
 permissions:
   contents: read
 jobs:
@@ -69,13 +70,17 @@ jobs:
           mkdir "$OUT"
           SELECTION_MODE='${{ inputs.selection_inspection_mode }}'
           case "$SELECTION_MODE" in
-            none|layout|entries|values|mutable|picker-entries) ;;
+            none|layout|entries|values|mutable|picker-entries|picker-values) ;;
             *) echo 'Unknown selection inspection mode' >&2; exit 1 ;;
           esac
           if [ "$SELECTION_MODE" != none ]; then
             test '${{ inputs.xcode_signed_host }}' = true
             test '${{ inputs.native_uikit_host }}' = true
-            test '${{ inputs.authorization_probe }}' = true
+            if [ '${{ inputs.selection_inspection_mode }}' = picker-values ]; then
+              test '${{ inputs.authorization_probe }}' = false
+            else
+              test '${{ inputs.authorization_probe }}' = true
+            fi
             test '${{ inputs.ui_consent_test }}' = false
             test '${{ inputs.ui_continue }}' = false
             test '${{ inputs.authorization_status_entry_probe }}' = false
@@ -106,7 +111,11 @@ jobs:
           if [ '${{ inputs.ui_consent_test }}' = true ]; then
             test '${{ inputs.xcode_signed_host }}' = true
             test '${{ inputs.native_uikit_host }}' = true
-            test '${{ inputs.authorization_probe }}' = true
+            if [ '${{ inputs.selection_inspection_mode }}' = picker-values ]; then
+              test '${{ inputs.authorization_probe }}' = false
+            else
+              test '${{ inputs.authorization_probe }}' = true
+            fi
           else
             test '${{ inputs.ui_continue }}' = false
           fi
@@ -229,7 +238,11 @@ jobs:
             REQUEST_ARGS=(--cfg auth_request)
           fi
           if [ '${{ inputs.native_uikit_host }}' = true ]; then
-            test '${{ inputs.authorization_probe }}' = true
+            if [ '${{ inputs.selection_inspection_mode }}' = picker-values ]; then
+              test '${{ inputs.authorization_probe }}' = false
+            else
+              test '${{ inputs.authorization_probe }}' = true
+            fi
             REQUEST_ARGS+=(--cfg uikit_host)
           fi
           SELECTION_ARGS=()
@@ -264,7 +277,7 @@ jobs:
             # Verify the Darwin special dlsym handle against this SDK as well.
             grep -Eq '^#define[[:space:]]+RTLD_DEFAULT[[:space:]]+\(\(void[[:space:]]*\*\)[[:space:]]*-2\)' "$SDK/usr/include/dlfcn.h"
             SELECTION_ARGS=(--cfg selection_layout_probe)
-            if [ '${{ inputs.selection_inspection_mode }}' = picker-entries ]; then
+            if [ '${{ inputs.selection_inspection_mode }}' = picker-entries ] || [ '${{ inputs.selection_inspection_mode }}' = picker-values ]; then
               export PICKER_METADATA_SYMBOL=$(jq -er '[.[] | select(.name == "FamilyActivityPicker" and .declKind == "Struct" and .genericSig == null and .usr == "s:14FamilyControls0A14ActivityPickerV") | .usr | sub("^s:"; "\u0024s") + "Ma"] | if length == 1 then .[0] else error("expected nongeneric Picker struct") end' "$OUT/FamilyControls-selected-declarations.json")
               export PICKER_INIT_SYMBOL=$(jq -er '[.[] | select(.usr == "s:14FamilyControls0A14ActivityPickerV") | .members[] | select(.kind == "Constructor" and .printedName == "init(selection:)" and .moduleName == "FamilyControls" and .genericSig == null and .throwing != true and (.children | map(.printedName)) == ["FamilyControls.FamilyActivityPicker", "SwiftUI.Binding<FamilyControls.FamilyActivitySelection>"] and (.children | map(.usr)) == ["s:14FamilyControls0A14ActivityPickerV", "s:7SwiftUI7BindingV"] and .children[1].children[0].usr == "s:14FamilyControls0A17ActivitySelectionV" and .mangledName == "\u0024s14FamilyControls0A14ActivityPickerV9selectionAC7SwiftUI7BindingVyAA0aC9SelectionVG_tcfc") | .mangledName | sub("cfc$"; "cfC")] | if length == 1 then .[0] else error("expected exact Picker selection initializer") end' "$OUT/FamilyControls-selected-declarations.json")
               export HOSTING_METADATA_SYMBOL=$(jq -er '[.[] | select(.name == "UIHostingController" and .declKind == "Class" and .genericSig == "<Content where Content : SwiftUI.View>" and .usr == "s:7SwiftUI19UIHostingControllerC") | .usr | sub("^s:"; "\u0024s") + "Ma"] | if length == 1 then .[0] else error("expected hosting class with one View constraint") end' "$OUT/SwiftUI-selected-declarations.json")
@@ -281,18 +294,18 @@ jobs:
               test "$(wc -l < "$OUT/picker-hosting-public-exports.txt" | tr -d ' ')" = 6
               xcrun swift-demangle --compact < "$OUT/picker-hosting-public-exports.txt" > "$OUT/picker-hosting-public-demangled.txt"
               grep -n -A 12 -B 3 'dli_fname' "$SDK/usr/include/dlfcn.h" > "$OUT/picker-hosting-dladdr-declaration.txt"
-              SELECTION_ARGS+=(--cfg picker_entry_probe)
+              if [ '${{ inputs.selection_inspection_mode }}' = picker-entries ]; then SELECTION_ARGS+=(--cfg picker_entry_probe); else SELECTION_ARGS+=(--cfg picker_value_probe); fi
             fi
             if [ '${{ inputs.selection_inspection_mode }}' = values ]; then
               SELECTION_ARGS+=(--cfg selection_value_probe)
             fi
-            if [ '${{ inputs.selection_inspection_mode }}' = mutable ]; then
+            if [ '${{ inputs.selection_inspection_mode }}' = mutable ] || [ '${{ inputs.selection_inspection_mode }}' = picker-values ]; then
               export SELECTION_CATEGORY_INIT_SYMBOL=$(jq -er '[.[] | select(.name == "FamilyActivitySelection") | .members[] | select(.kind == "Constructor" and .printedName == "init(includeEntireCategory:)" and .moduleName == "FamilyControls" and .throwing != true and (.children | map(.usr)) == ["s:14FamilyControls0A17ActivitySelectionV", "s:Sb"] and .mangledName == "\u0024s14FamilyControls0A17ActivitySelectionV21includeEntireCategoryACSb_tcfc") | .mangledName | sub("cfc$"; "cfC")] | if length == 1 then .[0] else error("expected one public category Bool initializer") end' "$OUT/FamilyControls-selected-declarations.json")
               grep -Fx "$SELECTION_CATEGORY_INIT_SYMBOL" "$RUNNER_TEMP/selection-candidate-exports.txt" > "$OUT/selection-category-init-export.txt"
               test "$(wc -l < "$OUT/selection-category-init-export.txt" | tr -d ' ')" = 1
-              SELECTION_ARGS+=(--cfg mutable_binding_probe)
+              if [ '${{ inputs.selection_inspection_mode }}' = mutable ]; then SELECTION_ARGS+=(--cfg mutable_binding_probe); fi
             fi
-            if [ '${{ inputs.selection_inspection_mode }}' = entries ] || [ '${{ inputs.selection_inspection_mode }}' = mutable ]; then
+            if [ '${{ inputs.selection_inspection_mode }}' = entries ] || [ '${{ inputs.selection_inspection_mode }}' = mutable ] || [ '${{ inputs.selection_inspection_mode }}' = picker-values ]; then
               BINDING_GET_SYMBOL=$(jq -er '[.[] | select(.usr == "s:7SwiftUI7BindingV") | .members[] | select(.kind == "Var" and .printedName == "wrappedValue") | .accessors[] | select(.accessorKind == "get" and .mangledName == "\u0024s7SwiftUI7BindingV12wrappedValuexvg") | .mangledName] | if length == 1 then .[0] else error("expected one public Binding getter") end' "$OUT/SwiftUI-selected-declarations.json")
               BINDING_SET_SYMBOL=$(jq -er '[.[] | select(.usr == "s:7SwiftUI7BindingV") | .members[] | select(.kind == "Var" and .printedName == "wrappedValue") | .accessors[] | select(.accessorKind == "set" and .mangledName == "\u0024s7SwiftUI7BindingV12wrappedValuexvs") | .mangledName] | if length == 1 then .[0] else error("expected one public Binding setter") end' "$OUT/SwiftUI-selected-declarations.json")
               export BINDING_GET_SYMBOL BINDING_SET_SYMBOL
@@ -317,6 +330,35 @@ jobs:
           OUT="$RUNNER_TEMP/ios-sdk-audit"
           SDK=$(xcrun --sdk iphonesimulator --show-sdk-path)
           source "$RUNNER_TEMP/ios-probe-build-env.sh"
+          # Extract partial results before validation. Picker mode excludes the
+          # request implementation at compilation, independently of runtime output.
+          cat > "$RUNNER_TEMP/check-picker-values.sh" <<'CHECK'
+          set -euo pipefail
+          OUT=$1
+          sed -n 's/^Picker value result: //p' "$OUT/singleton-runtime.txt" > "$OUT/picker-value-results.txt"
+          sed -n 's/^Mutable binding result: //p' "$OUT/singleton-runtime.txt" > "$OUT/picker-binding-results.txt"
+          grep -E '^(Picker value|Mutable binding) entry guards: ' "$OUT/singleton-runtime.txt" > "$OUT/picker-value-entry-guards.txt" || true
+          printf 'launch_status=%s\nauthorization_request_path_compiled=false\n' "$2" > "$OUT/picker-value-launch.txt"
+          cat "$OUT/picker-value-launch.txt" "$OUT/picker-value-results.txt" >> "$GITHUB_STEP_SUMMARY"
+          test "$2" = 0
+          RESULTS="$OUT/picker-value-results.txt"
+          for FIELD in selection_metadata_calls binding_metadata_calls picker_metadata_calls hosting_metadata_calls conformance_calls class_lookup_calls superclass_calls picker_constructor_calls picker_values_constructed picker_initialize_with_copy_calls binding_inputs_transferred picker_returned_destination_checks; do test "$(grep -Fxc "$FIELD=1" "$RESULTS")" = 1; done
+          for FIELD in picker_destroy_calls picker_allocations picker_deallocations; do test "$(grep -Fxc "$FIELD=2" "$RESULTS")" = 1; done
+          for FIELD in all_owned_allocations all_owned_deallocations; do test "$(grep -Fxc "$FIELD=13" "$RESULTS")" = 1; done
+          for FIELD in callbacks_active outstanding_picker_owners outstanding_binding_owners hosting_constructor_calls hosting_instances_constructed authorization_requests status_getter_calls private_api_calls private_api_reads picker_contents_read; do test "$(grep -Fxc "$FIELD=0" "$RESULTS")" = 1; done
+          for FIELD in lifecycle_verified constructor_guards_verified state_pointer_cleared; do test "$(grep -Fxc "$FIELD=true" "$RESULTS")" = 1; done
+          for FIELD in picker_ui_verified tokens_verified monitoring_verified shielding_verified selection_contents_output selection_addresses_output reconstructed_addresses_used; do test "$(grep -Fxc "$FIELD=false" "$RESULTS")" = 1; done
+          grep -Fx 'phase=picker_value_lifecycle' "$RESULTS"
+          test "$(wc -l < "$RESULTS" | tr -d ' ')" = 38
+          RESULTS="$OUT/picker-binding-results.txt"
+          for EXPECTED in mutable_binding_verified=true allocations=11 deallocations=11 binding_initializer_calls=1 binding_getter_calls=3 binding_setter_calls=2 binding_initialize_with_copy_calls=2 binding_destroy_calls=2 setter_inputs_transferred=2 callbacks_active=0 category_values_differ=true initial_get_equals_false=true changed_get_equals_true=true changed_get_differs_false=true restored_get_equals_false=true; do test "$(grep -Fxc "$EXPECTED" "$RESULTS")" = 1; done
+          test "$(wc -l < "$RESULTS" | tr -d ' ')" = 37
+          test "$(grep -c '^Picker value entry guards: ' "$OUT/picker-value-entry-guards.txt")" = 1
+          grep -Fx 'Mutable binding entry guards: category_first28=true; binding_register_prefixes=true; setter_outer_destroy=true; reconstructed_addresses_used=false' "$OUT/picker-value-entry-guards.txt"
+          grep -F 'Rust UIKit active callback observed' "$OUT/singleton-runtime.txt"
+          grep -Fx 'Rust UIKit launch callback observed; inspection_without_window=true' "$OUT/singleton-runtime.txt"
+          if grep -Eq 'SDK singleton class:|Rust async task entry observed;|Authorization status |Public individual authorization request starting;' "$OUT/singleton-runtime.txt"; then exit 1; fi
+          CHECK
           PROBE_APP="$OUT/authorization-center-probe.app"
           mkdir "$PROBE_APP"
           if [ '${{ inputs.xcode_signed_host }}' != true ]; then
@@ -339,7 +381,11 @@ jobs:
           PLIST
           if [ '${{ inputs.xcode_signed_host }}' = true ]; then
             test '${{ inputs.native_uikit_host }}' = true
-            test '${{ inputs.authorization_probe }}' = true
+            if [ '${{ inputs.selection_inspection_mode }}' = picker-values ]; then
+              test '${{ inputs.authorization_probe }}' = false
+            else
+              test '${{ inputs.authorization_probe }}' = true
+            fi
             XCODE_ROOT="$RUNNER_TEMP/rust-xcode-host"
             mkdir -p "$XCODE_ROOT/Probe.xcodeproj"
             cp "$PROBE_APP/Info.plist" "$XCODE_ROOT/Info.plist"
@@ -352,7 +398,12 @@ jobs:
             # An object input is required: Xcode deliberately skips the link
             # when a target has libraries but no compiled/linked object files.
             # Emit our Rust object and its dependency archive in one invocation.
-            rustc tools/ios-abi-probe.rs --crate-name ios_xcode_probe --crate-type staticlib --edition 2024 --cfg runtime_probe --cfg auth_request --cfg uikit_host --cfg xcode_host ${UI_HOST_ARGS[@]+"${UI_HOST_ARGS[@]}"} ${SELECTION_ARGS[@]+"${SELECTION_ARGS[@]}"} --target aarch64-apple-ios-sim --emit="obj=$XCODE_ROOT/probe.o,link" --print native-static-libs -o "$XCODE_ROOT/libprobe.a" 2> "$OUT/rust-static-link.txt"
+            rustc tools/ios-abi-probe.rs --crate-name ios_xcode_probe --crate-type staticlib --edition 2024 --cfg runtime_probe ${REQUEST_ARGS[@]+"${REQUEST_ARGS[@]}"} --cfg uikit_host --cfg xcode_host ${UI_HOST_ARGS[@]+"${UI_HOST_ARGS[@]}"} ${SELECTION_ARGS[@]+"${SELECTION_ARGS[@]}"} --target aarch64-apple-ios-sim --emit="obj=$XCODE_ROOT/probe.o,link" --print native-static-libs -o "$XCODE_ROOT/libprobe.a" 2> "$OUT/rust-static-link.txt"
+            if [ '${{ inputs.selection_inspection_mode }}' = picker-values ]; then
+              rustc tools/ios-abi-probe.rs --crate-name ios_picker_noauth_check --crate-type staticlib --edition 2024 --cfg runtime_probe --cfg uikit_host --cfg xcode_host ${SELECTION_ARGS[@]+"${SELECTION_ARGS[@]}"} --target aarch64-apple-ios-sim --emit="llvm-ir=$OUT/picker-noauth.ll"
+              if grep -Eq 'request_probe|async_inspection|swift_task_create|rust_authorization_' "$OUT/picker-noauth.ll"; then exit 1; fi
+              printf 'authorization_request_path_compiled=false\n' > "$OUT/picker-noauth-compile-scope.txt"
+            fi
             test "$(grep -c '^note: native-static-libs: ' "$OUT/rust-static-link.txt")" = 1
             NATIVE_LIBS=$(sed -n 's/^note: native-static-libs: //p' "$OUT/rust-static-link.txt")
             test -n "$NATIVE_LIBS"
@@ -475,6 +526,10 @@ jobs:
               grep '^Mutable binding entry guards: ' "$OUT/singleton-runtime.txt" > "$OUT/mutable-binding-entry-guards.txt" || true
               printf 'launch_status=%s\n' "$LAUNCH_STATUS" > "$OUT/mutable-binding-launch.txt"
               cat "$OUT/mutable-binding-launch.txt" "$OUT/mutable-binding-results.txt" >> "$GITHUB_STEP_SUMMARY"
+            fi
+            if [ '${{ inputs.selection_inspection_mode }}' = picker-values ]; then
+              bash "$RUNNER_TEMP/check-picker-values.sh" "$OUT" "$LAUNCH_STATUS"
+              exit 0
             fi
             test "$LAUNCH_STATUS" = 0
             if [ '${{ inputs.selection_inspection_mode }}' != picker-entries ]; then
@@ -655,6 +710,29 @@ jobs:
           fi
           printf 'simulator_process_executed=true\npublic_singleton_called=true\npublic_async_descriptor_read=true\nrust_async_task_entry_observed=true\nuikit_host_active=%s\nruntime_teardown_verified=false\nauthorization_requested=%s\nauthorization_status_verified=false\nmonitoring=false\nshielding=false\n' "$UIKIT_ACTIVE" "$REQUESTED" > "$OUT/singleton-runtime-scope.txt"
       - uses: actions/upload-artifact@v4
+        if: always() && inputs.selection_inspection_mode == 'picker-values'
+        with:
+          name: ios-picker-value-audit
+          path: |
+            ${{ runner.temp }}/ios-sdk-audit/singleton-runtime.txt
+            ${{ runner.temp }}/ios-sdk-audit/versions.txt
+            ${{ runner.temp }}/ios-sdk-audit/xcode-build.txt
+            ${{ runner.temp }}/ios-sdk-audit/rust-static-link.txt
+            ${{ runner.temp }}/ios-sdk-audit/picker-value-results.txt
+            ${{ runner.temp }}/ios-sdk-audit/picker-binding-results.txt
+            ${{ runner.temp }}/ios-sdk-audit/picker-value-entry-guards.txt
+            ${{ runner.temp }}/ios-sdk-audit/picker-value-launch.txt
+            ${{ runner.temp }}/ios-sdk-audit/picker-hosting-public-exports.txt
+            ${{ runner.temp }}/ios-sdk-audit/picker-hosting-public-demangled.txt
+            ${{ runner.temp }}/ios-sdk-audit/picker-hosting-dladdr-declaration.txt
+            ${{ runner.temp }}/ios-sdk-audit/selection-public-exports.txt
+            ${{ runner.temp }}/ios-sdk-audit/selection-category-init-export.txt
+            ${{ runner.temp }}/ios-sdk-audit/binding-accessor-exports.txt
+            ${{ runner.temp }}/ios-sdk-audit/FamilyControls-selected-declarations.json
+            ${{ runner.temp }}/ios-sdk-audit/SwiftUI-selected-declarations.json
+          retention-days: 1
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
         if: always() && inputs.selection_inspection_mode == 'none'
         with:
           name: ios-sdk-audit
@@ -662,7 +740,7 @@ jobs:
           retention-days: 1
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
-        if: always() && inputs.selection_inspection_mode != 'none' && inputs.selection_inspection_mode != 'picker-entries'
+        if: always() && inputs.selection_inspection_mode != 'none' && inputs.selection_inspection_mode != 'picker-entries' && inputs.selection_inspection_mode != 'picker-values'
         with:
           name: ios-selection-layout-audit
           path: |
