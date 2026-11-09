@@ -1515,7 +1515,7 @@ jobs:
   product-restore:
     if: inputs.product_restore_smoke
     runs-on: macos-15
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -1534,5 +1534,6 @@ jobs:
           path: |
             ${{ runner.temp }}/product-restore/*.txt
             ${{ runner.temp }}/product-restore/*.png
+            ${{ runner.temp }}/product-restore/ui-attachments/**
           retention-days: 3
           if-no-files-found: error

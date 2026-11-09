@@ -33,8 +33,30 @@ for pass in first restarted; do
   xcrun simctl io "$SIM_ID" screenshot "$OUT/$pass.png"
   test -s "$STATE"
   HASH=$(shasum -a 256 "$STATE" | awk '{print $1}')
+  VALUE=$(sed -nE 's/.*daily_limit_minutes:[[:space:]]*([0-9]+).*/\1/p' "$STATE")
+  [[ "$VALUE" =~ ^[0-9]+$ ]]
   printf '%s_pid=%s\n%s_state_hash=%s\n' "$pass" "$PID" "$pass" "$HASH" >> "$OUT/result.txt"
-  if [ "$pass" = first ]; then FIRST_HASH=$HASH; FIRST_PID=$PID; else test "$PID" != "$FIRST_PID"; test "$HASH" = "$FIRST_HASH"; fi
-  xcrun simctl terminate "$SIM_ID" "$BID"
+  if [ "$pass" = first ]; then
+    FIRST_PID=$PID
+    BEFORE_VALUE=$VALUE
+    export OUT SIM_ID
+    source tools/ios-product-ui-change.sh
+    sleep 2
+    VALUE=$(sed -nE 's/.*daily_limit_minutes:[[:space:]]*([0-9]+).*/\1/p' "$STATE")
+    [[ "$VALUE" =~ ^[0-9]+$ ]]
+    printf 'before_limit_minutes=%s\nafter_ui_limit_minutes=%s\n' "$BEFORE_VALUE" "$VALUE" >> "$OUT/result.txt"
+    test "$VALUE" != "$BEFORE_VALUE"
+    test "$VALUE" -ge 30
+    test "$VALUE" -le 360
+    test "$((VALUE % 30))" = 0
+    FIRST_VALUE=$VALUE
+    FIRST_HASH=$(shasum -a 256 "$STATE" | awk '{print $1}')
+  else
+    test "$PID" != "$FIRST_PID"
+    test "$HASH" = "$FIRST_HASH"
+    test "$VALUE" = "$FIRST_VALUE"
+    printf 'restarted_limit_minutes=%s\n' "$VALUE" >> "$OUT/result.txt"
+  fi
+  xcrun simctl terminate "$SIM_ID" "$BID" || true
 done
-printf 'app_created_state=true\nstate_survived_process_restart=true\nsettings_ui_mutation_verified=false\nnondefault_value_restore_verified=false\nscreentime_control_verified=false\n' >> "$OUT/result.txt"
+printf 'app_created_state=true\nstate_survived_process_restart=true\nsettings_ui_mutation_verified=true\nnondefault_value_restore_verified=true\nscreentime_control_verified=false\n' >> "$OUT/result.txt"
