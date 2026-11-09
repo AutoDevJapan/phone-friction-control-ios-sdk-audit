@@ -4232,7 +4232,12 @@ mod ui_authorization_test {
     }
 
     #[cfg(ui_test_selection_acceptance)]
-    unsafe fn observe_fixture_roles(application: Id, observer: &str) {
+    unsafe fn observe_fixture_roles(application: Id, observer: &str, messages: bool) {
+        let (fixture, fixture_kind) = if messages {
+            (c"Messages", "messages")
+        } else {
+            (c"Social", "social")
+        };
         // Diagnostic only in the fresh, disposable CI Simulator. Record role
         // counts and frames of the already pictured Social fixture; never
         // export the AX tree, arbitrary labels, identifiers or selected values.
@@ -4241,7 +4246,7 @@ mod ui_authorization_test {
                 std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
             let boolean: unsafe extern "C" fn(Id, Sel) -> bool =
                 std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
-            let name = string(c"Social");
+            let name = string(fixture);
             for kind in [c"otherElements", c"cells", c"buttons", c"staticTexts"] {
                 let elements = retained_object(application, kind);
                 let query = retained_object_arg(elements.0, c"matchingIdentifier:", name.0);
@@ -4250,7 +4255,7 @@ mod ui_authorization_test {
                 let hittable =
                     exists && boolean(element.0, sel_registerName(c"isHittable".as_ptr()));
                 println!(
-                    "XCTest fixture roles: observer={observer}; role={}; total={}; exact_social_exists={exists}; exact_social_hittable={hittable}",
+                    "XCTest fixture roles: observer={observer}; fixture_kind={fixture_kind}; role={}; total={}; exact_fixture_exists={exists}; exact_fixture_hittable={hittable}",
                     kind.to_str().expect("constant role"),
                     count(elements.0, sel_registerName(c"count".as_ptr()))
                 );
@@ -4266,7 +4271,7 @@ mod ui_authorization_test {
             let text = std::ffi::CStr::from_ptr(bytes).to_string_lossy();
             let mut matches = 0;
             for line in text.lines().take(2048) {
-                if !line.contains("label: 'Social") || matches >= 8 {
+                if !line.contains(&format!("label: '{}", fixture.to_str().expect("known fixture"))) || matches >= 8 {
                     continue;
                 }
                 // Preserve only the role and numeric frame. Do not print the
@@ -4288,13 +4293,13 @@ mod ui_authorization_test {
                         .all(|b| b.is_ascii_digit() || b"{}, .-".contains(&b))
                 {
                     println!(
-                        "XCTest fixture frame: observer={observer}; role={role}; frame={frame}; social_prefix_label=true"
+                        "XCTest fixture frame: observer={observer}; role={role}; frame={frame}; known_fixture_prefix_label=true"
                     );
                     matches += 1;
                 }
             }
             println!(
-                "XCTest fixture observation: observer={observer}; matched_frames={matches}; contents_output=false"
+                "XCTest fixture observation: observer={observer}; fixture_kind={fixture_kind}; matched_frames={matches}; contents_output=false"
             );
         }
     }
@@ -4410,8 +4415,8 @@ mod ui_authorization_test {
                 }
             }
             let Some(category) = category else {
-                observe_fixture_roles(app, "host");
-                observe_fixture_roles(system, "system");
+                observe_fixture_roles(app, "host", false);
+                observe_fixture_roles(system, "system", false);
                 fail(test, c"Observed Social disclosure unavailable");
                 return;
             };
@@ -4475,6 +4480,8 @@ mod ui_authorization_test {
                 action(application.0, c"tap");
                 println!("XCTest consent-selection: actual_app_control_tap_returned=true");
             } else {
+                observe_fixture_roles(app, "host-app-fixture", true);
+                observe_fixture_roles(system, "system-app-fixture", true);
                 fail(test, c"Official Simulator app fixture unavailable in Picker; category choice is not app selection");
                 return;
             }

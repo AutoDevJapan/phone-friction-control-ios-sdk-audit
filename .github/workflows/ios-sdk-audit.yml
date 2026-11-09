@@ -843,6 +843,15 @@ jobs:
                 if [ -f "$DATA/Documents/$FILE" ]; then cp "$DATA/Documents/$FILE" "$OUT/$FILE"; fi
               done
             fi
+            # XCTest may retain screenshots before terminating the app.
+            # Export these existing attachments rather than starting a second
+            # background simctl capture process with a separate lifetime.
+            ATTACHMENT_STATUS=0
+            perl -e 'alarm 60; exec @ARGV; die "exec failed\n"' xcrun xcresulttool export attachments --path "$OUT/consent-ui.xcresult" --output-path "$OUT/consent-selection-attachments" > "$OUT/consent-selection-attachment-export.txt" 2>&1 || ATTACHMENT_STATUS=$?
+            printf 'attachment_export_status=%s\n' "$ATTACHMENT_STATUS" >> "$OUT/consent-selection-attachment-export.txt"
+            ATTACHMENT_COUNT=0
+            if [ -d "$OUT/consent-selection-attachments" ]; then ATTACHMENT_COUNT=$(find "$OUT/consent-selection-attachments" -type f | wc -l | tr -d ' '); fi
+            printf 'attachment_file_count=%s\n' "$ATTACHMENT_COUNT" >> "$OUT/consent-selection-attachment-export.txt"
             grep '^XCTest consent-selection:' "$OUT/xcode-ui-test.txt" > "$OUT/consent-selection-xctest-observations.txt" || true
             xcrun simctl io "$SIM_ID" screenshot "$OUT/consent-selection-after-test.png" || true
             # Category-only, callback-only, and ABI-pending runs all fail closed.
@@ -1115,6 +1124,7 @@ jobs:
             ${{ runner.temp }}/ios-sdk-audit/consent-ui.xcresult
             ${{ runner.temp }}/ios-sdk-audit/consent-selection-*.txt
             ${{ runner.temp }}/ios-sdk-audit/consent-selection-*.png
+            ${{ runner.temp }}/ios-sdk-audit/consent-selection-attachments/
             ${{ runner.temp }}/ios-sdk-audit/selection-count-*.txt
             ${{ runner.temp }}/ios-sdk-audit/Swift-set-selected-declarations.json
             ${{ runner.temp }}/ios-sdk-audit/ManagedSettings-Application-selected-declarations.json
