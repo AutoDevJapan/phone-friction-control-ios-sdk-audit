@@ -2905,25 +2905,44 @@ mod mutable_binding {
             );
         }
         let applications = resolve(env!("APPLICATIONS_SYMBOL"));
-        // Actual nongeneric getter preserves swiftself x20, ignores x8 result,
-        // and starts constructing its concrete result using public metadata.
+        // SDK 18.5 concrete getter borrows Selection in swiftself x20,
+        // retains its backing value for the helper, and returns owned Set in x0.
         for (offset, expected) in [
-            (0, 0xa9ba_6ffc),
-            (4, 0xa901_67fa),
-            (8, 0xa902_5ff8),
-            (12, 0xa903_57f6),
-            (16, 0xa904_4ff4),
-            (20, 0xa905_7bfd),
-            (24, 0x9101_43fd),
-            (28, 0xd101_03ff),
-            (32, 0xd280_0000),
-            (40, 0xf85f_8008),
+            (0, 0xd101_03ff), (4, 0xa901_57f6),
+            (8, 0xa902_4ff4), (12, 0xa903_7bfd),
+            (16, 0x9100_c3fd), (20, 0xf940_0693),
+            (24, 0xaa13_03e0),
+            (72, 0xaa13_03e1),
+            (76, 0xd280_0015), (84, 0xaa00_03f4),
+            (88, 0xaa13_03e0), (96, 0xaa14_03e0),
+            (100, 0xa943_7bfd), (104, 0xa942_4ff4),
+            (108, 0xa941_57f6), (112, 0x9101_03ff),
+            (116, 0xd65f_03c0),
         ] {
-            assert!(
-                word(applications, offset, page) == expected,
-                "applications getter prefix changed"
-            );
+            assert!(word(applications, offset, page) == expected,
+                "applications getter SDK18.5 instruction changed");
         }
+        // Relocation immediates may change; retain exact destination/base
+        // registers and opcode shape without reconstructing any address.
+        for (offset, mask, expected) in [
+            (32, 0x9f00_001f, 0x9000_0000),
+            (36, 0xffc0_03ff, 0xf940_0000),
+            (40, 0x9f00_001f, 0x9000_0002),
+            (44, 0xffc0_03ff, 0xf940_0042),
+            (48, 0x9f00_001f, 0x9000_0003),
+            (52, 0xffc0_03ff, 0x9100_0063),
+            (56, 0x9f00_001f, 0x9000_0004),
+            (60, 0xffc0_03ff, 0xf940_0084),
+            (64, 0x9f00_001f, 0x9000_0005),
+            (68, 0xffc0_03ff, 0x9100_00a5),
+        ] {
+            assert!(word(applications, offset, page) & mask == expected,
+                "applications getter SDK18.5 helper input shape changed");
+        }
+        // Inspect branch provenance, but invoke only the public getter.
+        let _retain = branch(applications, 28, true, page);
+        let _construct = branch(applications, 80, true, page);
+        let _release = branch(applications, 92, true, page);
         let plan = Box::leak(Box::new(ApplicationCount {
             set,
             application: application_metadata,
