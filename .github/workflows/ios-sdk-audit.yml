@@ -186,12 +186,19 @@ jobs:
             TEST_HEADERS="$TEST_FRAMEWORKS/XCTest.framework/Headers"
             test -d "$TEST_HEADERS"
             # Inspect only the public declarations used by the Rust test bundle.
-            grep -R -n -A 5 -B 3 -E 'initWithBundleIdentifier:|waitForExistenceWithTimeout:|matchingIdentifier:|recordFailureWithDescription:|@property.*(alerts|buttons|firstMatch)|- \(void\)(tap|launch)' "$TEST_HEADERS" > "$OUT/xctest-selected-headers.txt"
+            # SDK 18 moves UI declarations into the framework's public
+            # XCUIAutomation subframework. Inspect both public header roots.
+            XCUI_HEADERS="$TEST_FRAMEWORKS/XCUIAutomation.framework/Headers"
+            if [ ! -d "$XCUI_HEADERS" ]; then
+              XCUI_HEADERS="$TEST_FRAMEWORKS/XCTest.framework/Frameworks/XCUIAutomation.framework/Headers"
+            fi
+            test -d "$XCUI_HEADERS"
+            grep -R -n -A 5 -B 3 -E 'initWithBundleIdentifier:|waitForExistenceWithTimeout:|matchingIdentifier:|recordFailureWithDescription:|@property.*(alerts|buttons|firstMatch)|- \(void\)(tap|launch)' "$TEST_HEADERS" "$XCUI_HEADERS" > "$OUT/xctest-selected-headers.txt"
             for SELECTOR in initWithBundleIdentifier waitForExistenceWithTimeout matchingIdentifier recordFailureWithDescription; do
               grep -F "$SELECTOR" "$OUT/xctest-selected-headers.txt"
             done
             if [ '${{ inputs.ui_continue }}' = true ]; then
-              grep -R -n -A 3 -B 2 -E 'typeText:|@property.*secureTextFields' "$TEST_HEADERS" > "$OUT/xctest-fixture-input-headers.txt"
+              grep -R -n -A 3 -B 2 -E 'typeText:|@property.*secureTextFields' "$TEST_HEADERS" "$XCUI_HEADERS" > "$OUT/xctest-fixture-input-headers.txt"
               grep -Eq '\(void\)[[:space:]]*typeText:[[:space:]]*\(NSString[[:space:]]*\*\)' "$OUT/xctest-fixture-input-headers.txt"
               grep -Eq '@property.*XCUIElementQuery[[:space:]]*\*[[:space:]]*secureTextFields' "$OUT/xctest-fixture-input-headers.txt"
             fi
