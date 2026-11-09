@@ -828,7 +828,9 @@ jobs:
           printf 'xctest_started_at=%s\ntest_limit_seconds=%s\n' "$(date -u +%FT%TZ)" "$TEST_SECONDS" > "$OUT/consent-selection-phase.txt"
           # Capture host errors (including a pre-UI ABI guard panic) independently
           # of whether XCTest reaches its first application control.
-          xcrun simctl spawn "$SIM_ID" log stream --style compact --level debug --predicate 'process == "authorization-center-probe"' > "$OUT/consent-selection-host-runtime.txt" 2>&1 &
+          # Limit exported diagnostics to known guard failures and aggregates;
+          # never retain framework debug messages or selected application names.
+          xcrun simctl spawn "$SIM_ID" log stream --style compact --predicate 'process == "authorization-center-probe" AND (eventMessage CONTAINS "panicked at" OR eventMessage CONTAINS "prefix changed" OR eventMessage CONTAINS "Selection snapshot setters=" OR eventMessage CONTAINS "timed out")' > "$OUT/consent-selection-host-runtime.txt" 2>&1 &
           HOST_LOG_PID=$!
           if xcodebuild -project "$XCODE_ROOT/Probe.xcodeproj" -scheme Probe -configuration Debug -sdk iphonesimulator -destination "id=$SIM_ID" -parallel-testing-enabled NO -test-timeouts-enabled YES -default-test-execution-time-allowance "$TEST_SECONDS" -maximum-test-execution-time-allowance "$TEST_SECONDS" -resultBundlePath "$OUT/consent-ui.xcresult" SYMROOT="$OUT/xcode-products" OBJROOT="$RUNNER_TEMP/xcode-objects" test-without-building > "$OUT/xcode-ui-test.txt" 2>&1; then UI_TEST_STATUS=0; else UI_TEST_STATUS=$?; fi
           kill "$HOST_LOG_PID" 2>/dev/null || true
