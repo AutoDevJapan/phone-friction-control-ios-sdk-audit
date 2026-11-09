@@ -228,6 +228,11 @@ jobs:
           # Collect only the public declarations needed for a mutable selection
           # Binding and its hosting controller. Keep the full SDK dump in scratch.
           xcrun swift-api-digester -dump-sdk -module SwiftUI -sdk "$SDK" -target "$TARGET" -o "$RUNNER_TEMP/SwiftUI.json"
+          # SDK 18 splits core value types into SwiftUICore. Inspect its actual
+          # public declarations before adapting any runtime symbol or layout.
+          xcrun swift-api-digester -dump-sdk -module SwiftUICore -sdk "$SDK" -target "$TARGET" -o "$RUNNER_TEMP/SwiftUICore.json"
+          jq '[.. | objects | select(.kind? == "TypeDecl" and (.name? | IN("Binding", "Transaction", "View"))) | {name, usr, declKind, genericSig, members: [.children[]? | select(.name? | IN("init", "wrappedValue", "projectedValue", "body"))]}]' "$RUNNER_TEMP/SwiftUICore.json" > "$OUT/SwiftUICore-selected-declarations.json"
+          jq '[.[] | {name, usr, declKind, genericSig, members: [.members[] | {printedName, moduleName, genericSig, mangledName, children: [.children[]? | {printedName, usr}]}]}]' "$OUT/SwiftUICore-selected-declarations.json"
           jq '[.. | objects | select(.kind? == "TypeDecl" and (.name? | IN("Binding", "UIHostingController", "Transaction", "View"))) | {name, usr, declKind, genericSig, members: [.children[]? | select(.name? | IN("init", "wrappedValue", "projectedValue", "rootView", "body"))]}]' "$RUNNER_TEMP/SwiftUI.json" > "$OUT/SwiftUI-selected-declarations.json"
           test "$(jq length "$OUT/SwiftUI-selected-declarations.json")" -ge 4
           # Keep exact public identities visible when a versioned ABI gate fails.
