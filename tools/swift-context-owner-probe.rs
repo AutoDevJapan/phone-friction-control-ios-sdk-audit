@@ -158,6 +158,12 @@ fn inspect_binding_entry() {
        name==expected.to_bytes() || name.strip_prefix(b"_")==Some(expected.to_bytes())
       };
       println!("binding_context_callee; offset={offset}; exact_entry={}; expected_symbol={symbol_matches}",called==expected_entry);
+      assert!(info.base==origin.base);
+      let count=32usize.min(page-called.addr()%page);
+      print!("binding_context_stub; offset={offset}; bytes=");
+      for byte in std::slice::from_raw_parts(called.cast::<u8>(),count) {print!("{byte:02x}");}
+      println!();
+
      }
     }
     let bytes=512usize.min(page-target.addr()%page);
