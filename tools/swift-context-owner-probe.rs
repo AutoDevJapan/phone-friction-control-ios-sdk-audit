@@ -60,6 +60,15 @@ fn inspect_binding_entry() {
    let entry=dlsym(std::ptr::without_provenance_mut(usize::MAX-1),name.as_ptr());
    assert!(!entry.is_null(), "public Binding symbol missing");
    // One page-local prefix only; never call these unreviewed entries.
+   if label == "bool_metadata_data" {
+    // Type metadata contains runtime pointers. Report kind only, never bytes.
+    assert_eq!(entry.addr()%std::mem::align_of::<usize>(),0);
+    assert!(page-entry.addr()%page>=std::mem::size_of::<usize>());
+    let kind=entry.cast::<usize>().read();
+    assert_eq!(kind,0x200);
+    println!("binding_metadata_data=bool; kind_struct=true");
+    continue;
+   }
    let count=64usize.min(page-entry.addr()%page);
    print!("binding_entry={label}; bytes=");
    for b in std::slice::from_raw_parts(entry.cast::<u8>(),count) { print!("{b:02x}"); }

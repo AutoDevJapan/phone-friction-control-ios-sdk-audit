@@ -102,7 +102,8 @@ jobs:
           perl -e 'alarm 20; exec @ARGV; die "exec failed\n"' "$OUT/context-owner" > "$OUT/result.txt" 2>&1 || STATUS=$?
           printf 'exit_status=%s\n' "$STATUS" > "$OUT/status.txt"
           test "$STATUS" = 0
-          for LABEL in bool_metadata_data binding_metadata binding_init binding_get binding_set; do
+          test "$(grep -Fxc 'binding_metadata_data=bool; kind_struct=true' "$OUT/result.txt")" = 1
+          for LABEL in binding_metadata binding_init binding_get binding_set; do
             test "$(grep -Ec "^binding_entry=$LABEL; bytes=[0-9a-f]+$" "$OUT/result.txt")" = 1
           done
           for LINE in rust_owner_drop_calls=1 context_destroy_calls=1 context_dealloc_calls=1 copy_survived_original_release=true binding_verified=false full_teardown_verified=false; do
