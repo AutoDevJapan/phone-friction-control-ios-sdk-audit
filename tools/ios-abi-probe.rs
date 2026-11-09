@@ -3461,37 +3461,40 @@ mod mutable_binding {
                 page: usize,
             ) -> *mut c_void {
                 let entry = resolve(env!("HOSTING_INIT_SYMBOL"));
-                // Original SDK public allocator prefix, never a branch address
-                // from the relocated .o. BL12 helper preserves root in x19;
-                // BL24 receives root x0 and the allocated controller x20.
+                // SDK 18.5 public allocator, including its page-crossing tail.
+                // The allocator preserves root in x19, calls its helper at +20,
+                // destroys the owned root through Content's VWT, and returns x21.
+                // Read each aligned instruction separately within its own page.
                 for (offset, expected) in [
-                    (0, 0xa9be_4ff4),
-                    (4, 0xa901_7bfd),
-                    (8, 0x9100_43fd),
-                    (16, 0xaa00_03f4),
-                    (20, 0xaa13_03e0),
-                    (28, 0xa941_7bfd),
+                    (0, 0xa9bd_57f6), (4, 0xa901_4ff4),
+                    (8, 0xa902_7bfd), (12, 0x9100_83fd),
+                    (16, 0xaa00_03f3), (24, 0xaa00_03f5),
+                    (28, 0xf940_2a81), (32, 0xf85f_8028),
+                    (36, 0xf940_0508), (40, 0xaa13_03e0),
+                    (44, 0xd63f_0100), (48, 0xaa15_03e0),
+                    (52, 0xa942_7bfd), (56, 0xa941_4ff4),
+                    (60, 0xa8c3_57f6), (64, 0xd65f_03c0),
                 ] {
-                    assert!(
-                        word(entry, offset, page) == expected,
-                        "hosting allocator prefix changed"
-                    );
+                    assert!(word(entry, offset, page) == expected,
+                        "hosting allocator SDK18.5 instruction changed");
                 }
-                let allocator = branch(entry, 12, true, page);
-                assert!(
-                    word(allocator, 0, page) == 0xaa00_03f3
-                        && word(allocator, 4, page) == 0xaa14_03e0
-                );
-                let _tail = branch(allocator, 8, false, page); // same image, no invocation
-                let initializer = branch(entry, 24, true, page);
-                // Exact, single, bounded extra read of the missing BL24 helper.
-                // Its implementation is NOT used to invent another callable ABI.
-                super::super::selection_layout::prefix_bytes(
-                    "Picker hosting",
-                    "public allocator BL24 initializing helper",
-                    initializer,
-                    page,
-                );
+                let allocator = branch(entry, 20, true, page);
+                for (offset, expected) in [
+                    (0, 0xa9be_4ff4), (4, 0xa901_7bfd),
+                    (8, 0x9100_43fd), (12, 0xaa00_03f3),
+                    (16, 0xa945_0a81), (20, 0xd280_0000),
+                    (32, 0xaa00_03f4), (36, 0xaa13_03e0),
+                    (44, 0xa941_7bfd), (48, 0xa8c2_4ff4),
+                    (52, 0xd65f_03c0),
+                ] {
+                    assert!(word(allocator, offset, page) == expected,
+                        "hosting allocator SDK18.5 helper changed");
+                }
+                // Verify direct calls remain in the SDK image; invoke only the
+                // public entry, never these implementation helpers.
+                let _allocate = branch(allocator, 24, true, page);
+                let _retain = branch(allocator, 28, true, page);
+                let _initialize = branch(allocator, 40, true, page);
                 // Primary swift-5.10-RELEASE lib/IRGen/GenProto.cpp:
                 // 197-245 considers self first; 432-445 thick metatype is a
                 // metadata source; 3863-3869/3895-3896 add only unfulfilled
