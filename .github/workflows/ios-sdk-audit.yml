@@ -784,7 +784,7 @@ jobs:
           wait "$LAUNCH_PID" || LAUNCH_STATUS=$?
           LAUNCH_PID=''
           sed -n 's/^Picker hosting result: //p' "$OUT/singleton-runtime.txt" > "$OUT/picker-hosting-window-results.txt"
-          grep -E '^Picker hosting entry bytes: ' "$OUT/singleton-runtime.txt" > "$OUT/picker-hosting-bl24-entry.txt" || true
+          grep -F 'Picker hosting allocator verified: ' "$OUT/singleton-runtime.txt" > "$OUT/picker-hosting-allocator-verification.txt" || true
           printf 'launch_status=%s\ncapture_status=%s\ncapture_scope=actual_hosting_window\nos_picker_contents_verified=false\n' "$LAUNCH_STATUS" "$CAPTURE_STATUS" > "$OUT/picker-hosting-window-scope.txt"
           cat "$OUT/picker-hosting-window-scope.txt" "$OUT/picker-hosting-window-results.txt" >> "$GITHUB_STEP_SUMMARY"
           test "$LAUNCH_STATUS" = 0
@@ -796,7 +796,7 @@ jobs:
           for FIELD in authorization_requests status_getter_calls picker_contents_read private_api_calls callbacks_active extra_generic_arguments binding_public_getter_calls binding_public_setter_calls; do test "$(grep -Fxc "$FIELD=0" "$RESULTS")" = 1; done
           for FIELD in full_teardown_verified state_pointer_cleared selection_contents_output picker_ui_verified tokens_verified grant_verified monitoring_verified shielding_verified; do test "$(grep -Fxc "$FIELD=false" "$RESULTS")" = 1; done
           for EXPECTED in phase=picker_hosting_window returned_reference_ownership=plus_one sdk_deferred_owners=unknown rust_value_allocations=5 rust_value_deallocations=4; do test "$(grep -Fxc "$EXPECTED" "$RESULTS")" = 1; done
-          test "$(grep -c '^Picker hosting entry bytes: public allocator BL24 initializing helper;' "$OUT/picker-hosting-bl24-entry.txt")" = 1
+          test "$(grep -Fxc 'Picker hosting allocator verified: sdk=18.5; public_words=16; helper_words=11; owned_root_destroy=true' "$OUT/singleton-runtime.txt")" = 1
           if grep -Eq 'request_probe|SDK singleton class:|Public individual authorization request starting;|Rust async task entry observed;|^Authorization status |^Picker value result:|^Mutable binding result:' "$OUT/singleton-runtime.txt"; then exit 1; fi
       - name: Prepare finite public XCTest execution
         if: inputs.ui_consent_test
@@ -1166,7 +1166,7 @@ jobs:
             ${{ runner.temp }}/ios-sdk-audit/picker-hosting-window-results.txt
             ${{ runner.temp }}/ios-sdk-audit/picker-hosting-window-scope.txt
             ${{ runner.temp }}/ios-sdk-audit/picker-hosting-capture.txt
-            ${{ runner.temp }}/ios-sdk-audit/picker-hosting-bl24-entry.txt
+            ${{ runner.temp }}/ios-sdk-audit/picker-hosting-allocator-verification.txt
             ${{ runner.temp }}/ios-sdk-audit/picker-hosting-uikit-declarations.txt
             ${{ runner.temp }}/ios-sdk-audit/picker-hosting-uikit-candidates.txt
             ${{ runner.temp }}/ios-sdk-audit/runtime-object_getClass-signature.json

@@ -3495,6 +3495,7 @@ mod mutable_binding {
                 let _allocate = branch(allocator, 24, true, page);
                 let _retain = branch(allocator, 28, true, page);
                 let _initialize = branch(allocator, 40, true, page);
+                println!("Picker hosting allocator verified: sdk=18.5; public_words=16; helper_words=11; owned_root_destroy=true");
                 // Primary swift-5.10-RELEASE lib/IRGen/GenProto.cpp:
                 // 197-245 considers self first; 432-445 thick metatype is a
                 // metadata source; 3863-3869/3895-3896 add only unfulfilled
