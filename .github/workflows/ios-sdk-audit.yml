@@ -66,6 +66,8 @@ jobs:
           set -euo pipefail
           # The Rust probe contains SDK 17.5 / Swift 5.10 ABI assumptions.
           # A newer runner must never silently select its default Xcode.
+          mkdir -p "$RUNNER_TEMP/ios-sdk-audit"
+          exec > >(tee "$RUNNER_TEMP/ios-sdk-audit/pinned-toolchain.txt") 2>&1
           PINNED=/Applications/Xcode_15.4.app/Contents/Developer
           if [ ! -d "$PINNED" ]; then
             echo '::error::Pinned Xcode 15.4 is missing; SDK 17.5 / Swift 5.10 ABI acceptance was not executed.'
@@ -77,6 +79,13 @@ jobs:
           test "$(xcrun --sdk iphonesimulator --show-sdk-version)" = 17.5
           xcrun swiftc --version | grep -F 'Swift version 5.10'
           printf 'DEVELOPER_DIR=%s\n' "$DEVELOPER_DIR" >> "$GITHUB_ENV"
+      - name: Preserve pinned toolchain diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pinned-toolchain-diagnostics
+          path: ${{ runner.temp }}/ios-sdk-audit/pinned-toolchain.txt
+          retention-days: 3
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: nightly-2026-07-18
@@ -86,7 +95,7 @@ jobs:
         run: |
           set -euo pipefail
           OUT="$RUNNER_TEMP/ios-sdk-audit"
-          mkdir "$OUT"
+          mkdir -p "$OUT"
           SELECTION_MODE='${{ inputs.selection_inspection_mode }}'
           case "$SELECTION_MODE" in
             none|layout|entries|values|mutable|picker-entries|picker-values|picker-hosting|consent-selection-acceptance) ;;
