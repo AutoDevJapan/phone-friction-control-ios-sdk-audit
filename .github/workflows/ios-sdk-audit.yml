@@ -10,6 +10,10 @@ on:
         description: Observe the real category cell and setter delta without claiming token counts or app selection
         type: boolean
         default: false
+      category_token_count_acceptance:
+        description: Verify real category selection with public token counts and owned Selection copies
+        type: boolean
+        default: false
       product_restore_smoke:
         description: Reuse the verified app bytes to inspect saved state across process restart
         type: boolean
@@ -580,6 +584,12 @@ jobs:
             test '${{ inputs.selection_inspection_mode }}' = consent-selection-acceptance
             SELECTION_ARGS+=(--cfg category_selection_observation)
           fi
+          if [ '${{ inputs.category_token_count_acceptance }}' = true ]; then
+            test '${{ inputs.category_selection_observation }}' = true
+            test '${{ inputs.selection_inspection_mode }}' = consent-selection-acceptance
+            for ENABLED in '${{ inputs.authorization_probe }}' '${{ inputs.native_uikit_host }}' '${{ inputs.xcode_signed_host }}' '${{ inputs.ui_consent_test }}' '${{ inputs.ui_continue }}' '${{ inputs.authorization_status_consent_probe }}'; do test "$ENABLED" = true; done
+            SELECTION_ARGS+=(--cfg category_token_count_acceptance)
+          fi
           # Bash preserves export attributes and array elements without eval.
           BUILD_ENV="$RUNNER_TEMP/ios-probe-build-env.sh"
           : > "$BUILD_ENV"
@@ -640,6 +650,14 @@ jobs:
               grep -Fx "$ENTRY" "$RUNNER_TEMP/ManagedSettings-count-exports.txt" "$RUNNER_TEMP/FamilyControls-count-exports.txt" > /dev/null
               printf 'function|%s\n' "$ENTRY" >> "$OUT/selection-count-abi-manifest.txt"
             done
+            if [ '${{ inputs.category_token_count_acceptance }}' = true ]; then
+              jq '[.. | objects | select(.kind? == "TypeDecl" and .name? == "Token" and .usr? == "s:15ManagedSettings5TokenV") | {name,usr,declKind,genericSig,conformances}] | unique_by(.usr)' "$RUNNER_TEMP/ManagedSettings.json" > "$OUT/category-token-count-sdk-declarations.json"
+              jq -e 'length == 1 and .[0].declKind == "Struct" and .[0].genericSig == "<T>" and any(.[0].conformances[]; .usr == "s:SH")' "$OUT/category-token-count-sdk-declarations.json"
+              jq -e '[.[] | .members[] | select(.name == "categoryTokens") | .accessors[] | select(.accessorKind == "get" and .mangledName == "$s14FamilyControls0A17ActivitySelectionV14categoryTokensShy15ManagedSettings5TokenVyAE0C8CategoryVGGvg" and .children[0].usr == "s:Sh" and .children[0].children[0].children[0].usr == "s:15ManagedSettings5TokenV" and .children[0].children[0].children[0].children[0].usr == "s:15ManagedSettings16ActivityCategoryV")] | length == 1' "$OUT/category-count-sdk-declarations.json"
+              for ENTRY in '$s15ManagedSettings5TokenVMa' '$s15ManagedSettings5TokenVMn' '$s15ManagedSettings5TokenVyxGSHAAMc' '$s15ManagedSettings16ActivityCategoryVMn'; do
+                grep -Fx "$ENTRY" "$RUNNER_TEMP/ManagedSettings-count-exports.txt" > /dev/null
+              done
+            fi
           fi
           test "$(wc -l < "$OUT/selection-count-abi-manifest.txt" | tr -d ' ')" -le 27
           cut -d '|' -f 2 "$OUT/selection-count-abi-manifest.txt" | xcrun swift-demangle --compact > "$OUT/selection-count-public-demangled.txt"
@@ -860,13 +878,16 @@ jobs:
               if [ '${{ inputs.ui_continue }}' = true ]; then UI_TEST_ARGS=(--cfg ui_test_continue); fi
               if [ '${{ inputs.selection_inspection_mode }}' = consent-selection-acceptance ]; then UI_TEST_ARGS+=(--cfg ui_test_selection_acceptance); fi
               if [ '${{ inputs.category_selection_observation }}' = true ]; then UI_TEST_ARGS+=(--cfg category_selection_observation); fi
+              if [ '${{ inputs.category_token_count_acceptance }}' = true ]; then UI_TEST_ARGS+=(--cfg category_token_count_acceptance); fi
               rustc tools/ios-abi-probe.rs --crate-name ios_consent_ui_test --crate-type staticlib --edition 2024 --cfg ui_test_bundle ${UI_TEST_ARGS[@]+"${UI_TEST_ARGS[@]}"} --target aarch64-apple-ios-sim --emit="obj=$XCODE_ROOT/ui-test.o,link" --print native-static-libs -o "$XCODE_ROOT/libui-test.a" 2> "$OUT/rust-ui-test-link.txt"
               test "$(grep -c '^note: native-static-libs: ' "$OUT/rust-ui-test-link.txt")" = 1
               UI_NATIVE_LIBS=$(sed -n 's/^note: native-static-libs: //p' "$OUT/rust-ui-test-link.txt")
               test -n "$UI_NATIVE_LIBS"
               printf 'OTHER_LDFLAGS = $(inherited) -F$(PLATFORM_DIR)/Developer/Library/Frameworks %s\n' "$UI_NATIVE_LIBS" > "$XCODE_ROOT/UITest.xcconfig"
               if [ '${{ inputs.category_selection_observation }}' = true ]; then
-                xcrun clang -target arm64-apple-ios18.5-simulator -isysroot "$SDK" -fobjc-arc -fmodules -F"$DEVELOPER_DIR/Platforms/iPhoneSimulator.platform/Developer/Library/Frameworks" -c tools/PickerCategoryObservation.m -o "$XCODE_ROOT/category-observation.o"
+                CATEGORY_TEST_FLAGS=()
+                if [ '${{ inputs.category_token_count_acceptance }}' = true ]; then CATEGORY_TEST_FLAGS=(-DCATEGORY_TOKEN_COUNTS=1); fi
+                xcrun clang -target arm64-apple-ios18.5-simulator -isysroot "$SDK" -fobjc-arc -fmodules ${CATEGORY_TEST_FLAGS[@]+"${CATEGORY_TEST_FLAGS[@]}"} -F"$DEVELOPER_DIR/Platforms/iPhoneSimulator.platform/Developer/Library/Frameworks" -c tools/PickerCategoryObservation.m -o "$XCODE_ROOT/category-observation.o"
                 printf 'OTHER_LDFLAGS = $(inherited) -F$(PLATFORM_DIR)/Developer/Library/Frameworks %s %s\n' "$UI_NATIVE_LIBS" "$XCODE_ROOT/category-observation.o" > "$XCODE_ROOT/UITest.xcconfig"
               fi
             fi
@@ -1042,6 +1063,13 @@ jobs:
             printf 'Test framework unexpectedly linked into the inspected host\n' >&2
             exit 1
           fi
+          if [ '${{ inputs.category_token_count_acceptance }}' = true ]; then
+            {
+              printf 'audit_source=%s\nmode=category_token_count_acceptance\ncargo_lock_applicable=false\n' "$(git rev-parse HEAD)"
+              rustc --version --verbose
+              shasum -a 256 tools/ios-abi-probe.rs tools/ios-category-token-count.rs tools/ios-category-token-acceptance.rs tools/PickerCategoryObservation.m .github/workflows/ios-sdk-audit.yml "$PROBE_APP/authorization-center-probe" "$XCODE_ROOT/libui-test.a" "$XCODE_ROOT/category-observation.o"
+            } > "$OUT/category-token-count-build.txt"
+          fi
           TEST_SECONDS=90
           if [ '${{ inputs.selection_inspection_mode }}' = consent-selection-acceptance ]; then TEST_SECONDS=180; fi
           printf 'xctest_started_at=%s\ntest_limit_seconds=%s\n' "$(date -u +%FT%TZ)" "$TEST_SECONDS" > "$OUT/consent-selection-phase.txt"
@@ -1080,10 +1108,39 @@ jobs:
             grep -Fx 'status_read_on_main_thread=true' "$OUT/public-authorization-result.txt"
             if [ '${{ inputs.category_selection_observation }}' = true ]; then
               grep -F 'category_control_tap_returned=true;' "$OUT/consent-selection-xctest-observations.txt"
-              grep -F 'category_token_count_verified=false; individual_app_tap=false' "$OUT/consent-selection-xctest-observations.txt"
               grep -Fx 'semantic_app_selection_verified=false' "$OUT/consent-selection-result.txt"
               grep -Fx 'owned_set_vwt_copy_destroy=true' "$OUT/consent-selection-result.txt"
-              printf 'xctest_exit_status=0\ncategory_ui_setter_delta_observed=true\ncategory_token_count_verified=false\nindividual_app_selection_verified=false\nfull_teardown_verified=false\n' > "$OUT/consent-selection-test-status.txt"
+              if [ '${{ inputs.category_token_count_acceptance }}' = true ]; then
+                grep -Eq 'category_tokens_before=0; category_tokens_after=[1-9][0-9]*; category_token_count_verified=true; individual_app_tap=false$' "$OUT/consent-selection-xctest-observations.txt"
+                PRE=$(sed -n 's/^XCTest consent-selection: category_control_tap_returned=true; setter_before=\([0-9][0-9]*\); setter_after=[0-9][0-9]*;.*category_token_count_verified=true; individual_app_tap=false$/\1/p' "$OUT/consent-selection-xctest-observations.txt")
+                POST=$(sed -n 's/^XCTest consent-selection: category_control_tap_returned=true; setter_before=[0-9][0-9]*; setter_after=\([0-9][0-9]*\);.*category_token_count_verified=true; individual_app_tap=false$/\1/p' "$OUT/consent-selection-xctest-observations.txt")
+                test "$POST" -gt "$PRE"
+                RESULTS="$OUT/consent-selection-result.txt"
+                grep -Fx 'initial_category_tokens_count=0' "$RESULTS"
+                grep -Eq '^selected_category_tokens_count=[1-9][0-9]*$' "$RESULTS"
+                grep -Fx 'selection_snapshot_lifetime_verified=true' "$RESULTS"
+                grep -Eq '^selection_snapshot_category_tokens_count=[1-9][0-9]*$' "$RESULTS"
+                for FIELD in selection_snapshot_initialize_with_copy_calls selection_snapshot_destroy_calls selection_snapshot_allocations selection_snapshot_deallocations; do grep -Fx "$FIELD=2" "$RESULTS"; done
+                for FIELD in category_tokens_getter_calls category_tokens_count_calls category_set_initialize_with_copy_calls category_set_destroy_calls category_set_allocations category_set_deallocations; do test "$(grep -Ec "^$FIELD=[0-9]+$" "$RESULTS")" = 1; done
+                GETS=$(sed -n 's/^category_tokens_getter_calls=//p' "$RESULTS")
+                COUNTS=$(sed -n 's/^category_tokens_count_calls=//p' "$RESULTS")
+                COPIES=$(sed -n 's/^category_set_initialize_with_copy_calls=//p' "$RESULTS")
+                DESTROYS=$(sed -n 's/^category_set_destroy_calls=//p' "$RESULTS")
+                ALLOCS=$(sed -n 's/^category_set_allocations=//p' "$RESULTS")
+                FREES=$(sed -n 's/^category_set_deallocations=//p' "$RESULTS")
+                test "$GETS" -ge 2
+                test "$COUNTS" = "$GETS"
+                test "$COPIES" = "$GETS"
+                test "$DESTROYS" = "$((GETS*2))"
+                test "$ALLOCS" = "$DESTROYS"
+                test "$FREES" = "$ALLOCS"
+                grep -Fx 'selection_state_pinned=true' "$RESULTS"
+                grep -Fx 'full_teardown_verified=false' "$RESULTS"
+                printf 'xctest_exit_status=0\ncategory_ui_setter_delta_observed=true\ncategory_token_count_verified=true\nselection_snapshot_lifetime_verified=true\nindividual_app_selection_verified=false\ncategory_instance_count_verified=false\nfull_teardown_verified=false\n' > "$OUT/consent-selection-test-status.txt"
+              else
+                grep -F 'category_token_count_verified=false; individual_app_tap=false' "$OUT/consent-selection-xctest-observations.txt"
+                printf 'xctest_exit_status=0\ncategory_ui_setter_delta_observed=true\ncategory_token_count_verified=false\nindividual_app_selection_verified=false\nfull_teardown_verified=false\n' > "$OUT/consent-selection-test-status.txt"
+              fi
               exit 0
             fi
             grep -Eq '^rust_setter_calls=[1-9][0-9]*$' "$OUT/consent-selection-result.txt"
@@ -1358,6 +1415,7 @@ jobs:
             ${{ runner.temp }}/ios-sdk-audit/Swift-set-selected-declarations.json
             ${{ runner.temp }}/ios-sdk-audit/ManagedSettings-Application-selected-declarations.json
             ${{ runner.temp }}/ios-sdk-audit/category-*-sdk-declarations.json
+            ${{ runner.temp }}/ios-sdk-audit/category-token-count-build.txt
             ${{ runner.temp }}/ios-sdk-audit/FamilyControls-selected-declarations.json
             ${{ runner.temp }}/ios-sdk-audit/SwiftUI-selected-declarations.json
             ${{ runner.temp }}/ios-sdk-audit/public-authorization-result.txt

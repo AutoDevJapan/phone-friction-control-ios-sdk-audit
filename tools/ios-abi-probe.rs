@@ -1562,6 +1562,13 @@ mod mutable_binding {
     use std::sync::{Arc, Condvar, Mutex};
     use std::time::{Duration, Instant};
 
+    #[cfg(all(consent_selection_acceptance, category_token_count_acceptance,
+        target_os = "ios", target_env = "sim", target_arch = "aarch64"))]
+    include!("ios-category-token-count.rs");
+    #[cfg(all(consent_selection_acceptance, category_token_count_acceptance,
+        target_os = "ios", target_env = "sim", target_arch = "aarch64"))]
+    include!("ios-category-token-acceptance.rs");
+
     // Every C/Swift boundary saves x20 and LR and has a 16-byte C stack/CFI.
     // Category: C(dst, Bool, entry) -> Swift x8=dst, x0=Bool, no self/metatype.
     // Binding init: C(dst, get, set, metadata, entry) -> x8, x0/NULL,
@@ -2609,6 +2616,9 @@ mod mutable_binding {
             Box::leak(Box::new(Installed::install(stable, proof)));
         #[cfg(consent_selection_acceptance)]
         collect_selection_abi(page);
+        #[cfg(all(consent_selection_acceptance, category_token_count_acceptance,
+            target_os = "ios", target_env = "sim", target_arch = "aarch64"))]
+        initialize_category_token_counts(page);
         let mut binding = Value::allocate(binding_type, proof, true);
         proof.inc(Count::BindingInit);
         picker_values::initialize_binding(
@@ -3012,16 +3022,27 @@ mod mutable_binding {
             let count = unsafe { &*plan }.read();
             CURRENT_APPS.store(count, Ordering::Release);
             COUNTED_SETTERS.store(calls, Ordering::Release);
+            #[cfg(all(consent_selection_acceptance, category_token_count_acceptance,
+                target_os = "ios", target_env = "sim", target_arch = "aarch64"))]
+            update_category_token_counts();
         }
         let initial = INITIAL_APPS.load(Ordering::Acquire);
         let selected = CURRENT_APPS.load(Ordering::Acquire);
         let semantic = !cfg!(category_selection_observation)
             && initial == 0 && selected > initial && calls > 0;
-        format!(
+        let evidence = format!(
             "rust_setter_calls={calls}\nselection_state_pinned=true\nfull_teardown_verified=false\napplications_count_abi_verified=true\napplications_getter_calls={}\ncount_getter_calls={}\ninitial_applications_count={initial}\nselected_applications_count={selected}\nsemantic_app_selection_verified={semantic}\nselection_contents_output=false\ncount_read_on_main_thread=true\nowned_set_vwt_copy_destroy=true\n",
             APPLICATIONS_CALLS.load(Ordering::Acquire),
             COUNT_CALLS.load(Ordering::Acquire)
-        )
+        );
+        #[cfg(all(consent_selection_acceptance, category_token_count_acceptance,
+            target_os = "ios", target_env = "sim", target_arch = "aarch64"))]
+        let evidence = {
+            let mut evidence = evidence;
+            evidence.push_str(&category_token_evidence());
+            evidence
+        };
+        evidence
     }
     #[cfg(consent_selection_acceptance)]
     pub(super) fn selection_snapshot() -> (usize, usize, usize) {
@@ -4386,6 +4407,9 @@ mod ui_authorization_test {
             fn observe_picker_category(test: Id, app: Id) -> u8;
         }
         if unsafe { observe_picker_category(test, app) } != 1 {
+            #[cfg(category_token_count_acceptance)]
+            unsafe { fail(test, c"Real category tap did not produce a fresh positive token count") };
+            #[cfg(not(category_token_count_acceptance))]
             unsafe { fail(test, c"Category cell observation did not produce a setter delta") };
         }
     }
@@ -5017,10 +5041,16 @@ mod native_host {
         )
         .expect("write selection evidence");
         let (setters, initial, apps) = super::mutable_binding::selection_snapshot();
-        let title = CString::new(format!(
+        let label = format!(
             "Selection snapshot setters={setters} initial={initial} apps={apps}"
-        ))
-        .unwrap();
+        );
+        #[cfg(all(consent_selection_acceptance, category_token_count_acceptance,
+            target_os = "ios", target_env = "sim", target_arch = "aarch64"))]
+        let label = {
+            let (category_initial, category_tokens) = super::mutable_binding::category_token_snapshot();
+            format!("{label} category_initial={category_initial} category_tokens={category_tokens}")
+        };
+        let title = CString::new(label).unwrap();
         unsafe { test_button_title(REQUEST_BUTTON.load(Ordering::Acquire) as Id, &title) };
     }
     #[cfg(ui_test_host)]
