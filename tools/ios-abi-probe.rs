@@ -4452,7 +4452,20 @@ mod ui_authorization_test {
             if search.is_none() {
                 // The current captured Picker does not display its search bar.
                 // Try the public scroll gesture once, then re-query without assuming why.
-                action(app, c"swipeDown");
+                let surfaces = retained_object(app, c"collectionViews");
+                let count: unsafe extern "C" fn(Id, Sel) -> usize =
+                    std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+                if count(surfaces.0, sel_registerName(c"count".as_ptr())) != 1 {
+                    fail(test, c"Picker collection surface is not unique"); return;
+                }
+                let surface = retained_object(surfaces.0, c"firstMatch");
+                let boolean: unsafe extern "C" fn(Id, Sel) -> bool =
+                    std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+                if !wait_for(surface.0, 1.0) || !boolean(surface.0, sel_registerName(c"isHittable".as_ptr()))
+                    || available_control(surface.0, c"Social", &[c"staticTexts"]).is_none() {
+                    fail(test, c"Observed Picker collection surface unavailable"); return;
+                }
+                action(surface.0, c"swipeDown");
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
                 while search.is_none() && std::time::Instant::now() < deadline {
                     for observer in [app, system] {
