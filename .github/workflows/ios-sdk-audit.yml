@@ -1469,8 +1469,12 @@ jobs:
           xcrun simctl bootstatus "$SIM_ID" -b
           xcrun simctl install "$SIM_ID" "$OUT/Product.app"
           BID=com.autodevjapan.phonefrictioncontrol.simulator
+          export SIMCTL_CHILD_RUST_BACKTRACE=full
+          xcrun simctl launch --console "$SIM_ID" "$BID" > "$OUT/launch.txt" 2>&1 &
+          CONSOLE_PID=$!
+          sleep 2
           LAUNCH_STATUS=0
-          xcrun simctl launch --stdout="$OUT/stdout.txt" --stderr="$OUT/stderr.txt" "$SIM_ID" "$BID" > "$OUT/launch.txt" 2>&1 || LAUNCH_STATUS=$?
+          kill -0 "$CONSOLE_PID" 2>/dev/null || wait "$CONSOLE_PID" || LAUNCH_STATUS=$?
           printf 'launch_status=%s\n' "$LAUNCH_STATUS" > "$OUT/launch_status.txt"
           PID=$(awk -F': ' 'NR==1 {print $2}' "$OUT/launch.txt")
           printf 'pid=%s\n' "$PID" > "$OUT/pid.txt"
@@ -1480,7 +1484,9 @@ jobs:
           xcrun simctl spawn "$SIM_ID" launchctl list > "$OUT/launchctl.txt" 2>&1 || true
           awk -v p="$PID" '$1 == p' "$OUT/launchctl.txt" > "$OUT/same_pid_alive.txt" || true
           xcrun simctl io "$SIM_ID" screenshot "$OUT/first.png" || true
-          xcrun simctl spawn "$SIM_ID" log show --last 2m --style compact --predicate 'process == "product"' 2>&1 | tail -n 80 > "$OUT/log.txt" || true
+          xcrun simctl spawn "$SIM_ID" log show --last 3m --style compact --info --debug --predicate 'process == "product" OR eventMessage CONTAINS "phonefrictioncontrol" OR process == "ReportCrash"' > "$OUT/log-full.txt" 2>&1 || true
+          tail -n 80 "$OUT/log-full.txt" > "$OUT/log.txt"
+          grep -iE 'exit|terminat|abort|crash|panic|signal|wgpu|adapter|jetsam' "$OUT/log-full.txt" | tail -n 60 > "$OUT/log-exit.txt" || true
           find ~/Library/Logs/DiagnosticReports -name 'product*' -maxdepth 1 2>/dev/null | head -n 3 > "$OUT/crash.txt" || true
           test "$LAUNCH_STATUS" = 0
           test -n "$PID"
