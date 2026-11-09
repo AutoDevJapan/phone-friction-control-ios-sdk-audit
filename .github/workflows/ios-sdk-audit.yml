@@ -1456,7 +1456,7 @@ jobs:
           mkdir -p "$OUT/Product.app"
           xcodebuild -version > "$OUT/versions.txt"
           rustc --version >> "$OUT/versions.txt"
-          git -C app apply ../tools/ios-app-cargo-target-split.patch
+          git -C app apply ../tools/ios-app-diag-logger-and-target-split.patch
           (cd app && cargo build --release --bin phone-friction-control-preview --features desktop-preview --target aarch64-apple-ios-sim) > "$OUT/build-full.txt" 2>&1
           tail -n 40 "$OUT/build-full.txt" > "$OUT/build.txt"
           cp app/target/aarch64-apple-ios-sim/release/phone-friction-control-preview "$OUT/Product.app/product"
@@ -1470,6 +1470,7 @@ jobs:
           xcrun simctl install "$SIM_ID" "$OUT/Product.app"
           BID=com.autodevjapan.phonefrictioncontrol.simulator
           export SIMCTL_CHILD_RUST_BACKTRACE=full
+          export SIMCTL_CHILD_RUST_LOG=warn,wgpu_core=debug,wgpu_hal=debug,eframe=debug,egui_wgpu=debug,winit=debug
           xcrun simctl launch --console "$SIM_ID" "$BID" > "$OUT/launch.txt" 2>&1 &
           CONSOLE_PID=$!
           sleep 2

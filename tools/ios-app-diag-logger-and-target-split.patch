@@ -1,0 +1,38 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index 4c3ff8f..76571d2 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -25,16 +25,23 @@ ads-test = []
+ ads-production = []
+ 
+ [dependencies]
+-eframe = { version = "0.36.2", default-features = false, features = ["android-native-activity", "default_fonts", "glow", "persistence"] }
+ egui-winit = { version = "0.36.2", default-features = false, features = ["android-native-activity"] }
+ serde = { version = "1", features = ["derive"] }
+ ron = "0.12.2"
++env_logger = { version = "0.11", default-features = false }
+ winit = { version = "0.30", default-features = false, features = ["rwh_06"] }
+ 
+ [target.'cfg(target_os = "android")'.dependencies]
++eframe = { version = "0.36.2", default-features = false, features = ["android-native-activity", "default_fonts", "glow", "persistence"] }
+ android-activity = { version = "0.6.1", features = ["native-activity"] }
+ jni = "0.21.1"
+ 
++[target.'cfg(target_os = "ios")'.dependencies]
++eframe = { version = "0.36.2", default-features = false, features = ["default_fonts", "wgpu", "persistence"] }
++
++[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
++eframe = { version = "0.36.2", default-features = false, features = ["android-native-activity", "default_fonts", "glow", "persistence"] }
++
+ [package.metadata.android]
+ package = "com.autodevjapan.phonefrictioncontrol"
+ apk_name = "phone-friction-control"
+diff --git a/src/main.rs b/src/main.rs
+index 7503b3c..f427dbc 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -1,3 +1,4 @@
+ fn main() -> eframe::Result {
++    env_logger::init();
+     phone_friction_control::run_preview()
+ }
