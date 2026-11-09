@@ -1509,7 +1509,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: AutoDevJapan/phone-friction-control
-          ref: f1b2602024b5abb5cc5b4ccb80997f2d0ba3570e
+          ref: 6dcc3e95880a7d2baac5bee018dd31f266acd16d
           path: app
       - uses: dtolnay/rust-toolchain@master
         with:
@@ -1579,6 +1579,11 @@ jobs:
           printf 'constructor_status=%s\n' "$CONSTRUCTOR_STATUS" > "$OUT/constructor-status.txt"
           test "$CONSTRUCTOR_STATUS" = 0
           grep -F 'test result: ok. 2 passed; 0 failed;' "$OUT/constructor-result.txt"
+          RELOAD_STATUS=0
+          perl -e 'alarm 60; exec @ARGV; die "exec failed\n"' xcrun simctl launch --console "$SIM_ID" com.autodevjapan.phonefrictioncontrol.constructor-tests reload_after_read_error --nocapture --test-threads=1 > "$OUT/reload-result.txt" 2>&1 || RELOAD_STATUS=$?
+          printf 'reload_status=%s\n' "$RELOAD_STATUS" > "$OUT/reload-status.txt"
+          test "$RELOAD_STATUS" = 0
+          grep -F 'test result: ok. 3 passed; 0 failed;' "$OUT/reload-result.txt"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
