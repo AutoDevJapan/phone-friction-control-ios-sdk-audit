@@ -328,8 +328,10 @@ unsafe fn binding_copy_drop(metadata:*const c_void,vwt:*const Vwt) {
   let gets_before=GETS.load(Ordering::SeqCst);
   let mut out:u8=0xff;
   binding_call_get(metadata,copied,&mut out,getter);
-  assert_eq!(out,0);assert!(GETS.load(Ordering::SeqCst)>gets_before);
-  println!("binding_late_getter_initial_value=false\nbinding_late_getter_calls=1");
+  let measured=GETS.load(Ordering::SeqCst)-gets_before;
+  println!("binding_late_getter_measured_calls={measured}");
+  assert_eq!(out,0);assert_eq!(measured,1);
+  println!("binding_late_getter_initial_value=false");
   let new_value:u8=1;
   binding_call_set(&new_value,metadata,copied,setter);
   assert_eq!(SETS.load(Ordering::SeqCst),1);
