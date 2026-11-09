@@ -112,6 +112,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          trap 'printf "SDK prerequisite failed at line %s\n" "$LINENO" >&2' ERR
           OUT="$RUNNER_TEMP/ios-sdk-audit"
           mkdir -p "$OUT"
           SELECTION_MODE='${{ inputs.selection_inspection_mode }}'
@@ -168,6 +169,7 @@ jobs:
           rustc --version --verbose >> "$OUT/versions.txt"
           SDK=$(xcrun --sdk iphonesimulator --show-sdk-path)
           VERSION=$(xcrun --sdk iphonesimulator --show-sdk-version)
+          if [ '${{ inputs.ui_consent_test }}' = true ]; then set -x; fi
           if [ '${{ inputs.ui_consent_test }}' = true ]; then
             test '${{ inputs.xcode_signed_host }}' = true
             test '${{ inputs.native_uikit_host }}' = true
