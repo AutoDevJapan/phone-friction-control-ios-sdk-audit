@@ -2,6 +2,10 @@ name: Manual iOS SDK audit
 on:
   workflow_dispatch:
     inputs:
+      product_restore_smoke:
+        description: Reuse the verified app bytes to inspect saved state across process restart
+        type: boolean
+        default: false
       app_simulator_launch:
         description: Build the product for the iOS Simulator, launch it and capture the first screen
         type: boolean
@@ -186,7 +190,7 @@ jobs:
           if-no-files-found: error
 
   sdk-audit:
-    if: ${{ !inputs.context_owner_probe && !inputs.context_owner_simulator && !inputs.app_simulator_launch }}
+    if: ${{ !inputs.context_owner_probe && !inputs.context_owner_simulator && !inputs.app_simulator_launch && !inputs.product_restore_smoke }}
     runs-on: macos-15
     # The measured consent run reached XCTest after 9m40s of SDK/build/boot.
     # Preserve the existing 180s test limit and leave time to export evidence.
@@ -1505,5 +1509,30 @@ jobs:
             ${{ runner.temp }}/app-simulator/*.png
             ${{ runner.temp }}/app-simulator/*.tar.gz
             ${{ runner.temp }}/app-simulator/*.lock
+          retention-days: 3
+          if-no-files-found: error
+
+  product-restore:
+    if: inputs.product_restore_smoke
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: product-simulator-launch
+          run-id: 42624956614
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/verified-product
+      - name: Verify app-created state survives a process restart
+        shell: bash
+        run: bash tools/ios-product-restore-smoke.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: product-restore-smoke
+          path: |
+            ${{ runner.temp }}/product-restore/*.txt
+            ${{ runner.temp }}/product-restore/*.png
           retention-days: 3
           if-no-files-found: error
