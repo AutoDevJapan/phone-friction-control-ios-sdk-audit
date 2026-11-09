@@ -57,7 +57,9 @@ permissions:
 jobs:
   sdk-audit:
     runs-on: macos-15
-    timeout-minutes: 10
+    # The measured consent run reached XCTest after 9m40s of SDK/build/boot.
+    # Preserve the existing 180s test limit and leave time to export evidence.
+    timeout-minutes: ${{ inputs.selection_inspection_mode == 'consent-selection-acceptance' && 15 || 10 }}
     steps:
       - uses: actions/checkout@v4
       - name: Select the pinned SDK and Swift toolchain
@@ -823,7 +825,14 @@ jobs:
           fi
           TEST_SECONDS=90
           if [ '${{ inputs.selection_inspection_mode }}' = consent-selection-acceptance ]; then TEST_SECONDS=180; fi
+          printf 'xctest_started_at=%s\ntest_limit_seconds=%s\n' "$(date -u +%FT%TZ)" "$TEST_SECONDS" > "$OUT/consent-selection-phase.txt"
+          # Capture host errors (including a pre-UI ABI guard panic) independently
+          # of whether XCTest reaches its first application control.
+          xcrun simctl spawn "$SIM_ID" log stream --style compact --level debug --predicate 'process == "authorization-center-probe"' > "$OUT/consent-selection-host-runtime.txt" 2>&1 &
+          HOST_LOG_PID=$!
           if xcodebuild -project "$XCODE_ROOT/Probe.xcodeproj" -scheme Probe -configuration Debug -sdk iphonesimulator -destination "id=$SIM_ID" -parallel-testing-enabled NO -test-timeouts-enabled YES -default-test-execution-time-allowance "$TEST_SECONDS" -maximum-test-execution-time-allowance "$TEST_SECONDS" -resultBundlePath "$OUT/consent-ui.xcresult" SYMROOT="$OUT/xcode-products" OBJROOT="$RUNNER_TEMP/xcode-objects" test-without-building > "$OUT/xcode-ui-test.txt" 2>&1; then UI_TEST_STATUS=0; else UI_TEST_STATUS=$?; fi
+          kill "$HOST_LOG_PID" 2>/dev/null || true
+          wait "$HOST_LOG_PID" 2>/dev/null || true
           # Always preserve partial app files BEFORE asserting test success.
           if [ '${{ inputs.selection_inspection_mode }}' = consent-selection-acceptance ]; then
             printf 'xctest_exit_status=%s\nmac_acceptance_verified=false\n' "$UI_TEST_STATUS" > "$OUT/consent-selection-test-status.txt"
