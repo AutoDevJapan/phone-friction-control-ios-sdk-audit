@@ -17,15 +17,28 @@ static bool snapshot(XCUIElement *badge, unsigned long *setters, unsigned long *
            && text[consumed] == 0 && initial == 0;
 }
 uint8_t observe_picker_category(XCTestCase *test, XCUIApplication *app) {
+    keepImage(test, app, @"category-entry");
     XCUIElement *badge = app.buttons[@"Rust selection aggregate snapshot"];
     if (![badge waitForExistenceWithTimeout:25]) return 0;
     unsigned long before = 0, apps = 0;
     if (!snapshot(badge, &before, &apps)) return 0;
     printf("XCTest consent-selection: category_observation_started=true; applications_count=%lu\n", apps); fflush(stdout);
     XCUIElementQuery *collections = app.collectionViews;
-    if (collections.count != 1) return 0;
-    XCUIElement *collection = collections.firstMatch;
-    if (!collection.hittable || !collection.staticTexts[@"Social"].exists) return 0;
+    XCUIElement *collection = nil;
+    BOOL hittable = NO, social = NO;
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:12];
+    do {
+        if (collections.count == 1) {
+            collection = collections.firstMatch;
+            hittable = collection.hittable;
+            social = collection.staticTexts[@"Social"].exists;
+            if (hittable && social) break;
+        }
+        [NSThread sleepForTimeInterval:0.2];
+    } while (deadline.timeIntervalSinceNow > 0);
+    keepImage(test, app, @"category-surface-before-verdict");
+    printf("XCTest consent-selection: category_surface_collection_count=%lu; hittable=%d; social_exists=%d\n", (unsigned long)collections.count, hittable, social); fflush(stdout);
+    if (collections.count != 1 || !hittable || !social) return 0;
     XCUIElementQuery *rows = [collection.cells containingPredicate:[NSPredicate predicateWithFormat:@"label == %@", @"Social"]];
     printf("XCTest consent-selection: host_collection_count=%lu; category_cell_matches=%lu\n", (unsigned long)collections.count, (unsigned long)rows.count); fflush(stdout);
     keepImage(test, app, @"category-before");
