@@ -1,0 +1,70 @@
+name: Manual Swift context ownership audit
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  ownership:
+    runs-on: macos-15
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-07-19
+      - name: Compile and execute the bounded request-free context owner
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DEVELOPER_DIR=/Applications/Xcode_16.4.app/Contents/Developer
+          OUT="$RUNNER_TEMP/context-owner"
+          mkdir -p "$OUT"
+          test "$(uname -m)" = arm64
+          xcodebuild -version > "$OUT/versions.txt"
+          rustc --version >> "$OUT/versions.txt"
+          sw_vers >> "$OUT/versions.txt"
+          rustc -vV >> "$OUT/versions.txt"
+          test "$(rustc -vV | sed -n 's/^host: //p')" = aarch64-apple-darwin
+          xcrun --sdk macosx --show-sdk-version >> "$OUT/versions.txt"
+          SDK=$(xcrun --sdk macosx --show-sdk-path)
+          rustc tools/swift-context-owner-probe.rs --edition 2024 --emit="llvm-ir=$OUT/context.ll,asm=$OUT/context.s,link" -L "native=$SDK/usr/lib/swift" -C link-arg=-Wl,-rpath,/usr/lib/swift -o "$OUT/context-owner"
+          otool -L "$OUT/context-owner" > "$OUT/linked-libraries.txt"
+          otool -hv "$OUT/context-owner" > "$OUT/macho-target.txt"
+          grep -Eq 'ARM64[[:space:]]+ALL' "$OUT/macho-target.txt"
+          grep -E 'METADATA|declare.*swift_(allocObject|deallocObject|retain|release)|module asm' "$OUT/context.ll" > "$OUT/layout-and-calls.txt"
+          # Collect the actual native SDK Binding boundary before calling it.
+          xcrun swift-api-digester -dump-sdk -module SwiftUICore -sdk "$SDK" -target arm64-apple-macos15.0 -o "$RUNNER_TEMP/context-SwiftUICore.json"
+          jq '[.. | objects | select(.kind? == "TypeDecl" and .usr? == "s:7SwiftUI7BindingV") | {name, usr, genericSig, members: [.children[]? | select(.name? | IN("init", "wrappedValue"))]}]' "$RUNNER_TEMP/context-SwiftUICore.json" > "$OUT/binding-native-declarations.txt"
+          jq -e 'length == 1 and .[0].name == "Binding" and .[0].genericSig == "<Value>"' "$OUT/binding-native-declarations.txt"
+          TBD="$SDK/System/Library/Frameworks/SwiftUICore.framework/SwiftUICore.tbd"
+          test -s "$TBD"
+          grep -oE '\$s[A-Za-z0-9_]+' "$TBD" | sort -u > "$RUNNER_TEMP/context-binding-export-tokens.txt"
+          grep -oE '\$s[A-Za-z0-9_]+' "$SDK/usr/lib/swift/libswiftCore.tbd" | sort -u > "$RUNNER_TEMP/context-core-export-tokens.txt"
+          grep -Fx '$sSbN' "$RUNNER_TEMP/context-core-export-tokens.txt" > "$OUT/bool-metadata-export.txt"
+          for SYMBOL in '$s7SwiftUI7BindingVMa' '$s7SwiftUI7BindingV3get3setACyxGxyc_yxctcfC' '$s7SwiftUI7BindingV12wrappedValuexvg' '$s7SwiftUI7BindingV12wrappedValuexvs'; do
+            grep -Fx "$SYMBOL" "$RUNNER_TEMP/context-binding-export-tokens.txt" > /dev/null
+            printf 'public_export_verified=%s\n' "$SYMBOL" >> "$OUT/binding-public-exports.txt"
+          done
+          printf '#if __has_feature(ptrauth_calls)\n#error authenticated_call_target\n#endif\n' > "$OUT/ptrauth-target.c"
+          xcrun clang -target arm64-apple-macos15.0 -isysroot "$SDK" -fsyntax-only "$OUT/ptrauth-target.c"
+          printf 'target=arm64-apple-macos15.0\nptrauth_calls_enabled=false\n' > "$OUT/call-target.txt"
+          STATUS=0
+          perl -e 'alarm 20; exec @ARGV; die "exec failed\n"' "$OUT/context-owner" > "$OUT/result.txt" 2>&1 || STATUS=$?
+          printf 'exit_status=%s\n' "$STATUS" > "$OUT/status.txt"
+          test "$STATUS" = 0
+          test "$(grep -Fxc 'binding_metadata_data=bool; kind_struct=true' "$OUT/result.txt")" = 1
+          test "$(grep -Ec '^binding_bool_metadata_complete=true; size=[1-9][0-9]*; stride=[1-9][0-9]*; alignment=[1-9][0-9]*; nonpod=true$' "$OUT/result.txt")" = 1
+          test "$(grep -Ec '^binding_init_helper; bytes=[0-9a-f]+$' "$OUT/result.txt")" = 1
+          for LABEL in binding_metadata binding_init binding_get binding_set; do
+            test "$(grep -Ec "^binding_entry=$LABEL; bytes=[0-9a-f]+$" "$OUT/result.txt")" = 1
+          done
+          for LINE in rust_owner_drop_calls=1 context_destroy_calls=1 context_dealloc_calls=1 copy_survived_original_release=true binding_verified=false full_teardown_verified=false; do
+            test "$(grep -Fxc "$LINE" "$OUT/result.txt")" = 1
+          done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: swift-context-owner-audit
+          path: ${{ runner.temp }}/context-owner/*.txt
+          retention-days: 1
+          if-no-files-found: error
