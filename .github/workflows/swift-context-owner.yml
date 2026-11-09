@@ -1,0 +1,45 @@
+name: Manual Swift context ownership audit
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  ownership:
+    runs-on: macos-15
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-07-19
+      - name: Compile and execute the bounded request-free context owner
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DEVELOPER_DIR=/Applications/Xcode_16.4.app/Contents/Developer
+          OUT="$RUNNER_TEMP/context-owner"
+          mkdir -p "$OUT"
+          test "$(uname -m)" = arm64
+          xcodebuild -version > "$OUT/versions.txt"
+          rustc --version >> "$OUT/versions.txt"
+          sw_vers >> "$OUT/versions.txt"
+          rustc -vV >> "$OUT/versions.txt"
+          xcrun --sdk macosx --show-sdk-version >> "$OUT/versions.txt"
+          SDK=$(xcrun --sdk macosx --show-sdk-path)
+          rustc tools/swift-context-owner-probe.rs --edition 2024 --emit="llvm-ir=$OUT/context.ll,asm=$OUT/context.s,link" -L "native=$SDK/usr/lib/swift" -C link-arg=-Wl,-rpath,/usr/lib/swift -o "$OUT/context-owner"
+          otool -L "$OUT/context-owner" > "$OUT/linked-libraries.txt"
+          grep -E 'METADATA|declare.*swift_(allocObject|deallocObject|retain|release)|module asm' "$OUT/context.ll" > "$OUT/layout-and-calls.txt"
+          STATUS=0
+          perl -e 'alarm 20; exec @ARGV; die "exec failed\n"' "$OUT/context-owner" > "$OUT/result.txt" 2>&1 || STATUS=$?
+          printf 'exit_status=%s\n' "$STATUS" > "$OUT/status.txt"
+          test "$STATUS" = 0
+          for LINE in context_destroy_calls=1 context_dealloc_calls=1 copy_survived_original_release=true binding_verified=false full_teardown_verified=false; do
+            test "$(grep -Fxc "$LINE" "$OUT/result.txt")" = 1
+          done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: swift-context-owner-audit
+          path: ${{ runner.temp }}/context-owner/*.txt
+          retention-days: 1
+          if-no-files-found: error
