@@ -4486,12 +4486,17 @@ mod ui_authorization_test {
             let is_string: unsafe extern "C" fn(Id, Sel, Id) -> bool =
                 std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
             let initial_value = retained_object(search.0, c"value");
-            if initial_value.0.is_null() || !is_string(initial_value.0, sel_registerName(c"isKindOfClass:".as_ptr()), string_class) {
-                fail(test, c"Search value is not a string; input unverified"); return;
-            }
-            let initial_bytes = utf8_string(initial_value.0);
-            if initial_bytes.is_null() || !std::ffi::CStr::from_ptr(initial_bytes).to_bytes().is_empty() {
-                fail(test, c"Search field not initially empty; no append attempted"); return;
+            // value is nullable for an empty field. No append occurs when a
+            // nonempty or non-string value is actually present; the final value
+            // must still be a nonnull NSString equal to the complete fixture.
+            if !initial_value.0.is_null() {
+                if !is_string(initial_value.0, sel_registerName(c"isKindOfClass:".as_ptr()), string_class) {
+                    fail(test, c"Initial search value has unsupported type"); return;
+                }
+                let initial_bytes = utf8_string(initial_value.0);
+                if initial_bytes.is_null() || !std::ffi::CStr::from_ptr(initial_bytes).to_bytes().is_empty() {
+                    fail(test, c"Search field not initially empty; no append attempted"); return;
+                }
             }
             // The prior real run dropped a character during bulk typing.
             // Pace known fixture input, then verify the public field value.
