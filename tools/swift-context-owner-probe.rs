@@ -1,3 +1,4 @@
+// Request-free owner audit and noncalling Binding ABI capture.
 // Request-free arm64 Swift heap-owner lifetime probe.
 #![feature(abi_swift)]
 use std::ffi::c_void;
@@ -55,7 +56,7 @@ unsafe extern "C" { fn dladdr(p:*const c_void,info:*mut DlInfo)->i32; fn getpage
 struct MetadataResponse { value:*const c_void, state:usize }
 #[repr(C)]
 struct Vwt { functions:[*const c_void;8], size:usize, stride:usize, flags:u32, extra:u32 }
-fn inspect_binding_metadata() {
+fn inspect_binding_metadata() -> (*const c_void,*const Vwt) {
  unsafe {
   let handle=std::ptr::without_provenance_mut(usize::MAX-1);
   let boolean=dlsym(handle,c"$sSbN".as_ptr());
@@ -83,6 +84,20 @@ fn inspect_binding_metadata() {
   assert!(vwt.size>0 && vwt.stride==stride);
   assert!(vwt.functions.iter().all(|f| !f.is_null()));
   println!("binding_bool_metadata_complete=true; size={}; stride={}; alignment={}; nonpod={}",vwt.size,vwt.stride,(vwt.flags&255)+1,vwt.flags&0x10000!=0);
+  #[cfg(target_os="ios")]
+  for (name,slot) in [("destroy",1usize),("copy",2usize)] {
+   let pointer=vwt.functions[slot];
+   let mut info=DlInfo::default(); assert_ne!(dladdr(pointer,&mut info),0);
+   assert!(!info.base.is_null()&&!info.filename.is_null());
+   let filename=std::ffi::CStr::from_ptr(info.filename).to_bytes();
+   assert!(filename.ends_with(b"/SwiftUICore")||filename.ends_with(b"/libswiftCore.dylib"));
+   assert_eq!(pointer.addr()%4,0);
+   let count=128usize.min(page-pointer.addr()%page);
+   print!("binding_vwt_entry={name}; bytes=");
+   for byte in std::slice::from_raw_parts(pointer.cast::<u8>(),count) { print!("{byte:02x}"); }
+   println!();
+  }
+  (result.value,vwt as *const Vwt)
  }
 }
 fn inspect_binding_entry() {
@@ -124,7 +139,7 @@ fn inspect_binding_entry() {
     let mut origin=DlInfo::default(); let mut destination=DlInfo::default();
     assert_ne!(dladdr(entry,&mut origin),0); assert_ne!(dladdr(target,&mut destination),0);
     assert!(!origin.base.is_null()&&origin.base==destination.base);
-    let bytes=128usize.min(page-target.addr()%page);
+    let bytes=512usize.min(page-target.addr()%page);
     print!("binding_init_helper; bytes=");
     for byte in std::slice::from_raw_parts(target.cast::<u8>(),bytes) { print!("{byte:02x}"); }
     println!();
@@ -135,7 +150,7 @@ fn inspect_binding_entry() {
 }
 fn main() {
  inspect_binding_entry();
- inspect_binding_metadata();
+ let _binding=inspect_binding_metadata();
  assert_eq!(std::mem::offset_of!(FullMetadata, local),24);
  assert_eq!(std::mem::offset_of!(FullMetadata, destroy),8);
  unsafe {
@@ -153,5 +168,7 @@ fn main() {
  assert_eq!(DESTROYS.load(Ordering::SeqCst),1);
  assert_eq!(DEALLOCS.load(Ordering::SeqCst),1);
  assert_eq!(OWNER_DROPS.load(Ordering::SeqCst),1);
- println!("rust_owner_drop_calls=1\ncontext_destroy_calls=1\ncontext_dealloc_calls=1\ncopy_survived_original_release=true\nbinding_verified=false\nfull_teardown_verified=false");
+
+
+ println!("rust_owner_drop_calls={}\ncontext_destroy_calls={}\ncontext_dealloc_calls={}\ncopy_survived_original_release=true\nbinding_verified=false\nfull_teardown_verified=false",OWNER_DROPS.load(Ordering::SeqCst),DESTROYS.load(Ordering::SeqCst),DEALLOCS.load(Ordering::SeqCst));
 }
