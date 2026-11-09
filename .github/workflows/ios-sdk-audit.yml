@@ -198,7 +198,10 @@ jobs:
               grep -n -A 5 -B 3 -E 'UIButtonTypeSystem|buttonWithType:|setTitle:.*forState:' "$UIKIT_HEADERS/UIButton.h" > "$OUT/uikit-test-button-declarations.txt"
               grep -n -A 5 -B 3 -E 'UIControlEventTouchUpInside|UIControlStateNormal|addTarget:' "$UIKIT_HEADERS/UIControl.h" >> "$OUT/uikit-test-button-declarations.txt"
               # This SDK declares Custom=0 followed immediately by implicit System=1.
-              awk '/^typedef NS_ENUM\(NSInteger, UIButtonType\) \{/ { getline; sub(/[[:space:]]*\/\/.*/, ""); if ($0 !~ /^[[:space:]]*UIButtonTypeCustom[[:space:]]*=[[:space:]]*0,[[:space:]]*$/) { bad=1; exit } getline; sub(/[[:space:]]*\/\/.*/, ""); if ($0 !~ /^[[:space:]]*UIButtonTypeSystem[[:space:]]+API_AVAILABLE\(ios\(7\.0\)\),[[:space:]]*$/) { bad=1; exit } found++ } END { exit (bad || found != 1) }' "$UIKIT_HEADERS/UIButton.h"
+              xcrun clang -target arm64-apple-ios18.5-simulator -isysroot "$SDK" -x objective-c -fsyntax-only -Xclang -ast-dump=json -Xclang '-ast-dump-filter=UIButtonType' "$UIKIT_HEADERS/UIButton.h" > "$RUNNER_TEMP/uibutton-type-ast.json"
+              jq -s '[.. | objects | select(.kind? == "EnumConstantDecl" and (.name? | IN("UIButtonTypeCustom", "UIButtonTypeSystem"))) | {name, values: [.. | objects | select(.kind? == "ConstantExpr") | .value]}]' "$RUNNER_TEMP/uibutton-type-ast.json" > "$OUT/uibutton-type-values.json"
+              cat "$OUT/uibutton-type-values.json"
+              jq -e '([.[] | select(.name == "UIButtonTypeCustom" and .values == ["0"])] | length) == 1 and ([.[] | select(.name == "UIButtonTypeSystem" and (.values == [] or .values == ["1"]))] | length) == 1' "$OUT/uibutton-type-values.json"
               grep -Eq 'UIControlEventTouchUpInside[[:space:]]*=[[:space:]]*1[[:space:]]*<<[[:space:]]*6([[:space:]]|,)' "$UIKIT_HEADERS/UIControl.h"
               grep -Eq 'UIControlStateNormal[[:space:]]*=[[:space:]]*0([[:space:]]|,)' "$UIKIT_HEADERS/UIControl.h"
             fi
