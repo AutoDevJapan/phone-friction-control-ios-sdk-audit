@@ -2323,72 +2323,60 @@ mod mutable_binding {
                 && word(category, 8, page) & 0xffc0_03ff == 0xf940_0129,
             "category constant load shape changed"
         );
-        for (offset, expected) in [
-            (0, 0xa9ba_6ffc),
-            (4, 0xaa1e_03e5),
-            (12, 0xaa05_03fe),
-            (16, 0xa905_7bfd),
-            (20, 0x9101_43fd),
-            (24, 0xd100_c3ff),
-            (28, 0xaa04_03fa),
-            (32, 0xaa03_03f3),
-            (36, 0xaa02_03f4),
+        // SDK 18.5, Xcode 16.4: run42549686002 records the public entries
+        // and same-image branch targets. The initializer adds x5/x6 constants
+        // and preserves the existing x0..x4 closure/metadata arguments and x8.
+        for (offset, mask, expected) in [
+            (0, 0x9f00001f, 0x90000005), // ADRP x5
+            (4, 0xffc003ff, 0x910000a5), // ADD x5,x5
+            (8, 0x9f00001f, 0x90000006), // ADRP x6
+            (12, 0xffc003ff, 0x910000c6), // ADD x6,x6
         ] {
-            assert!(
-                word(init, offset, page) == expected,
-                "Binding constructor prefix changed"
-            );
+            assert!(word(init, offset, page) & mask == expected,
+                "Binding constructor constant setup changed");
         }
-        let _save = branch(init, 8, true, page);
-        let helper = branch(init, 40, true, page);
-        for (offset, expected) in [(0, 0xaa01_03f5), (4, 0xaa00_03fb), (8, 0xf818_83a8)] {
-            assert!(
-                word(helper, offset, page) == expected,
-                "Binding constructor helper changed"
-            );
+        let implementation = branch(init, 16, false, page);
+        for (offset, expected) in [
+            (0, 0xa9ba6ffc), (4, 0xa90167fa), (8, 0xa9025ff8),
+            (12, 0xa90357f6), (16, 0xa9044ff4), (20, 0xa9057bfd),
+            (24, 0x910143fd), (28, 0xd100c3ff),
+            (32, 0xaa0603f4), (36, 0xaa0403f8), (40, 0xaa0303f6),
+            (44, 0xaa0203f9), (48, 0xaa0103f7), (52, 0xaa0003fa),
+            (56, 0xf81883a8),
+        ] {
+            assert!(word(implementation, offset, page) == expected,
+                "Binding constructor argument preservation changed");
         }
         let getter = branch(get, 0, false, page);
         for (offset, expected) in [
-            (0, 0xa9bd_57f6),
-            (4, 0xa901_4ff4),
-            (8, 0xa902_7bfd),
-            (12, 0x9100_83fd),
-            (16, 0xaa14_03f5),
-            (20, 0xaa00_03f6),
-            (24, 0xaa08_03f3),
-            (104, 0xb980_22c8),
-            (112, 0xf940_0ac2),
+            (0, 0xa9bd57f6), (4, 0xa9014ff4), (8, 0xa9027bfd),
+            (12, 0x910083fd), (16, 0xaa0003f5), (20, 0xaa0803f3),
+            (80, 0xf9400688), (84, 0xf9400109), (88, 0xf9403529),
+            (92, 0x52800020), (96, 0xaa1403f6), (100, 0xaa0803f4),
+            (104, 0xd63f0120),
         ] {
-            assert!(
-                word(getter, offset, page) == expected,
-                "Binding getter prefix changed"
-            );
+            assert!(word(getter, offset, page) == expected,
+                "Binding getter ownership prefix changed");
         }
         for (offset, expected) in [
-            (0, 0xa9bd_57f6),
-            (4, 0xa901_4ff4),
-            (8, 0xa902_7bfd),
-            (12, 0x9100_83fd),
-            (16, 0xaa01_03f3),
-            (20, 0xaa00_03f5),
-            (24, 0xa940_2281),
-            (28, 0xf940_0109),
-            (32, 0xf940_4129),
-            (36, 0xaa08_03f4),
-            (40, 0xd63f_0120),
-            (44, 0xf940_0a61),
-            (48, 0xf85f_8028),
-            (52, 0xf940_0502),
-            (56, 0xaa15_03e0),
-            (60, 0xa942_7bfd),
-            (64, 0xa941_4ff4),
-            (68, 0xa8c3_57f6),
-            (72, 0xd61f_0040),
+            (0, 0xa9bd57f6), (4, 0xa9014ff4), (8, 0xa9027bfd),
+            (12, 0x910083fd), (16, 0xaa0103f3), (20, 0xaa0003f5),
+            (28, 0xf9400a61), (32, 0xf85f8028), (36, 0xf9400502),
+            (40, 0xaa1503e0), (44, 0xa9427bfd), (48, 0xa9414ff4),
+            (52, 0xa8c357f6), (56, 0xd61f0040),
         ] {
-            assert!(
-                word(set, offset, page) == expected,
-                "Binding setter ownership prefix changed"
-            );
+            assert!(word(set, offset, page) == expected,
+                "Binding setter outer destroy changed");
+        }
+        let setter_helper = branch(set, 24, true, page);
+        for (offset, expected) in [
+            (0, 0xa9be4ff4), (4, 0xa9017bfd), (8, 0x910043fd),
+            (12, 0xa9402281), (16, 0xf9400109), (20, 0xf9404129),
+            (24, 0xaa0803f4), (28, 0xd63f0120),
+            (32, 0xa9417bfd), (36, 0xa8c24ff4), (40, 0xd65f03c0),
+        ] {
+            assert!(word(setter_helper, offset, page) == expected,
+                "Binding setter helper changed");
         }
         println!(
             "Mutable binding entry guards: category_first28=true; binding_register_prefixes=true; setter_outer_destroy=true; reconstructed_addresses_used=false"
