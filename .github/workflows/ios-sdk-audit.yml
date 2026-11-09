@@ -64,8 +64,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # The Rust probe contains SDK 17.5 / Swift 5.10 ABI assumptions.
-          # A newer runner must never silently select its default Xcode.
+          # Previous evidence used SDK 17.5 / Swift 5.10. This port separately
+          # validates SDK 18.5 / Swift 6.1.2; runtime guards remain mandatory.
+          # Never silently select the runner's default Xcode.
           mkdir -p "$RUNNER_TEMP/ios-sdk-audit"
           exec > >(tee "$RUNNER_TEMP/ios-sdk-audit/pinned-toolchain.txt") 2>&1
           sw_vers
@@ -78,9 +79,9 @@ jobs:
               find "$CACHE" -maxdepth 2 -type f -name '*15.4*.xip' -print
             fi
           done
-          PINNED=/Applications/Xcode_15.4.app/Contents/Developer
+          PINNED=/Applications/Xcode_16.4.app/Contents/Developer
           if [ ! -d "$PINNED" ]; then
-            echo '::error::Pinned Xcode 15.4 is missing; SDK 17.5 / Swift 5.10 ABI acceptance was not executed.'
+            echo '::error::Pinned Xcode 16.4 is missing; SDK 18.5 / Swift 6.1.2 ABI acceptance was not executed.'
             find /Applications -maxdepth 1 -name 'Xcode*.app' -print
             # Inspect the supported installation without executing old ABI code.
             xcodebuild -version
@@ -88,13 +89,13 @@ jobs:
             xcrun --sdk iphonesimulator --show-sdk-version
             xcrun simctl list runtimes
             # Only HTTP status/size are logged; never cookies or signed URLs.
-            curl --silent --location --range 0-0 --max-time 20 --output /dev/null --write-out 'official_xcode_archive_http=%{http_code}; probe_bytes=%{size_download}\n' 'https://download.developer.apple.com/Developer_Tools/Xcode_15.4/Xcode_15.4.xip' || true
+            curl --silent --location --range 0-0 --max-time 20 --output /dev/null --write-out 'official_xcode_archive_http=%{http_code}; content_type=%{content_type}; probe_bytes=%{size_download}; archive_verified=false\n' 'https://download.developer.apple.com/Developer_Tools/Xcode_15.4/Xcode_15.4.xip' || true
             exit 1
           fi
           export DEVELOPER_DIR="$PINNED"
           xcodebuild -version
-          test "$(xcrun --sdk iphonesimulator --show-sdk-version)" = 17.5
-          xcrun swiftc --version | grep -F 'Swift version 5.10'
+          test "$(xcrun --sdk iphonesimulator --show-sdk-version)" = 18.5
+          xcrun swiftc --version | grep -F 'Swift version 6.1.2'
           printf 'DEVELOPER_DIR=%s\n' "$DEVELOPER_DIR" >> "$GITHUB_ENV"
       - name: Preserve pinned toolchain diagnostics
         if: always()
@@ -207,8 +208,8 @@ jobs:
             exit 0
           fi
           printf 'Simulator SDK: %s\n' "$VERSION" >> "$OUT/versions.txt"
-          test "$VERSION" = 17.5
-          grep -F 'Swift version 5.10' "$OUT/versions.txt"
+          test "$VERSION" = 18.5
+          grep -F 'Swift version 6.1.2' "$OUT/versions.txt"
           TARGET="arm64-apple-ios${VERSION%%.*}.0-simulator"
           for MODULE in FamilyControls DeviceActivity ManagedSettings; do
             FRAMEWORK="$SDK/System/Library/Frameworks/$MODULE.framework"
@@ -391,7 +392,7 @@ jobs:
           SDK=$(xcrun --sdk iphonesimulator --show-sdk-path)
           source "$RUNNER_TEMP/ios-probe-build-env.sh"
           # Inspection only. No authored Swift/C/ObjC and no generic Set call.
-          xcrun swift-api-digester -dump-sdk -module Swift -sdk "$SDK" -target arm64-apple-ios17.5-simulator -o "$RUNNER_TEMP/Swift.json"
+          xcrun swift-api-digester -dump-sdk -module Swift -sdk "$SDK" -target arm64-apple-ios18.5-simulator -o "$RUNNER_TEMP/Swift.json"
           jq '[.. | objects | select(.kind? == "TypeDecl" and (.name? | IN("Set", "Hashable", "Equatable"))) | {name, usr, declKind, genericSig, conformances, members: [.children[]? | select(.name? | IN("count", "hash", "hashValue", "=="))]}]' "$RUNNER_TEMP/Swift.json" > "$OUT/Swift-set-selected-declarations.json"
           jq '[.. | objects | select(.kind? == "TypeDecl" and .name? == "Application") | {name, usr, declKind, genericSig, conformances, members: [.children[]? | select(.name? | IN("hash", "hashValue", "=="))]}]' "$RUNNER_TEMP/ManagedSettings.json" > "$OUT/ManagedSettings-Application-selected-declarations.json"
           APPLICATION_USR=$(jq -er '[.[] | select(.declKind == "Struct" and .genericSig == null and .usr == "s:15ManagedSettings11ApplicationV") | .usr] | if length == 1 then .[0] else error("expected non-generic public Application struct") end' "$OUT/ManagedSettings-Application-selected-declarations.json")
@@ -432,27 +433,27 @@ jobs:
           SELECTION_COUNT_ABI_MANIFEST=$(cat "$OUT/selection-count-abi-manifest.txt")
           export APPLICATION_METADATA_SYMBOL HASHABLE_PROTOCOL_SYMBOL SELECTION_COUNT_ABI_MANIFEST SET_METADATA_SYMBOL SET_DESCRIPTOR_SYMBOL SET_COUNT_SYMBOL APPLICATIONS_SYMBOL
           declare -p APPLICATION_METADATA_SYMBOL HASHABLE_PROTOCOL_SYMBOL SELECTION_COUNT_ABI_MANIFEST SET_METADATA_SYMBOL SET_DESCRIPTOR_SYMBOL SET_COUNT_SYMBOL APPLICATIONS_SYMBOL >> "$RUNNER_TEMP/ios-probe-build-env.sh"
-          # Primary Swift 5.10 lowering/layout evidence accompanies actual SDK
+          # Primary Swift 6.1.2 lowering/layout evidence accompanies actual SDK
           # prefixes. Rust anchors those bytes and runtime descriptor/layout
           # BEFORE enabling any newly reviewed public getter/count call.
           for FILE in stdlib/public/core/Set.swift lib/IRGen/GenCall.cpp lib/IRGen/GenType.cpp lib/IRGen/GenProto.cpp lib/SIL/IR/SILFunctionType.cpp include/swift/ABI/GenericContext.h include/swift/ABI/Metadata.h include/swift/Runtime/Metadata.h; do
             NAME=${FILE##*/}
             if [ "$FILE" = include/swift/Runtime/Metadata.h ]; then NAME=Runtime-Metadata.h; fi
-            curl --fail --silent --show-error --location "https://raw.githubusercontent.com/swiftlang/swift/swift-5.10-RELEASE/$FILE" -o "$RUNNER_TEMP/count-$NAME"
+            curl --fail --silent --show-error --location "https://raw.githubusercontent.com/swiftlang/swift/swift-6.1.2-RELEASE/$FILE" -o "$RUNNER_TEMP/count-$NAME"
             awk '/var count:|public struct Set|@frozen|emitPolymorphicArguments|emitGenericArguments|emitTypeMetadataRef|GenericMetadataAccessFunction|MetadataAccessFunction|TargetWitnessTable|TargetGenericContextDescriptorHeader|NumKeyArguments|TargetStructDescriptor|TargetStructMetadata|hasSelfContextParameter|NativeConventionSchema::NativeConventionSchema|DefaultConventions|enumerateUnfulfilledRequirements|PolymorphicConvention::considerParameter/ { remaining=48 } remaining > 0 { line=NR ":" $0; bytes+=length(line)+1; if (bytes <= 48000) print line; remaining-- }' "$RUNNER_TEMP/count-$NAME" > "$OUT/selection-count-primary-$NAME.txt"
           done
           TEST_HEADERS="$(xcode-select -p)/Platforms/iPhoneSimulator.platform/Developer/Library/Frameworks/XCTest.framework/Headers"
           grep -R -n -A 4 -B 2 -E 'isHittable|typeText:|NSUInteger.*count|firstMatch|XCUIElementQuery.*(cells|buttons|searchFields|textFields)' "$TEST_HEADERS" > "$OUT/xctest-selection-control-headers.txt"
           # Semantic method types from actual SDK Clang AST, independent of
           # property spelling, annotations, horizontal spacing or line breaks.
-          xcrun clang -target arm64-apple-ios17.5-simulator -isysroot "$SDK" -F "$(dirname "$(dirname "$TEST_HEADERS")")" -x objective-c -fsyntax-only -Xclang -ast-dump=json "$TEST_HEADERS/XCTest.h" > "$RUNNER_TEMP/xctest-selection-ast.json"
+          xcrun clang -target arm64-apple-ios18.5-simulator -isysroot "$SDK" -F "$(dirname "$(dirname "$TEST_HEADERS")")" -x objective-c -fsyntax-only -Xclang -ast-dump=json "$TEST_HEADERS/XCTest.h" > "$RUNNER_TEMP/xctest-selection-ast.json"
           jq '[.. | objects | select(.kind? == "ObjCMethodDecl" and (.name? | IN("isHittable", "cells", "buttons", "otherElements", "staticTexts", "searchFields", "textFields", "count", "firstMatch", "typeText:", "label", "debugDescription", "UTF8String", "coordinateWithNormalizedOffset:"))) | {name, instance, returnType, parameters: [.inner[]? | select(.kind == "ParmVarDecl") | .type.qualType]}] | unique' "$RUNNER_TEMP/xctest-selection-ast.json" > "$OUT/xctest-selection-method-types.json"
           # UI actions may be declared in an Objective-C category, not the class
           # body. Include the exact coordinate header and preserve declaration
           # context; never infer a message type from an unrelated class.
           grep -n -A 6 -B 2 -E 'coordinateWithNormalizedOffset:' "$TEST_HEADERS/XCUIElement.h" > "$OUT/xctest-coordinate-headers.txt"
           grep -n -A 6 -B 2 -E 'XCUICoordinate|\(void\)tap' "$TEST_HEADERS/XCUICoordinate.h" >> "$OUT/xctest-coordinate-headers.txt"
-          xcrun clang -target arm64-apple-ios17.5-simulator -isysroot "$SDK" -F "$(dirname "$(dirname "$TEST_HEADERS")")" -x objective-c -fsyntax-only -Xclang -ast-dump=json "$TEST_HEADERS/XCUICoordinate.h" > "$RUNNER_TEMP/xctest-coordinate-ast.json"
+          xcrun clang -target arm64-apple-ios18.5-simulator -isysroot "$SDK" -F "$(dirname "$(dirname "$TEST_HEADERS")")" -x objective-c -fsyntax-only -Xclang -ast-dump=json "$TEST_HEADERS/XCUICoordinate.h" > "$RUNNER_TEMP/xctest-coordinate-ast.json"
           jq '[.. | objects | select(.kind? == "ObjCInterfaceDecl" or .kind? == "ObjCCategoryDecl" or .kind? == "ObjCProtocolDecl") | {kind, name, interface, methods: [.inner[]? | select(.kind == "ObjCMethodDecl" and .name == "tap") | {name, instance, returnType, parameters: [.inner[]? | select(.kind == "ParmVarDecl") | .type.qualType]}]} | select(.methods | length > 0)]' "$RUNNER_TEMP/xctest-coordinate-ast.json" > "$OUT/xctest-coordinate-declaration-contexts.json"
           jq '[.[] | select((.kind == "ObjCInterfaceDecl" and .name == "XCUICoordinate") or (.kind == "ObjCCategoryDecl" and .interface.name == "XCUICoordinate")) | .methods[]] | unique' "$OUT/xctest-coordinate-declaration-contexts.json" > "$OUT/xctest-coordinate-method-types.json"
           jq -e 'def abi_type: gsub("(_Nullable|_Nonnull|_Null_unspecified)"; "") | gsub("[[:space:]]+"; " ") | gsub("^ | $"; ""); [.[] | select(.name == "coordinateWithNormalizedOffset:" and .instance == true and (.returnType.qualType | abi_type) == "XCUICoordinate *" and .parameters == ["CGVector"])] | length > 0' "$OUT/xctest-selection-method-types.json"
@@ -508,7 +509,7 @@ jobs:
           RUNTIME_HEADER="$SDK/usr/include/objc/runtime.h"
           require_runtime_function() {
             local SYMBOL=$1 EXPECTED=$2 RAW_AST="$RUNNER_TEMP/runtime-$1-ast.json" SELECTED="$OUT/runtime-$1-signature.json"
-            xcrun clang -target arm64-apple-ios17.5-simulator -isysroot "$SDK" -x objective-c -fsyntax-only -Wno-pragma-once-outside-header -Xclang -ast-dump=json -Xclang "-ast-dump-filter=$SYMBOL" "$RUNTIME_HEADER" > "$RAW_AST"
+            xcrun clang -target arm64-apple-ios18.5-simulator -isysroot "$SDK" -x objective-c -fsyntax-only -Wno-pragma-once-outside-header -Xclang -ast-dump=json -Xclang "-ast-dump-filter=$SYMBOL" "$RUNTIME_HEADER" > "$RAW_AST"
             jq -s --arg symbol "$SYMBOL" '[.[] | select(.kind == "FunctionDecl" and .name == $symbol) | {name, type: .type.qualType, parameters: [.inner[]? | select(.kind == "ParmVarDecl") | .type.qualType]}] | if length > 0 then . else error("public runtime declaration absent") end' "$RAW_AST" > "$SELECTED"
             jq -e --arg expected "$EXPECTED" 'def abi_type: gsub("(_Nullable|_Nonnull|_Null_unspecified)"; "") | gsub("[[:space:]]+"; " ") | gsub("^ | $"; "") | gsub(" [)]"; ")"); all(.[]; (.type | abi_type) == $expected and (.parameters | length) == 1)' "$SELECTED"
             printf 'public_runtime_function=%s; semantic_type=%s\n' "$SYMBOL" "$EXPECTED" >> "$OUT/picker-hosting-uikit-declarations.txt"
@@ -518,7 +519,7 @@ jobs:
           GEOMETRY="$SDK/System/Library/Frameworks/CoreGraphics.framework/Headers/CGGeometry.h"
           require_record() {
             local SYMBOL=$1 EXPECTED=$2 RAW_AST="$RUNNER_TEMP/record-$1-ast.json" SELECTED="$OUT/record-$1-layout.json"
-            xcrun clang -target arm64-apple-ios17.5-simulator -isysroot "$SDK" -x objective-c -fsyntax-only -Wno-pragma-once-outside-header -Xclang -ast-dump=json -Xclang "-ast-dump-filter=$SYMBOL" "$GEOMETRY" > "$RAW_AST"
+            xcrun clang -target arm64-apple-ios18.5-simulator -isysroot "$SDK" -x objective-c -fsyntax-only -Wno-pragma-once-outside-header -Xclang -ast-dump=json -Xclang "-ast-dump-filter=$SYMBOL" "$GEOMETRY" > "$RAW_AST"
             jq -s --arg symbol "$SYMBOL" '[.[] | select(.kind == "RecordDecl" and .name == $symbol and .completeDefinition == true) | {name, tag: .tagUsed, unsafe_layout_attributes: [.inner[]? | select(.kind == "PackedAttr" or .kind == "AlignedAttr") | .kind], fields: [.inner[]? | select(.kind == "FieldDecl") | {name, type: (.type.desugaredQualType // .type.qualType), bitfield: (.isBitfield // false)}]}] | if length > 0 then . else error("public geometry record absent") end' "$RAW_AST" > "$SELECTED"
             jq -e --argjson expected "$EXPECTED" 'all(.[]; .tag == "struct" and .unsafe_layout_attributes == [] and [.fields[] | {name, type}] == $expected and all(.fields[]; .bitfield == false))' "$SELECTED"
           }
@@ -533,14 +534,14 @@ jobs:
           # Primary compiler rules: generic class metatype fulfills Content and
           # Content:View, so allocating init has no trailing generic arguments.
           # Keep the exact source/version for the parent's unsafe-call review.
-          curl --fail --silent --show-error --location 'https://raw.githubusercontent.com/swiftlang/swift/swift-5.10-RELEASE/lib/IRGen/GenProto.cpp' -o "$RUNNER_TEMP/hosting-GenProto.cpp"
+          curl --fail --silent --show-error --location 'https://raw.githubusercontent.com/swiftlang/swift/swift-6.1.2-RELEASE/lib/IRGen/GenProto.cpp' -o "$RUNNER_TEMP/hosting-GenProto.cpp"
           sed -n '197,245p;307,312p;383,446p;3847,3908p' "$RUNNER_TEMP/hosting-GenProto.cpp" > "$OUT/picker-hosting-generic-abi-primary.txt"
           grep -F 'Thick metatypes are sources of metadata.' "$OUT/picker-hosting-generic-abi-primary.txt"
           grep -F 'enumerateUnfulfilledRequirements' "$OUT/picker-hosting-generic-abi-primary.txt"
-          curl --fail --silent --show-error --location 'https://raw.githubusercontent.com/swiftlang/swift/swift-5.10-RELEASE/include/swift/Runtime/HeapObject.h' -o "$RUNNER_TEMP/hosting-HeapObject.h"
+          curl --fail --silent --show-error --location 'https://raw.githubusercontent.com/swiftlang/swift/swift-6.1.2-RELEASE/include/swift/Runtime/HeapObject.h' -o "$RUNNER_TEMP/hosting-HeapObject.h"
           sed -n '686,690p' "$RUNNER_TEMP/hosting-HeapObject.h" > "$OUT/picker-hosting-release-primary.txt"
           grep -Fx 'void swift_unknownObjectRelease(void *value);' "$OUT/picker-hosting-release-primary.txt"
-          curl --fail --silent --show-error --location 'https://raw.githubusercontent.com/swiftlang/swift/swift-5.10-RELEASE/include/swift/Runtime/RuntimeFunctions.def' -o "$RUNNER_TEMP/hosting-RuntimeFunctions.def"
+          curl --fail --silent --show-error --location 'https://raw.githubusercontent.com/swiftlang/swift/swift-6.1.2-RELEASE/include/swift/Runtime/RuntimeFunctions.def' -o "$RUNNER_TEMP/hosting-RuntimeFunctions.def"
           sed -n '335,342p' "$RUNNER_TEMP/hosting-RuntimeFunctions.def" >> "$OUT/picker-hosting-release-primary.txt"
           grep -Fx '         C_CC, AlwaysAvailable,' "$OUT/picker-hosting-release-primary.txt"
       - name: Build and sign the Rust Simulator probe
@@ -667,7 +668,7 @@ jobs:
               A00000000000000000000006 = {isa = XCConfigurationList; buildConfigurations = (A00000000000000000000011); defaultConfigurationIsVisible = 0; defaultConfigurationName = Debug;};
               A00000000000000000000007 = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (A00000000000000000000015, A00000000000000000000012); runOnlyForDeploymentPostprocessing = 0;};
               A00000000000000000000008 = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "authorization-center-probe.app"; sourceTree = BUILT_PRODUCTS_DIR;};
-              A00000000000000000000009 = {isa = XCBuildConfiguration; buildSettings = {SDKROOT = iphonesimulator; IPHONEOS_DEPLOYMENT_TARGET = 17.5; CLANG_ENABLE_MODULES = YES;}; name = Debug;};
+              A00000000000000000000009 = {isa = XCBuildConfiguration; buildSettings = {SDKROOT = iphonesimulator; IPHONEOS_DEPLOYMENT_TARGET = 18.5; CLANG_ENABLE_MODULES = YES;}; name = Debug;};
               A00000000000000000000010 = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = libprobe.a; sourceTree = "<group>";};
               A00000000000000000000011 = {isa = XCBuildConfiguration; baseConfigurationReference = A00000000000000000000026; buildSettings = {ARCHS = arm64; CODE_SIGN_STYLE = Automatic; CODE_SIGN_IDENTITY = "-"; CODE_SIGN_ENTITLEMENTS = Entitlements.plist; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = Info.plist; PRODUCT_BUNDLE_IDENTIFIER = com.autodevjapan.phonecontrol1614abiprobe; PRODUCT_NAME = "authorization-center-probe"; CURRENT_PROJECT_VERSION = 1; MARKETING_VERSION = 0.1.0; TARGETED_DEVICE_FAMILY = 1; SUPPORTED_PLATFORMS = iphonesimulator; SKIP_INSTALL = NO; LIBRARY_SEARCH_PATHS = ("$(inherited)", "$(SRCROOT)"); LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "/usr/lib/swift");}; name = Debug;};
               A00000000000000000000012 = {isa = PBXBuildFile; fileRef = A00000000000000000000010;};
