@@ -4454,10 +4454,38 @@ mod ui_authorization_test {
                 return;
             };
             action(search.0, c"tap");
-            let fixture_name = string(c"Phone Control Fixture");
             let type_text: unsafe extern "C" fn(Id, Sel, Id) =
                 std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
-            type_text(search.0, sel_registerName(c"typeText:".as_ptr()), fixture_name.0);
+            let string_class = objc_getClass(c"NSString".as_ptr());
+            if string_class.is_null() { fail(test, c"NSString class unavailable"); return; }
+            let is_string: unsafe extern "C" fn(Id, Sel, Id) -> bool =
+                std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+            let initial_value = retained_object(search.0, c"value");
+            if initial_value.0.is_null() || !is_string(initial_value.0, sel_registerName(c"isKindOfClass:".as_ptr()), string_class) {
+                fail(test, c"Search value is not a string; input unverified"); return;
+            }
+            let initial_bytes = utf8_string(initial_value.0);
+            if initial_bytes.is_null() || !std::ffi::CStr::from_ptr(initial_bytes).to_bytes().is_empty() {
+                fail(test, c"Search field not initially empty; no append attempted"); return;
+            }
+            // The prior real run dropped a character during bulk typing.
+            // Pace known fixture input, then verify the public field value.
+            for byte in b"Phone Control Fixture" {
+                let one = [*byte as std::ffi::c_char, 0];
+                let character = string(std::ffi::CStr::from_ptr(one.as_ptr()));
+                type_text(search.0, sel_registerName(c"typeText:".as_ptr()), character.0);
+                std::thread::sleep(std::time::Duration::from_millis(150));
+            }
+            let entered = retained_object(search.0, c"value");
+            if entered.0.is_null() || !is_string(entered.0, sel_registerName(c"isKindOfClass:".as_ptr()), string_class) {
+                fail(test, c"Search value is not a string; input unverified"); return;
+            }
+            let bytes = utf8_string(entered.0);
+            if bytes.is_null() || std::ffi::CStr::from_ptr(bytes).to_bytes() != b"Phone Control Fixture" {
+                fail(test, c"Owned fixture search input differs; availability unverified");
+                return;
+            }
+            println!("XCTest consent-selection: owned_fixture_search_value_verified=true");
             println!("XCTest consent-selection: owned_fixture_search_submitted=true; picker_availability_unverified=true");
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(12);
             let mut candidate = None;
