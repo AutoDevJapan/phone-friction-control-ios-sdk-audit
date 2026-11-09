@@ -44,7 +44,31 @@ unsafe extern "C" fn rust_context_destroy_c(object: *mut c_void) {
  }
  DEALLOCS.fetch_add(1, Ordering::SeqCst);
 }
+#[link(name="SwiftUI", kind="framework")]
+unsafe extern "C" {}
+unsafe extern "C" { fn getpagesize()->i32; fn dlsym(handle:*mut c_void, name:*const std::ffi::c_char)->*mut c_void; }
+fn inspect_binding_entry() {
+ unsafe {
+  let page=getpagesize(); assert!(page>0); let page=page as usize;
+  for (label,name) in [
+   ("bool_metadata_data", c"$sSbN"),
+   ("binding_metadata", c"$s7SwiftUI7BindingVMa"),
+   ("binding_init", c"$s7SwiftUI7BindingV3get3setACyxGxyc_yxctcfC"),
+   ("binding_get", c"$s7SwiftUI7BindingV12wrappedValuexvg"),
+   ("binding_set", c"$s7SwiftUI7BindingV12wrappedValuexvs"),
+  ] {
+   let entry=dlsym(std::ptr::without_provenance_mut(usize::MAX-1),name.as_ptr());
+   assert!(!entry.is_null(), "public Binding symbol missing");
+   // One page-local prefix only; never call these unreviewed entries.
+   let count=64usize.min(page-entry.addr()%page);
+   print!("binding_entry={label}; bytes=");
+   for b in std::slice::from_raw_parts(entry.cast::<u8>(),count) { print!("{b:02x}"); }
+   println!();
+  }
+ }
+}
 fn main() {
+ inspect_binding_entry();
  assert_eq!(std::mem::offset_of!(FullMetadata, local),24);
  assert_eq!(std::mem::offset_of!(FullMetadata, destroy),8);
  unsafe {

@@ -33,10 +33,19 @@ jobs:
           xcrun swift-api-digester -dump-sdk -module SwiftUICore -sdk "$SDK" -target arm64-apple-macos15.0 -o "$RUNNER_TEMP/context-SwiftUICore.json"
           jq '[.. | objects | select(.kind? == "TypeDecl" and .usr? == "s:7SwiftUI7BindingV") | {name, usr, genericSig, members: [.children[]? | select(.name? | IN("init", "wrappedValue"))]}]' "$RUNNER_TEMP/context-SwiftUICore.json" > "$OUT/binding-native-declarations.txt"
           jq -e 'length == 1 and .[0].name == "Binding" and .[0].genericSig == "<Value>"' "$OUT/binding-native-declarations.txt"
+          TBD="$SDK/System/Library/Frameworks/SwiftUICore.framework/SwiftUICore.tbd"
+          test -s "$TBD"
+          for SYMBOL in '$s7SwiftUI7BindingVMa' '$s7SwiftUI7BindingV3get3setACyxGxyc_yxctcfC' '$s7SwiftUI7BindingV12wrappedValuexvg' '$s7SwiftUI7BindingV12wrappedValuexvs'; do
+            grep -F "$SYMBOL" "$TBD" > /dev/null
+            printf 'public_export_verified=%s\n' "$SYMBOL" >> "$OUT/binding-public-exports.txt"
+          done
           STATUS=0
           perl -e 'alarm 20; exec @ARGV; die "exec failed\n"' "$OUT/context-owner" > "$OUT/result.txt" 2>&1 || STATUS=$?
           printf 'exit_status=%s\n' "$STATUS" > "$OUT/status.txt"
           test "$STATUS" = 0
+          for LABEL in bool_metadata_data binding_metadata binding_init binding_get binding_set; do
+            test "$(grep -Ec "^binding_entry=$LABEL; bytes=[0-9a-f]+$" "$OUT/result.txt")" = 1
+          done
           for LINE in rust_owner_drop_calls=1 context_destroy_calls=1 context_dealloc_calls=1 copy_survived_original_release=true binding_verified=false full_teardown_verified=false; do
             test "$(grep -Fxc "$LINE" "$OUT/result.txt")" = 1
           done
