@@ -2,6 +2,10 @@ name: Manual iOS SDK audit
 on:
   workflow_dispatch:
     inputs:
+      app_simulator_launch:
+        description: Build the product for the iOS Simulator, launch it and capture the first screen
+        type: boolean
+        default: false
       context_owner_simulator:
         description: Run context ownership on an actual fresh iOS Simulator
         type: boolean
@@ -182,7 +186,7 @@ jobs:
           if-no-files-found: error
 
   sdk-audit:
-    if: ${{ !inputs.context_owner_probe && !inputs.context_owner_simulator }}
+    if: ${{ !inputs.context_owner_probe && !inputs.context_owner_simulator && !inputs.app_simulator_launch }}
     runs-on: macos-15
     # The measured consent run reached XCTest after 9m40s of SDK/build/boot.
     # Preserve the existing 180s test limit and leave time to export evidence.
@@ -1426,4 +1430,58 @@ jobs:
             ${{ runner.temp }}/ios-sdk-audit/FamilyControls-selected-declarations.json
             ${{ runner.temp }}/ios-sdk-audit/SwiftUI-selected-declarations.json
           retention-days: 1
+          if-no-files-found: error
+
+  app-simulator:
+    if: inputs.app_simulator_launch
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: AutoDevJapan/phone-friction-control
+          ref: edff2beb21e7ef7924ba0e04a64cd575f6237c95
+          path: app
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+          targets: aarch64-apple-ios-sim
+      - name: Build, install and launch the product on the iOS Simulator
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DEVELOPER_DIR=/Applications/Xcode_16.4.app/Contents/Developer
+          OUT="$RUNNER_TEMP/app-simulator"
+          mkdir -p "$OUT/Product.app"
+          xcodebuild -version > "$OUT/versions.txt"
+          rustc --version >> "$OUT/versions.txt"
+          git -C app apply ../tools/ios-app-cargo-target-split.patch
+          (cd app && cargo build --release --bin phone-friction-control-preview --features desktop-preview --target aarch64-apple-ios-sim 2>&1 | tail -n 40) > "$OUT/build.txt"
+          cp app/target/aarch64-apple-ios-sim/release/phone-friction-control-preview "$OUT/Product.app/product"
+          printf '<?xml version="1.0"?><plist version="1.0"><dict><key>CFBundleIdentifier</key><string>com.autodevjapan.phonefrictioncontrol.simulator</string><key>CFBundleName</key><string>PhoneFrictionControl</string><key>CFBundleExecutable</key><string>product</string><key>CFBundlePackageType</key><string>APPL</string><key>CFBundleVersion</key><string>1</string><key>CFBundleShortVersionString</key><string>0.1.0</string><key>MinimumOSVersion</key><string>18.5</string><key>UIDeviceFamily</key><array><integer>1</integer></array><key>UILaunchScreen</key><dict/><key>CFBundleSupportedPlatforms</key><array><string>iPhoneSimulator</string></array></dict></plist>\n' > "$OUT/Product.app/Info.plist"
+          codesign --sign - "$OUT/Product.app"
+          RUNTIME=$(xcrun simctl list runtimes -j | jq -er '[.runtimes[] | select(.isAvailable and .version == "18.5" and (.identifier | contains("iOS"))) | .identifier] | if length == 1 then .[0] else error("runtime unavailable") end')
+          SIM_ID=$(xcrun simctl create product-audit com.apple.CoreSimulator.SimDeviceType.iPhone-15 "$RUNTIME")
+          trap 'xcrun simctl shutdown "$SIM_ID" || true; xcrun simctl delete "$SIM_ID" || true' EXIT
+          xcrun simctl boot "$SIM_ID"
+          xcrun simctl bootstatus "$SIM_ID" -b
+          xcrun simctl install "$SIM_ID" "$OUT/Product.app"
+          BID=com.autodevjapan.phonefrictioncontrol.simulator
+          xcrun simctl launch "$SIM_ID" "$BID" > "$OUT/launch.txt" 2>&1 || true
+          sleep 20
+          xcrun simctl spawn "$SIM_ID" launchctl list > "$OUT/launchctl.txt" 2>&1 || true
+          grep -c "$BID" "$OUT/launchctl.txt" > "$OUT/running_count.txt" || true
+          xcrun simctl io "$SIM_ID" screenshot "$OUT/first.png" || true
+          xcrun simctl spawn "$SIM_ID" log show --last 2m --style compact --predicate 'process == "product"' 2>&1 | tail -n 80 > "$OUT/log.txt" || true
+          find ~/Library/Logs/DiagnosticReports -name 'product*' -maxdepth 1 2>/dev/null | head -n 3 > "$OUT/crash.txt" || true
+          test -s "$OUT/first.png"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: product-simulator-launch
+          path: |
+            ${{ runner.temp }}/app-simulator/*.txt
+            ${{ runner.temp }}/app-simulator/first.png
+          retention-days: 3
           if-no-files-found: error
