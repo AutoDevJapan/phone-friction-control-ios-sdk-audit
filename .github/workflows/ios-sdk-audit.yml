@@ -897,7 +897,21 @@ jobs:
           if [ '${{ inputs.selection_inspection_mode }}' != none ] && [ '${{ inputs.selection_inspection_mode }}' != consent-selection-acceptance ]; then
             # Preserve partial selection diagnostics even when the process fails.
             LAUNCH_STATUS=0
-            xcrun simctl launch --console "$SIM_ID" com.autodevjapan.phonecontrol1614abiprobe > "$OUT/singleton-runtime.txt" 2>&1 || LAUNCH_STATUS=$?
+            xcrun simctl launch --console "$SIM_ID" com.autodevjapan.phonecontrol1614abiprobe > "$OUT/singleton-runtime.txt" 2>&1 &
+            LAUNCH_PID=$!
+            for ((ATTEMPT=0; ATTEMPT<180; ATTEMPT++)); do
+              if ! kill -0 "$LAUNCH_PID" 2>/dev/null; then break; fi
+              sleep 1
+            done
+            if kill -0 "$LAUNCH_PID" 2>/dev/null; then
+              printf 'inspection_process_timeout=true\n' >> "$OUT/singleton-runtime.txt"
+              xcrun simctl terminate "$SIM_ID" com.autodevjapan.phonecontrol1614abiprobe || true
+              kill "$LAUNCH_PID" 2>/dev/null || true
+              LAUNCH_STATUS=124
+            fi
+            WAIT_STATUS=0
+            wait "$LAUNCH_PID" || WAIT_STATUS=$?
+            if [ "$LAUNCH_STATUS" = 0 ]; then LAUNCH_STATUS="$WAIT_STATUS"; fi
             grep -E '^(Selection (layout:|box:|entry bytes:|layout inspection complete;)|Binding (control transfer:|accessor inspection complete;))' "$OUT/singleton-runtime.txt" > "$OUT/selection-layout.txt" || true
             if [ '${{ inputs.selection_inspection_mode }}' = picker-entries ]; then
               grep -E '^Picker/hosting (layout:|conformance:|class:|entry bytes:|control transfer:)' "$OUT/singleton-runtime.txt" > "$OUT/picker-hosting-entries.txt" || true
