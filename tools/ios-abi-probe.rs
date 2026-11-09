@@ -4402,7 +4402,7 @@ mod ui_authorization_test {
                     category = available_control(
                         observer,
                         c"Social",
-                        &[c"otherElements", c"cells", c"buttons"],
+                        &[c"otherElements", c"cells", c"buttons", c"staticTexts"],
                     );
                     if category.is_some() {
                         break;
@@ -4415,7 +4415,10 @@ mod ui_authorization_test {
                 fail(test, c"Observed Social disclosure unavailable");
                 return;
             };
-            open_disclosure(category.0);
+            // SDK18.5 exposes the observed category label as StaticText.
+            // Attempt navigation through its text; the unchanged-selection check
+            // below rejects a checkbox/category toggle as navigation.
+            action(category.0, c"tap");
             let Some(after_navigation) = selection_snapshot(ready.0) else {
                 fail(test, c"Post-navigation aggregate unavailable");
                 return;
@@ -4431,7 +4434,7 @@ mod ui_authorization_test {
                 return;
             }
             println!(
-                "XCTest consent-selection: observed_disclosure_navigation=true; navigation_setter_delta=0; navigation_applications_count=0"
+                "XCTest consent-selection: navigation_tap_returned=true; navigation_setter_delta=0; navigation_applications_count=0"
             );
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(12);
             let mut candidate = None;
