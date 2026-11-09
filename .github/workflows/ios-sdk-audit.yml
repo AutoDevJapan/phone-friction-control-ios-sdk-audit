@@ -1457,12 +1457,13 @@ jobs:
           xcodebuild -version > "$OUT/versions.txt"
           rustc --version >> "$OUT/versions.txt"
           git -C app apply ../tools/ios-app-diag-logger-and-target-split.patch
+          git -C app apply ../tools/ios-product-metal-limits.patch
           (cd app && cargo build --release --bin phone-friction-control-preview --features desktop-preview --target aarch64-apple-ios-sim) > "$OUT/build-full.txt" 2>&1
           tail -n 40 "$OUT/build-full.txt" > "$OUT/build.txt"
           cp app/target/aarch64-apple-ios-sim/release/phone-friction-control-preview "$OUT/Product.app/product"
           printf '<?xml version="1.0"?><plist version="1.0"><dict><key>CFBundleIdentifier</key><string>com.autodevjapan.phonefrictioncontrol.simulator</string><key>CFBundleName</key><string>PhoneFrictionControl</string><key>CFBundleExecutable</key><string>product</string><key>CFBundlePackageType</key><string>APPL</string><key>CFBundleVersion</key><string>1</string><key>CFBundleShortVersionString</key><string>0.1.0</string><key>MinimumOSVersion</key><string>18.5</string><key>UIDeviceFamily</key><array><integer>1</integer></array><key>UILaunchScreen</key><dict/><key>CFBundleSupportedPlatforms</key><array><string>iPhoneSimulator</string></array></dict></plist>\n' > "$OUT/Product.app/Info.plist"
           codesign --sign - "$OUT/Product.app"
-          shasum -a 256 "$OUT/Product.app/product" app/Cargo.lock tools/ios-app-diag-logger-and-target-split.patch > "$OUT/build-hashes.txt"
+          shasum -a 256 "$OUT/Product.app/product" app/Cargo.lock tools/ios-app-diag-logger-and-target-split.patch tools/ios-product-metal-limits.patch > "$OUT/build-hashes.txt"
           tar -czf "$OUT/Product.app.tar.gz" -C "$OUT" Product.app
           cp app/Cargo.lock "$OUT/effective-Cargo.lock"
           shasum -a 256 "$OUT/Product.app.tar.gz" > "$OUT/archive-hash.txt"
@@ -1475,8 +1476,11 @@ jobs:
           BID=com.autodevjapan.phonefrictioncontrol.simulator
           export SIMCTL_CHILD_RUST_BACKTRACE=full
           export SIMCTL_CHILD_RUST_LOG=warn,wgpu_core=debug,wgpu_hal=debug,eframe=debug,egui_wgpu=debug,winit=debug
-          export OUT SIM_ID BID
-          source tools/ios-product-exit-stack.sh
+          LAUNCH_STATUS=0
+          perl -e 'alarm 45; exec @ARGV; die "exec failed\n"' xcrun simctl launch --stdout="$OUT/app-stdout.txt" --stderr="$OUT/app-stderr.txt" "$SIM_ID" "$BID" > "$OUT/launch.txt" 2>&1 || LAUNCH_STATUS=$?
+          printf 'launch_status=%s\n' "$LAUNCH_STATUS" > "$OUT/launch_status.txt"
+          PID=$(awk -v b="$BID" 'index($0,b ": ")==1 {p=substr($0,length(b)+3); if(p ~ /^[0-9]+$/) print p}' "$OUT/launch.txt")
+          printf 'pid=%s\n' "$PID" > "$OUT/pid.txt"
           sleep 3
           xcrun simctl io "$SIM_ID" screenshot "$OUT/early.png" || true
           sleep 17
@@ -1487,11 +1491,11 @@ jobs:
           tail -n 80 "$OUT/log-full.txt" > "$OUT/log.txt"
           grep -iE 'exit|terminat|abort|crash|panic|signal|wgpu|adapter|jetsam' "$OUT/log-full.txt" | tail -n 60 > "$OUT/log-exit.txt" || true
           find ~/Library/Logs/DiagnosticReports -name 'product*' -maxdepth 1 2>/dev/null | head -n 3 > "$OUT/crash.txt" || true
-          test "$STATUS" = 0
-          grep -q 'stop reason = breakpoint' "$OUT/exit-stack.txt"
-          printf 'exit_stack_captured=true\nproduct_launch_acceptance=false\n' > "$OUT/diagnostic-result.txt"
-          echo 'Diagnostic run under LLDB; product launch acceptance remains unverified' >&2
-          exit 1
+          test "$LAUNCH_STATUS" = 0
+          [[ "$PID" =~ ^[0-9]+$ ]]
+          test "$(wc -l < "$OUT/same_pid_alive.txt" | tr -d ' ')" = 1
+          test -s "$OUT/first.png"
+          printf 'launch_succeeded=true\nsame_pid_after_20_seconds=true\nproduct_ui_visual_review=pending\n' > "$OUT/launch-result.txt"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
