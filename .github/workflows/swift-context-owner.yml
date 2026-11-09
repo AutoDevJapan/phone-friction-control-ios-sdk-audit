@@ -29,6 +29,10 @@ jobs:
           rustc tools/swift-context-owner-probe.rs --edition 2024 --emit="llvm-ir=$OUT/context.ll,asm=$OUT/context.s,link" -L "native=$SDK/usr/lib/swift" -C link-arg=-Wl,-rpath,/usr/lib/swift -o "$OUT/context-owner"
           otool -L "$OUT/context-owner" > "$OUT/linked-libraries.txt"
           grep -E 'METADATA|declare.*swift_(allocObject|deallocObject|retain|release)|module asm' "$OUT/context.ll" > "$OUT/layout-and-calls.txt"
+          # Collect the actual native SDK Binding boundary before calling it.
+          xcrun swift-api-digester -dump-sdk -module SwiftUICore -sdk "$SDK" -target arm64-apple-macos15.0 -o "$RUNNER_TEMP/context-SwiftUICore.json"
+          jq '[.. | objects | select(.kind? == "TypeDecl" and .usr? == "s:7SwiftUI7BindingV") | {name, usr, genericSig, members: [.children[]? | select(.name? | IN("init", "wrappedValue"))]}]' "$RUNNER_TEMP/context-SwiftUICore.json" > "$OUT/binding-native-declarations.txt"
+          jq -e 'length == 1 and .[0].name == "Binding" and .[0].genericSig == "<Value>"' "$OUT/binding-native-declarations.txt"
           STATUS=0
           perl -e 'alarm 20; exec @ARGV; die "exec failed\n"' "$OUT/context-owner" > "$OUT/result.txt" 2>&1 || STATUS=$?
           printf 'exit_status=%s\n' "$STATUS" > "$OUT/status.txt"
