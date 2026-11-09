@@ -1040,6 +1040,16 @@ mod picker_entry {
         fn getpagesize() -> i32;
     }
 
+    #[repr(C)]
+    struct DlInfo {
+        filename: *const c_char,
+        base: *const c_void,
+        symbol_name: *const c_char,
+        symbol_address: *const c_void,
+    }
+    unsafe extern "C" {
+        fn dladdr(address: *const c_void, information: *mut DlInfo) -> i32;
+    }
     pub(super) fn inspect() {
         let page = unsafe { getpagesize() };
         assert!(page > 0, "invalid Darwin page size");
@@ -1144,6 +1154,22 @@ mod picker_entry {
         ] {
             let entry = resolve(symbol);
             prefix_bytes("Picker/hosting", label, entry, page);
+            if label == "UIHostingController.init(rootView:) allocating" {
+                // The public allocator starts 24 bytes before a page boundary
+                // on SDK18.5. Inspect the next page separately, retaining the
+                // original per-read page bound and the public-symbol origin.
+                let next = page - entry.addr() % page;
+                if next < 512 {
+                    let tail = entry.cast::<u8>().wrapping_add(next).cast::<c_void>();
+                    let mut head_info = DlInfo { filename: std::ptr::null(), base: std::ptr::null(), symbol_name: std::ptr::null(), symbol_address: std::ptr::null() };
+                    let mut tail_info = DlInfo { filename: std::ptr::null(), base: std::ptr::null(), symbol_name: std::ptr::null(), symbol_address: std::ptr::null() };
+                    assert!(unsafe { dladdr(entry, &mut head_info) } != 0
+                        && unsafe { dladdr(tail, &mut tail_info) } != 0
+                        && !head_info.base.is_null() && head_info.base == tail_info.base,
+                        "hosting public continuation image differs");
+                    prefix_bytes("Picker/hosting", &format!("public hosting page continuation offset={next}"), tail, page);
+                }
+            }
             // Stop at the first B/BL or other control edge. Follow one direct
             // same-image target prefix at most, without recursion or invocation.
             // No ADRP reconstruction is used as an address or SDK symbol.
