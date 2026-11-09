@@ -2,6 +2,10 @@ name: Manual iOS SDK audit
 on:
   workflow_dispatch:
     inputs:
+      selection_capture_owner_acceptance:
+        description: Audit captured nonempty Selection lifetime and finite owned UIKit teardown
+        type: boolean
+        default: false
       category_token_metadata_only:
         description: Capture SDK Token generic metadata boundaries without invoking the accessor or getter
         type: boolean
@@ -84,7 +88,7 @@ permissions:
   contents: read
 jobs:
   ownership:
-    if: ${{ inputs.context_owner_probe && !inputs.context_owner_simulator && !inputs.category_token_metadata_only }}
+    if: ${{ inputs.context_owner_probe && !inputs.context_owner_simulator && !inputs.category_token_metadata_only && !inputs.selection_capture_owner_acceptance }}
     runs-on: macos-15
     timeout-minutes: 5
     steps:
@@ -150,7 +154,7 @@ jobs:
           if-no-files-found: error
 
   simulator-owner:
-    if: inputs.context_owner_simulator || inputs.category_token_metadata_only
+    if: ${{ (inputs.context_owner_simulator || inputs.category_token_metadata_only) && !inputs.selection_capture_owner_acceptance }}
     runs-on: macos-15
     timeout-minutes: 8
     steps:
@@ -230,7 +234,7 @@ jobs:
           if-no-files-found: error
 
   sdk-audit:
-    if: ${{ !inputs.context_owner_probe && !inputs.context_owner_simulator && !inputs.category_token_metadata_only && !inputs.app_simulator_launch && !inputs.product_restore_smoke }}
+    if: ${{ inputs.selection_capture_owner_acceptance || (!inputs.context_owner_probe && !inputs.context_owner_simulator && !inputs.category_token_metadata_only && !inputs.app_simulator_launch && !inputs.product_restore_smoke) }}
     runs-on: macos-15
     # The measured consent run reached XCTest after 9m40s of SDK/build/boot.
     # Preserve the existing 180s test limit and leave time to export evidence.
@@ -245,6 +249,13 @@ jobs:
           # validates SDK 18.5 / Swift 6.1.2; runtime guards remain mandatory.
           # Never silently select the runner's default Xcode.
           mkdir -p "$RUNNER_TEMP/ios-sdk-audit"
+          if [ '${{ inputs.selection_capture_owner_acceptance }}' = true ]; then
+            test '${{ inputs.selection_inspection_mode }}' = consent-selection-acceptance
+            test '${{ inputs.category_selection_observation }}' = true
+            test '${{ inputs.category_token_count_acceptance }}' = true
+            for ENABLED in '${{ inputs.authorization_probe }}' '${{ inputs.native_uikit_host }}' '${{ inputs.xcode_signed_host }}' '${{ inputs.ui_consent_test }}' '${{ inputs.ui_continue }}' '${{ inputs.authorization_status_consent_probe }}'; do test "$ENABLED" = true; done
+            for EXCLUDED in '${{ inputs.context_owner_probe }}' '${{ inputs.context_owner_simulator }}' '${{ inputs.category_token_metadata_only }}' '${{ inputs.app_simulator_launch }}' '${{ inputs.product_restore_smoke }}' '${{ inputs.authorization_status_entry_probe }}' '${{ inputs.authorization_status_value_probe }}'; do test "$EXCLUDED" = false; done
+          fi
           exec > >(tee "$RUNNER_TEMP/ios-sdk-audit/pinned-toolchain.txt") 2>&1
           sw_vers
           uname -m
@@ -590,6 +601,11 @@ jobs:
             for ENABLED in '${{ inputs.authorization_probe }}' '${{ inputs.native_uikit_host }}' '${{ inputs.xcode_signed_host }}' '${{ inputs.ui_consent_test }}' '${{ inputs.ui_continue }}' '${{ inputs.authorization_status_consent_probe }}'; do test "$ENABLED" = true; done
             SELECTION_ARGS+=(--cfg category_token_count_acceptance)
           fi
+          if [ '${{ inputs.selection_capture_owner_acceptance }}' = true ]; then
+            SELECTION_ARGS+=(--cfg selection_capture_owner_acceptance)
+            xcrun clang -target arm64-apple-ios18.5-simulator -isysroot "$SDK" -fobjc-arc -Werror -fsyntax-only tools/CapturedSelectionDeclarations.m > "$OUT/captured-selection-sdk-declarations.txt" 2>&1
+            env -u IPHONEOS_DEPLOYMENT_TARGET SDKROOT="$(xcrun --sdk macosx --show-sdk-path)" rustc --edition 2024 tools/check-captured-selection-result.rs -o "$RUNNER_TEMP/check-captured-selection-result"
+          fi
           # Bash preserves export attributes and array elements without eval.
           BUILD_ENV="$RUNNER_TEMP/ios-probe-build-env.sh"
           : > "$BUILD_ENV"
@@ -887,6 +903,7 @@ jobs:
               if [ '${{ inputs.category_selection_observation }}' = true ]; then
                 CATEGORY_TEST_FLAGS=()
                 if [ '${{ inputs.category_token_count_acceptance }}' = true ]; then CATEGORY_TEST_FLAGS=(-DCATEGORY_TOKEN_COUNTS=1); fi
+                if [ '${{ inputs.selection_capture_owner_acceptance }}' = true ]; then CATEGORY_TEST_FLAGS+=(-DCAPTURED_SELECTION_TEARDOWN=1); fi
                 xcrun clang -target arm64-apple-ios18.5-simulator -isysroot "$SDK" -fobjc-arc -fmodules ${CATEGORY_TEST_FLAGS[@]+"${CATEGORY_TEST_FLAGS[@]}"} -F"$DEVELOPER_DIR/Platforms/iPhoneSimulator.platform/Developer/Library/Frameworks" -c tools/PickerCategoryObservation.m -o "$XCODE_ROOT/category-observation.o"
                 printf 'OTHER_LDFLAGS = $(inherited) -F$(PLATFORM_DIR)/Developer/Library/Frameworks %s %s\n' "$UI_NATIVE_LIBS" "$XCODE_ROOT/category-observation.o" > "$XCODE_ROOT/UITest.xcconfig"
               fi
@@ -1070,6 +1087,14 @@ jobs:
               shasum -a 256 tools/ios-abi-probe.rs tools/ios-category-token-count.rs tools/ios-category-token-acceptance.rs tools/PickerCategoryObservation.m .github/workflows/ios-sdk-audit.yml "$PROBE_APP/authorization-center-probe" "$XCODE_ROOT/libui-test.a" "$XCODE_ROOT/category-observation.o"
             } > "$OUT/category-token-count-build.txt"
           fi
+          if [ '${{ inputs.selection_capture_owner_acceptance }}' = true ]; then
+            {
+              printf 'audit_source=%s\nmode=selection_capture_owner_acceptance\ncargo_lock_applicable=false\n' "$(git rev-parse HEAD)"
+              rustc --version --verbose
+              shasum -a 256 tools/ios-abi-probe.rs tools/ios-selection-captured-owner.rs tools/ios-selection-captured-callback.rs tools/ios-selection-captured-guards.rs tools/ios-selection-captured-host.rs tools/ios-selection-captured-ui.rs tools/check-captured-selection-result.rs tools/CapturedSelectionDeclarations.m tools/PickerCategoryObservation.m .github/workflows/ios-sdk-audit.yml "$PROBE_APP/authorization-center-probe" "$XCODE_ROOT/libui-test.a" "$XCODE_ROOT/category-observation.o"
+              shasum -a 256 "$RUNNER_TEMP/check-captured-selection-result"
+            } > "$OUT/captured-selection-build.txt"
+          fi
           TEST_SECONDS=90
           if [ '${{ inputs.selection_inspection_mode }}' = consent-selection-acceptance ]; then TEST_SECONDS=180; fi
           printf 'xctest_started_at=%s\ntest_limit_seconds=%s\n' "$(date -u +%FT%TZ)" "$TEST_SECONDS" > "$OUT/consent-selection-phase.txt"
@@ -1086,7 +1111,7 @@ jobs:
           if [ '${{ inputs.selection_inspection_mode }}' = consent-selection-acceptance ]; then
             printf 'xctest_exit_status=%s\nmac_acceptance_verified=false\n' "$UI_TEST_STATUS" > "$OUT/consent-selection-test-status.txt"
             if DATA=$(xcrun simctl get_app_container "$SIM_ID" com.autodevjapan.phonecontrol1614abiprobe data); then
-              for FILE in public-authorization-result.txt consent-selection-result.txt consent-selection-construction-error.txt consent-selection-picker-code.txt selection-count-entry-prefixes.txt selection-count-layout.txt; do
+              for FILE in public-authorization-result.txt consent-selection-result.txt consent-selection-construction-error.txt consent-selection-picker-code.txt selection-count-entry-prefixes.txt selection-count-layout.txt captured-selection-teardown.txt; do
                 if [ -f "$DATA/Documents/$FILE" ]; then cp "$DATA/Documents/$FILE" "$OUT/$FILE"; fi
               done
             fi
@@ -1137,6 +1162,11 @@ jobs:
                 grep -Fx 'selection_state_pinned=true' "$RESULTS"
                 grep -Fx 'full_teardown_verified=false' "$RESULTS"
                 printf 'xctest_exit_status=0\ncategory_ui_setter_delta_observed=true\ncategory_token_count_verified=true\nselection_snapshot_lifetime_verified=true\nindividual_app_selection_verified=false\ncategory_instance_count_verified=false\nfull_teardown_verified=false\n' > "$OUT/consent-selection-test-status.txt"
+                if [ '${{ inputs.selection_capture_owner_acceptance }}' = true ]; then
+                  grep -Fx 'XCTest consent-selection: owned_teardown_requested=true; target_not_running=true; teardown_file_acceptance_required=true' "$OUT/consent-selection-xctest-observations.txt"
+                  "$RUNNER_TEMP/check-captured-selection-result" "$OUT/captured-selection-teardown.txt" "$RESULTS" > "$OUT/captured-selection-result-gate.txt"
+                  cat "$OUT/captured-selection-result-gate.txt" >> "$OUT/consent-selection-test-status.txt"
+                fi
               else
                 grep -F 'category_token_count_verified=false; individual_app_tap=false' "$OUT/consent-selection-xctest-observations.txt"
                 printf 'xctest_exit_status=0\ncategory_ui_setter_delta_observed=true\ncategory_token_count_verified=false\nindividual_app_selection_verified=false\nfull_teardown_verified=false\n' > "$OUT/consent-selection-test-status.txt"
@@ -1407,6 +1437,7 @@ jobs:
           path: |
             ${{ runner.temp }}/ios-sdk-audit/consent-ui.xcresult
             ${{ runner.temp }}/ios-sdk-audit/consent-selection-*.txt
+            ${{ runner.temp }}/ios-sdk-audit/captured-selection-*.txt
             ${{ runner.temp }}/ios-sdk-audit/fixture-*.txt
             ${{ runner.temp }}/ios-sdk-audit/fixture-signed-entitlements.*
             ${{ runner.temp }}/ios-sdk-audit/consent-selection-*.png
@@ -1559,7 +1590,7 @@ jobs:
           if-no-files-found: error
 
   app-simulator:
-    if: inputs.app_simulator_launch
+    if: ${{ inputs.app_simulator_launch && !inputs.selection_capture_owner_acceptance }}
     runs-on: macos-15
     timeout-minutes: 30
     steps:
@@ -1655,7 +1686,7 @@ jobs:
           if-no-files-found: error
 
   product-restore:
-    if: inputs.product_restore_smoke
+    if: ${{ inputs.product_restore_smoke && !inputs.selection_capture_owner_acceptance }}
     runs-on: macos-15
     timeout-minutes: 15
     steps:

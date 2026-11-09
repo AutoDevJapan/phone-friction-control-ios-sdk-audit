@@ -4,6 +4,10 @@
 #include <stdint.h>
 #include <stdio.h>
 
+#if CAPTURED_SELECTION_TEARDOWN && !CATEGORY_TOKEN_COUNTS
+#error Captured Selection teardown requires public nonempty category-token counts
+#endif
+
 static void keepImage(XCTestCase *test, XCUIApplication *app, NSString *name) {
     XCTAttachment *a = [XCTAttachment attachmentWithScreenshot:app.screenshot];
     a.name = name;
@@ -91,5 +95,17 @@ uint8_t observe_picker_category(XCTestCase *test, XCUIApplication *app) {
            before, after, afterApps);
 #endif
     fflush(stdout);
+#if CAPTURED_SELECTION_TEARDOWN
+    if (verified) {
+        keepImage(test, app, @"owned-selection-before-close");
+        if (!badge.hittable) return 0;
+        [badge tap];
+        BOOL exited = [app waitForState:XCUIApplicationStateNotRunning timeout:25];
+        printf("XCTest consent-selection: owned_teardown_requested=true; target_not_running=%s; teardown_file_acceptance_required=true\n",
+               exited ? "true" : "false");
+        fflush(stdout);
+        if (!exited) return 0;
+    }
+#endif
     return verified ? 1 : 0;
 }

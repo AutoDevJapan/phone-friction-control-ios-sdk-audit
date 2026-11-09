@@ -5,6 +5,12 @@
 #![cfg_attr(not(ui_test_bundle), feature(abi_swift))]
 #![cfg_attr(xcode_host, no_main)]
 
+#[cfg(all(selection_capture_owner_acceptance, not(all(
+    consent_selection_acceptance, category_token_count_acceptance,
+    target_os = "ios", target_env = "sim", target_arch = "aarch64"
+))))]
+compile_error!("captured Selection owners require the explicit SDK18.5 category consent Simulator mode");
+
 // This is a distinct consent process, never an exception for ordinary probes.
 #[cfg(all(
     consent_selection_acceptance,
@@ -1569,6 +1575,15 @@ mod mutable_binding {
         target_os = "ios", target_env = "sim", target_arch = "aarch64"))]
     include!("ios-category-token-acceptance.rs");
 
+    #[cfg(selection_capture_owner_acceptance)]
+    include!("ios-selection-captured-owner.rs");
+    #[cfg(selection_capture_owner_acceptance)]
+    include!("ios-selection-captured-callback.rs");
+    #[cfg(selection_capture_owner_acceptance)]
+    include!("ios-selection-captured-guards.rs");
+    #[cfg(selection_capture_owner_acceptance)]
+    include!("ios-selection-captured-host.rs");
+
     // Every C/Swift boundary saves x20 and LR and has a 16-byte C stack/CFI.
     // Category: C(dst, Bool, entry) -> Swift x8=dst, x0=Bool, no self/metatype.
     // Binding init: C(dst, get, set, metadata, entry) -> x8, x0/NULL,
@@ -2216,6 +2231,7 @@ mod mutable_binding {
             self.0.counts[Count::Active as usize].fetch_sub(1, Ordering::SeqCst);
         }
     }
+    #[cfg(not(selection_capture_owner_acceptance))]
     fn callback(pointer: *mut c_void, context: *mut c_void, getter: bool) {
         // C helpers cannot unwind through Swift. Failed validation emits actual
         // partial counters and exits; no attempt to destroy an unknown foreign
@@ -2296,11 +2312,17 @@ mod mutable_binding {
     }
     #[unsafe(no_mangle)]
     unsafe extern "C" fn rust_mutable_get_helper(dst: *mut c_void, context: *mut c_void) {
+        #[cfg(not(selection_capture_owner_acceptance))]
         callback(dst, context, true);
+        #[cfg(selection_capture_owner_acceptance)]
+        selection_capture_callback(dst, context, true);
     }
     #[unsafe(no_mangle)]
     unsafe extern "C" fn rust_mutable_set_helper(source: *mut c_void, context: *mut c_void) {
+        #[cfg(not(selection_capture_owner_acceptance))]
         callback(source, context, false);
+        #[cfg(selection_capture_owner_acceptance)]
+        selection_capture_callback(source, context, false);
     }
 
     fn word(entry: *const c_void, offset: usize, page: usize) -> u32 {
@@ -2573,7 +2595,11 @@ mod mutable_binding {
     // Every reference reachable by a NULL-context SDK closure has a real static
     // lifetime, even on panic, deferred UIKit release, or a foreign callback.
     // This intentional process pin is NOT a claim of full SDK/Swift teardown.
-    #[cfg(picker_hosting_probe)]
+    #[cfg(all(picker_hosting_probe, selection_capture_owner_acceptance))]
+    pub(super) fn host() -> *mut c_void {
+        selection_capture_host()
+    }
+    #[cfg(all(picker_hosting_probe, not(selection_capture_owner_acceptance)))]
     pub(super) fn host() -> *mut c_void {
         let proof: &'static Arc<Proof> = Box::leak(Box::new(Arc::new(Proof::new())));
         let _deadline = Box::leak(Box::new(Deadline::start(proof.clone())));
@@ -3688,7 +3714,7 @@ mod async_inspection {
     }
 
     #[link(name = "swiftCore")]
-    unsafe extern "Swift" {
+    unsafe extern "C" {
         fn swift_release(object: *mut c_void);
     }
 
@@ -3838,7 +3864,7 @@ mod request_probe {
         fn swift_task_cancel(task: *mut c_void);
     }
     #[link(name = "swiftCore")]
-    unsafe extern "Swift" {
+    unsafe extern "C" {
         fn swift_release(object: *mut c_void);
     }
     #[link(name = "swiftCore")]
@@ -4840,6 +4866,8 @@ mod native_host {
     static CHOICE_ARMED: AtomicBool = AtomicBool::new(false);
     #[cfg(consent_selection_acceptance)]
     static SETTER_BASELINE: AtomicUsize = AtomicUsize::new(0);
+    #[cfg(selection_capture_owner_acceptance)]
+    include!("ios-selection-captured-ui.rs");
     #[link(name = "UIKit", kind = "framework")]
     unsafe extern "C" {
         fn UIApplicationMain(argc: i32, argv: *mut *mut c_char, principal: Id, delegate: Id)
@@ -4863,7 +4891,7 @@ mod native_host {
         #[cfg(ui_test_host)]
         fn objc_release(object: Id);
     }
-    #[cfg(all(picker_hosting_probe, not(consent_selection_acceptance)))]
+    #[cfg(all(picker_hosting_probe, any(not(consent_selection_acceptance), selection_capture_owner_acceptance)))]
     #[link(name = "swiftCore")]
     unsafe extern "C" {
         // Swift 5.10 RuntimeFunctions.def:336 C_CC, VoidTy, one unknown
@@ -5018,6 +5046,8 @@ mod native_host {
     }
     #[cfg(consent_selection_acceptance)]
     pub(super) fn selection_updated() {
+        #[cfg(selection_capture_owner_acceptance)]
+        if CAPTURE_UI_CLOSING.load(Ordering::Acquire) { return; }
         let mut evidence = super::mutable_binding::selection_evidence();
         let calls = super::mutable_binding::setter_calls();
         let armed = CHOICE_ARMED.load(Ordering::Acquire);
@@ -5056,6 +5086,8 @@ mod native_host {
     #[cfg(ui_test_host)]
     unsafe extern "C" fn request_clicked(_: Id, _: Sel, _: Id) {
         if std::env::var_os("PHONE_CONTROL_ORDINARY_FIXTURE").is_some() { return; }
+        #[cfg(selection_capture_owner_acceptance)]
+        if capture_ui_close_if_ready() { return; }
         if !REQUESTED.swap(true, Ordering::AcqRel) {
             start_request(super::inspect_singleton());
         }
@@ -5104,6 +5136,12 @@ mod native_host {
             )
         };
         assert!(!controller.is_null());
+        #[cfg(selection_capture_owner_acceptance)]
+        {
+            assert!(CAPTURE_INITIAL_CONTROLLER.swap(controller.addr(), Ordering::AcqRel) == 0);
+            capture_weak_record(0, controller);
+            capture_weak_record(2, view_window);
+        }
         #[cfg(ui_test_host)]
         unsafe {
             let create: unsafe extern "C" fn(Id, Sel, isize) -> Id =
@@ -5138,6 +5176,8 @@ mod native_host {
             );
             send_id(send0(controller, c"view"), c"addSubview:", button);
             REQUEST_BUTTON.store(button.addr(), Ordering::Release);
+            #[cfg(selection_capture_owner_acceptance)]
+            capture_weak_record(3, button);
         }
         unsafe {
             send_id(view_window, c"setRootViewController:", controller);
@@ -5262,7 +5302,22 @@ mod native_host {
             assert!(!window.is_null());
             WINDOW.store(window.addr(), Ordering::Release);
             HOSTING_CONTROLLER.store(controller.addr(), Ordering::Release);
+            #[cfg(selection_capture_owner_acceptance)]
+            let button_transfer = {
+                capture_weak_record(1, controller);
+                let button = objc_retain(REQUEST_BUTTON.load(Ordering::Acquire) as Id);
+                assert!(!button.is_null());
+                CAPTURE_BUTTON_TEMP_RETAINS.fetch_add(1, Ordering::SeqCst);
+                button
+            };
             send_id(window, c"setRootViewController:", controller);
+            #[cfg(selection_capture_owner_acceptance)]
+            {
+                let original = CAPTURE_INITIAL_CONTROLLER.swap(0, Ordering::AcqRel) as Id;
+                assert!(!original.is_null());
+                objc_release(original);
+                CAPTURE_INITIAL_RELEASES.fetch_add(1, Ordering::SeqCst);
+            }
             send_void(window, c"makeKeyAndVisible");
             send_void(send0(controller, c"view"), c"layoutIfNeeded");
             #[cfg(consent_selection_acceptance)]
@@ -5287,6 +5342,12 @@ mod native_host {
                 // hierarchy; no UI action is needed to arm the baseline.
                 send_id(window, c"addSubview:", button);
                 send_id(window, c"bringSubviewToFront:", button);
+                #[cfg(selection_capture_owner_acceptance)]
+                {
+                    assert!(button_transfer == button);
+                    objc_release(button_transfer);
+                    CAPTURE_BUTTON_TEMP_RELEASES.fetch_add(1, Ordering::SeqCst);
+                }
             }
             assert!(send0(window, c"rootViewController") == controller);
             assert!(send0(send0(controller, c"view"), c"window") == window);
@@ -5404,6 +5465,9 @@ mod native_host {
                 name.as_ptr(),
             );
             assert!(!delegate_name.is_null());
+            #[cfg(selection_capture_owner_acceptance)]
+            capture_start_bootstrap_watchdog();
+            #[cfg(not(selection_capture_owner_acceptance))]
             std::thread::spawn(|| {
                 std::thread::sleep(Duration::from_secs(if cfg!(consent_selection_acceptance) {
                     180
