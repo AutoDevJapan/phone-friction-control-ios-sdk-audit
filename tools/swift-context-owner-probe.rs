@@ -1,4 +1,5 @@
 // Request-free arm64 Swift heap-owner lifetime probe.
+#![feature(abi_swift)]
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicUsize, Ordering};
 static DESTROYS: AtomicUsize = AtomicUsize::new(0);
@@ -47,6 +48,40 @@ unsafe extern "C" fn rust_context_destroy_c(object: *mut c_void) {
 #[link(name="SwiftUI", kind="framework")]
 unsafe extern "C" {}
 unsafe extern "C" { fn getpagesize()->i32; fn dlsym(handle:*mut c_void, name:*const std::ffi::c_char)->*mut c_void; }
+#[repr(C)]
+struct MetadataResponse { value:*const c_void, state:usize }
+#[repr(C)]
+struct Vwt { functions:[*const c_void;8], size:usize, stride:usize, flags:u32, extra:u32 }
+fn inspect_binding_metadata() {
+ unsafe {
+  let handle=std::ptr::without_provenance_mut(usize::MAX-1);
+  let boolean=dlsym(handle,c"$sSbN".as_ptr());
+  let entry=dlsym(handle,c"$s7SwiftUI7BindingVMa".as_ptr());
+  assert!(!boolean.is_null() && !entry.is_null());
+  let accessor:unsafe extern "Swift" fn(usize,*const c_void)->MetadataResponse=std::mem::transmute(entry);
+  let result=accessor(0,boolean);
+  assert_eq!(result.state,0); assert!(!result.value.is_null());
+  let page=getpagesize(); assert!(page>0); let page=page as usize;
+  assert_eq!(result.value.addr()%std::mem::align_of::<usize>(),0);
+  assert!(page-result.value.addr()%page>=3*std::mem::size_of::<usize>());
+  assert_eq!(result.value.cast::<usize>().read(),0x200);
+  assert_eq!(result.value.cast::<*const c_void>().add(2).read(),boolean.cast_const());
+  let header=result.value.cast::<*const Vwt>().wrapping_sub(1);
+  assert_eq!(header.addr()%std::mem::align_of::<usize>(),0);
+  assert!(page-header.addr()%page>=std::mem::size_of::<usize>());
+  let vwt=header.read(); assert!(!vwt.is_null());
+  assert_eq!(vwt.addr()%std::mem::align_of::<Vwt>(),0);
+  assert!(page-vwt.addr()%page>=std::mem::size_of::<Vwt>());
+  let vwt=&*vwt;
+  assert!(vwt.flags&0x00400000==0);
+  let alignment=((vwt.flags&255)+1) as usize;
+  assert!(alignment.is_power_of_two());
+  let stride=vwt.size.checked_add(alignment-1).unwrap()&!(alignment-1);
+  assert!(vwt.size>0 && vwt.stride==stride);
+  assert!(vwt.functions.iter().all(|f| !f.is_null()));
+  println!("binding_bool_metadata_complete=true; size={}; stride={}; alignment={}; nonpod={}",vwt.size,vwt.stride,(vwt.flags&255)+1,vwt.flags&0x10000!=0);
+ }
+}
 fn inspect_binding_entry() {
  unsafe {
   let page=getpagesize(); assert!(page>0); let page=page as usize;
@@ -78,6 +113,7 @@ fn inspect_binding_entry() {
 }
 fn main() {
  inspect_binding_entry();
+ inspect_binding_metadata();
  assert_eq!(std::mem::offset_of!(FullMetadata, local),24);
  assert_eq!(std::mem::offset_of!(FullMetadata, destroy),8);
  unsafe {

@@ -103,6 +103,7 @@ jobs:
           printf 'exit_status=%s\n' "$STATUS" > "$OUT/status.txt"
           test "$STATUS" = 0
           test "$(grep -Fxc 'binding_metadata_data=bool; kind_struct=true' "$OUT/result.txt")" = 1
+          test "$(grep -Ec '^binding_bool_metadata_complete=true; size=[1-9][0-9]*; stride=[1-9][0-9]*; alignment=[1-9][0-9]*; nonpod=true$' "$OUT/result.txt")" = 1
           for LABEL in binding_metadata binding_init binding_get binding_set; do
             test "$(grep -Ec "^binding_entry=$LABEL; bytes=[0-9a-f]+$" "$OUT/result.txt")" = 1
           done
