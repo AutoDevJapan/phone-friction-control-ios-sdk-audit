@@ -476,11 +476,14 @@ jobs:
           xcrun clang -target arm64-apple-ios18.5-simulator -isysroot "$SDK" -F "$(dirname "$(dirname "$TEST_HEADERS")")" -x objective-c -fsyntax-only -Xclang -ast-dump=json "$TEST_HEADERS/XCTest.h" > "$RUNNER_TEMP/xctest-selection-ast.json"
           jq '[.. | objects | select(.kind? == "ObjCMethodDecl" and (.name? | IN("isHittable", "cells", "buttons", "otherElements", "staticTexts", "searchFields", "textFields", "count", "firstMatch", "typeText:", "label", "debugDescription", "UTF8String", "coordinateWithNormalizedOffset:"))) | {name, instance, returnType, parameters: [.inner[]? | select(.kind == "ParmVarDecl") | .type.qualType]}] | unique' "$RUNNER_TEMP/xctest-selection-ast.json" > "$OUT/xctest-selection-method-types.json"
           # UI actions may be declared in an Objective-C category, not the class
+          XCUI_HEADERS="$(dirname "$(dirname "$TEST_HEADERS")")/XCUIAutomation.framework/Headers"
+          if [ ! -d "$XCUI_HEADERS" ]; then XCUI_HEADERS="$(dirname "$TEST_HEADERS")/Frameworks/XCUIAutomation.framework/Headers"; fi
+          test -d "$XCUI_HEADERS"
           # body. Include the exact coordinate header and preserve declaration
           # context; never infer a message type from an unrelated class.
-          grep -n -A 6 -B 2 -E 'coordinateWithNormalizedOffset:' "$TEST_HEADERS/XCUIElement.h" > "$OUT/xctest-coordinate-headers.txt"
-          grep -n -A 6 -B 2 -E 'XCUICoordinate|\(void\)tap' "$TEST_HEADERS/XCUICoordinate.h" >> "$OUT/xctest-coordinate-headers.txt"
-          xcrun clang -target arm64-apple-ios18.5-simulator -isysroot "$SDK" -F "$(dirname "$(dirname "$TEST_HEADERS")")" -x objective-c -fsyntax-only -Xclang -ast-dump=json "$TEST_HEADERS/XCUICoordinate.h" > "$RUNNER_TEMP/xctest-coordinate-ast.json"
+          grep -n -A 6 -B 2 -E 'coordinateWithNormalizedOffset:' "$XCUI_HEADERS/XCUIElement.h" > "$OUT/xctest-coordinate-headers.txt"
+          grep -n -A 6 -B 2 -E 'XCUICoordinate|\(void\)tap' "$XCUI_HEADERS/XCUICoordinate.h" >> "$OUT/xctest-coordinate-headers.txt"
+          xcrun clang -target arm64-apple-ios18.5-simulator -isysroot "$SDK" -F "$(dirname "$(dirname "$TEST_HEADERS")")" -x objective-c -fsyntax-only -Xclang -ast-dump=json "$XCUI_HEADERS/XCUICoordinate.h" > "$RUNNER_TEMP/xctest-coordinate-ast.json"
           jq '[.. | objects | select(.kind? == "ObjCInterfaceDecl" or .kind? == "ObjCCategoryDecl" or .kind? == "ObjCProtocolDecl") | {kind, name, interface, methods: [.inner[]? | select(.kind == "ObjCMethodDecl" and .name == "tap") | {name, instance, returnType, parameters: [.inner[]? | select(.kind == "ParmVarDecl") | .type.qualType]}]} | select(.methods | length > 0)]' "$RUNNER_TEMP/xctest-coordinate-ast.json" > "$OUT/xctest-coordinate-declaration-contexts.json"
           jq '[.[] | select((.kind == "ObjCInterfaceDecl" and .name == "XCUICoordinate") or (.kind == "ObjCCategoryDecl" and .interface.name == "XCUICoordinate")) | .methods[]] | unique' "$OUT/xctest-coordinate-declaration-contexts.json" > "$OUT/xctest-coordinate-method-types.json"
           jq -e 'def abi_type: gsub("(_Nullable|_Nonnull|_Null_unspecified)"; "") | gsub("[[:space:]]+"; " ") | gsub("^ | $"; ""); [.[] | select(.name == "coordinateWithNormalizedOffset:" and .instance == true and (.returnType.qualType | abi_type) == "XCUICoordinate *" and .parameters == ["CGVector"])] | length > 0' "$OUT/xctest-selection-method-types.json"
