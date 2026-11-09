@@ -466,7 +466,7 @@ jobs:
           for FILE in stdlib/public/core/Set.swift lib/IRGen/GenCall.cpp lib/IRGen/GenType.cpp lib/IRGen/GenProto.cpp lib/SIL/IR/SILFunctionType.cpp include/swift/ABI/GenericContext.h include/swift/ABI/Metadata.h include/swift/Runtime/Metadata.h; do
             NAME=${FILE##*/}
             if [ "$FILE" = include/swift/Runtime/Metadata.h ]; then NAME=Runtime-Metadata.h; fi
-            curl --fail --silent --show-error --location "https://raw.githubusercontent.com/swiftlang/swift/swift-6.1.2-RELEASE/$FILE" -o "$RUNNER_TEMP/count-$NAME"
+            curl --fail --silent --show-error --location "https://raw.githubusercontent.com/swiftlang/swift/cc4f13a96e9600bd6f801368ab51f614ab5ddd5e/$FILE" -o "$RUNNER_TEMP/count-$NAME"
             awk '/var count:|public struct Set|@frozen|emitPolymorphicArguments|emitGenericArguments|emitTypeMetadataRef|GenericMetadataAccessFunction|MetadataAccessFunction|TargetWitnessTable|TargetGenericContextDescriptorHeader|NumKeyArguments|TargetStructDescriptor|TargetStructMetadata|hasSelfContextParameter|NativeConventionSchema::NativeConventionSchema|DefaultConventions|enumerateUnfulfilledRequirements|PolymorphicConvention::considerParameter/ { remaining=48 } remaining > 0 { line=NR ":" $0; bytes+=length(line)+1; if (bytes <= 48000) print line; remaining-- }' "$RUNNER_TEMP/count-$NAME" > "$OUT/selection-count-primary-$NAME.txt"
           done
           TEST_HEADERS="$(xcode-select -p)/Platforms/iPhoneSimulator.platform/Developer/Library/Frameworks/XCTest.framework/Headers"
@@ -564,15 +564,15 @@ jobs:
           # Primary compiler rules: generic class metatype fulfills Content and
           # Content:View, so allocating init has no trailing generic arguments.
           # Keep the exact source/version for the parent's unsafe-call review.
-          curl --fail --silent --show-error --location 'https://raw.githubusercontent.com/swiftlang/swift/swift-6.1.2-RELEASE/lib/IRGen/GenProto.cpp' -o "$RUNNER_TEMP/hosting-GenProto.cpp"
-          sed -n '197,245p;307,330p;383,470p;3890,3960p' "$RUNNER_TEMP/hosting-GenProto.cpp" > "$OUT/picker-hosting-generic-abi-primary.txt"
+          curl --fail --silent --show-error --location 'https://raw.githubusercontent.com/swiftlang/swift/cc4f13a96e9600bd6f801368ab51f614ab5ddd5e/lib/IRGen/GenProto.cpp' -o "$RUNNER_TEMP/hosting-GenProto.cpp"
+          grep -n -A 48 -B 8 -E 'Thick metatypes are sources of metadata|enumerateUnfulfilledRequirements' "$RUNNER_TEMP/hosting-GenProto.cpp" > "$OUT/picker-hosting-generic-abi-primary.txt"
           grep -F 'Thick metatypes are sources of metadata.' "$OUT/picker-hosting-generic-abi-primary.txt"
           grep -F 'enumerateUnfulfilledRequirements' "$OUT/picker-hosting-generic-abi-primary.txt"
-          curl --fail --silent --show-error --location 'https://raw.githubusercontent.com/swiftlang/swift/swift-6.1.2-RELEASE/include/swift/Runtime/HeapObject.h' -o "$RUNNER_TEMP/hosting-HeapObject.h"
-          sed -n '733,742p' "$RUNNER_TEMP/hosting-HeapObject.h" > "$OUT/picker-hosting-release-primary.txt"
-          grep -Fx 'void swift_unknownObjectRelease(void *value);' "$OUT/picker-hosting-release-primary.txt"
-          curl --fail --silent --show-error --location 'https://raw.githubusercontent.com/swiftlang/swift/swift-6.1.2-RELEASE/include/swift/Runtime/RuntimeFunctions.def' -o "$RUNNER_TEMP/hosting-RuntimeFunctions.def"
-          sed -n '378,385p' "$RUNNER_TEMP/hosting-RuntimeFunctions.def" >> "$OUT/picker-hosting-release-primary.txt"
+          curl --fail --silent --show-error --location 'https://raw.githubusercontent.com/swiftlang/swift/cc4f13a96e9600bd6f801368ab51f614ab5ddd5e/include/swift/Runtime/HeapObject.h' -o "$RUNNER_TEMP/hosting-HeapObject.h"
+          grep -n -A 2 -B 4 -F 'void swift_unknownObjectRelease(void *value);' "$RUNNER_TEMP/hosting-HeapObject.h" > "$OUT/picker-hosting-release-primary.txt"
+          grep -F 'void swift_unknownObjectRelease(void *value);' "$OUT/picker-hosting-release-primary.txt"
+          curl --fail --silent --show-error --location 'https://raw.githubusercontent.com/swiftlang/swift/cc4f13a96e9600bd6f801368ab51f614ab5ddd5e/include/swift/Runtime/RuntimeFunctions.def' -o "$RUNNER_TEMP/hosting-RuntimeFunctions.def"
+          grep -A 7 -F 'FUNCTION(UnknownObjectRelease, swift_unknownObjectRelease,' "$RUNNER_TEMP/hosting-RuntimeFunctions.def" >> "$OUT/picker-hosting-release-primary.txt"
           grep -Fx '         C_CC, AlwaysAvailable,' "$OUT/picker-hosting-release-primary.txt"
       - name: Build and sign the Rust Simulator probe
         if: ${{ !inputs.collect_xctest_headers || inputs.ui_consent_test }}
