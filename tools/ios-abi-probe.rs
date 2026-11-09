@@ -3015,7 +3015,8 @@ mod mutable_binding {
         }
         let initial = INITIAL_APPS.load(Ordering::Acquire);
         let selected = CURRENT_APPS.load(Ordering::Acquire);
-        let semantic = initial == 0 && selected > initial && calls > 0;
+        let semantic = !cfg!(category_selection_observation)
+            && initial == 0 && selected > initial && calls > 0;
         format!(
             "rust_setter_calls={calls}\nselection_state_pinned=true\nfull_teardown_verified=false\napplications_count_abi_verified=true\napplications_getter_calls={}\ncount_getter_calls={}\ninitial_applications_count={initial}\nselected_applications_count={selected}\nsemantic_app_selection_verified={semantic}\nselection_contents_output=false\ncount_read_on_main_thread=true\nowned_set_vwt_copy_destroy=true\n",
             APPLICATIONS_CALLS.load(Ordering::Acquire),
@@ -4379,7 +4380,17 @@ mod ui_authorization_test {
         }
     }
 
-    #[cfg(ui_test_selection_acceptance)]
+    #[cfg(all(ui_test_selection_acceptance, category_selection_observation))]
+    unsafe fn choose_application(test: Id, app: Id, _system: Id) {
+        unsafe extern "C" {
+            fn observe_picker_category(test: Id, app: Id) -> u8;
+        }
+        if unsafe { observe_picker_category(test, app) } != 1 {
+            unsafe { fail(test, c"Category cell observation did not produce a setter delta") };
+        }
+    }
+
+    #[cfg(all(ui_test_selection_acceptance, not(category_selection_observation)))]
     unsafe fn choose_application(test: Id, app: Id, system: Id) {
         unsafe {
             let ready_label = string(c"Rust selection aggregate snapshot");

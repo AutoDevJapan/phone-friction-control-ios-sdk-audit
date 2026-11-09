@@ -2,6 +2,10 @@ name: Manual iOS SDK audit
 on:
   workflow_dispatch:
     inputs:
+      category_selection_observation:
+        description: Observe the real category cell and setter delta without claiming token counts or app selection
+        type: boolean
+        default: false
       product_restore_smoke:
         description: Reuse the verified app bytes to inspect saved state across process restart
         type: boolean
@@ -540,6 +544,10 @@ jobs:
             fi
           fi
           # Only SDK symbols and inspection options cross this step boundary.
+          if [ '${{ inputs.category_selection_observation }}' = true ]; then
+            test '${{ inputs.selection_inspection_mode }}' = consent-selection-acceptance
+            SELECTION_ARGS+=(--cfg category_selection_observation)
+          fi
           # Bash preserves export attributes and array elements without eval.
           BUILD_ENV="$RUNNER_TEMP/ios-probe-build-env.sh"
           : > "$BUILD_ENV"
@@ -591,7 +599,17 @@ jobs:
                 printf '%s|%s\n' "$KIND" "$ENTRY" >> "$OUT/selection-count-abi-manifest.txt" ;;
             esac
           done < <(grep -F "$APP_PREFIX" "$RUNNER_TEMP/ManagedSettings-count-exports.txt")
-          test "$(wc -l < "$OUT/selection-count-abi-manifest.txt" | tr -d ' ')" -le 24
+          if [ '${{ inputs.category_selection_observation }}' = true ]; then
+            jq '[.. | objects | select(.kind? == "TypeDecl" and .name? == "FamilyActivitySelection") | {name, usr, members: [.children[]? | select(.kind == "Var" and (.name == "categories" or .name == "categoryTokens"))]}]' "$RUNNER_TEMP/FamilyControls.json" > "$OUT/category-count-sdk-declarations.json"
+            jq '[.. | objects | select(.kind? == "TypeDecl" and .name? == "ActivityCategory") | {name, usr, declKind, genericSig, conformances}]' "$RUNNER_TEMP/ManagedSettings.json" > "$OUT/category-element-sdk-declarations.json"
+            CATEGORY_META=$(jq -er '[.[] | select(.declKind == "Struct" and .genericSig == null) | .usr | sub("^s:"; "\u0024s") + "Ma"] | if length == 1 then .[0] else error("category metadata declaration unavailable") end' "$OUT/category-element-sdk-declarations.json")
+            CATEGORY_GETTERS=$(jq -er '[.[] | .members[] | .accessors[] | select(.accessorKind == "get") | .mangledName] | if length == 2 then .[] else error("category getter declarations unavailable") end' "$OUT/category-count-sdk-declarations.json")
+            for ENTRY in "$CATEGORY_META" $CATEGORY_GETTERS; do
+              grep -Fx "$ENTRY" "$RUNNER_TEMP/ManagedSettings-count-exports.txt" "$RUNNER_TEMP/FamilyControls-count-exports.txt" > /dev/null
+              printf 'function|%s\n' "$ENTRY" >> "$OUT/selection-count-abi-manifest.txt"
+            done
+          fi
+          test "$(wc -l < "$OUT/selection-count-abi-manifest.txt" | tr -d ' ')" -le 27
           cut -d '|' -f 2 "$OUT/selection-count-abi-manifest.txt" | xcrun swift-demangle --compact > "$OUT/selection-count-public-demangled.txt"
           grep -F 'Hashable' "$OUT/selection-count-public-demangled.txt"
           SELECTION_COUNT_ABI_MANIFEST=$(cat "$OUT/selection-count-abi-manifest.txt")
@@ -809,11 +827,16 @@ jobs:
               UI_TEST_ARGS=()
               if [ '${{ inputs.ui_continue }}' = true ]; then UI_TEST_ARGS=(--cfg ui_test_continue); fi
               if [ '${{ inputs.selection_inspection_mode }}' = consent-selection-acceptance ]; then UI_TEST_ARGS+=(--cfg ui_test_selection_acceptance); fi
+              if [ '${{ inputs.category_selection_observation }}' = true ]; then UI_TEST_ARGS+=(--cfg category_selection_observation); fi
               rustc tools/ios-abi-probe.rs --crate-name ios_consent_ui_test --crate-type staticlib --edition 2024 --cfg ui_test_bundle ${UI_TEST_ARGS[@]+"${UI_TEST_ARGS[@]}"} --target aarch64-apple-ios-sim --emit="obj=$XCODE_ROOT/ui-test.o,link" --print native-static-libs -o "$XCODE_ROOT/libui-test.a" 2> "$OUT/rust-ui-test-link.txt"
               test "$(grep -c '^note: native-static-libs: ' "$OUT/rust-ui-test-link.txt")" = 1
               UI_NATIVE_LIBS=$(sed -n 's/^note: native-static-libs: //p' "$OUT/rust-ui-test-link.txt")
               test -n "$UI_NATIVE_LIBS"
               printf 'OTHER_LDFLAGS = $(inherited) -F$(PLATFORM_DIR)/Developer/Library/Frameworks %s\n' "$UI_NATIVE_LIBS" > "$XCODE_ROOT/UITest.xcconfig"
+              if [ '${{ inputs.category_selection_observation }}' = true ]; then
+                xcrun clang -target arm64-apple-ios18.5-simulator -isysroot "$SDK" -fobjc-arc -fmodules -F"$DEVELOPER_DIR/Platforms/iPhoneSimulator.platform/Developer/Library/Frameworks" -c tools/PickerCategoryObservation.m -o "$XCODE_ROOT/category-observation.o"
+                printf 'OTHER_LDFLAGS = $(inherited) -F$(PLATFORM_DIR)/Developer/Library/Frameworks %s %s\n' "$UI_NATIVE_LIBS" "$XCODE_ROOT/category-observation.o" > "$XCODE_ROOT/UITest.xcconfig"
+              fi
             fi
             xcrun nm -gU "$XCODE_ROOT/probe.o" > "$OUT/rust-object-symbols.txt"
             grep -E '[[:space:]]T[[:space:]]+_main$' "$OUT/rust-object-symbols.txt"
@@ -948,7 +971,7 @@ jobs:
           set -euo pipefail
           SIM_ID=$1
           OUT="$RUNNER_TEMP/ios-sdk-audit"
-          if [ '${{ inputs.selection_inspection_mode }}' = consent-selection-acceptance ]; then
+          if [ '${{ inputs.selection_inspection_mode }}' = consent-selection-acceptance ] && [ '${{ inputs.category_selection_observation }}' != true ]; then
             # Finite official fixture acquisition: built-in Messages in this NEW
             # Simulator only. No third-party app download/account/playback.
             # A separate ordinary app bundle, with no Family Controls entitlement.
@@ -1023,6 +1046,14 @@ jobs:
             grep -Fx 'error_present=false' "$OUT/public-authorization-result.txt"
             grep -Fx 'status_label=approved' "$OUT/public-authorization-result.txt"
             grep -Fx 'status_read_on_main_thread=true' "$OUT/public-authorization-result.txt"
+            if [ '${{ inputs.category_selection_observation }}' = true ]; then
+              grep -F 'category_control_tap_returned=true;' "$OUT/consent-selection-xctest-observations.txt"
+              grep -F 'category_token_count_verified=false; individual_app_tap=false' "$OUT/consent-selection-xctest-observations.txt"
+              grep -Fx 'semantic_app_selection_verified=false' "$OUT/consent-selection-result.txt"
+              grep -Fx 'owned_set_vwt_copy_destroy=true' "$OUT/consent-selection-result.txt"
+              printf 'xctest_exit_status=0\ncategory_ui_setter_delta_observed=true\ncategory_token_count_verified=false\nindividual_app_selection_verified=false\nfull_teardown_verified=false\n' > "$OUT/consent-selection-test-status.txt"
+              exit 0
+            fi
             grep -Eq '^rust_setter_calls=[1-9][0-9]*$' "$OUT/consent-selection-result.txt"
             grep -Fx 'application_choice_armed=true' "$OUT/consent-selection-result.txt"
             grep -Eq '^rust_setter_calls_after_picker_presentation=[1-9][0-9]*$' "$OUT/consent-selection-result.txt"
@@ -1294,6 +1325,7 @@ jobs:
             ${{ runner.temp }}/ios-sdk-audit/selection-count-*.txt
             ${{ runner.temp }}/ios-sdk-audit/Swift-set-selected-declarations.json
             ${{ runner.temp }}/ios-sdk-audit/ManagedSettings-Application-selected-declarations.json
+            ${{ runner.temp }}/ios-sdk-audit/category-*-sdk-declarations.json
             ${{ runner.temp }}/ios-sdk-audit/FamilyControls-selected-declarations.json
             ${{ runner.temp }}/ios-sdk-audit/SwiftUI-selected-declarations.json
             ${{ runner.temp }}/ios-sdk-audit/public-authorization-result.txt
