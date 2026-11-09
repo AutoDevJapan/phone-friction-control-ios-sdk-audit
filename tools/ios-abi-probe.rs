@@ -3316,45 +3316,65 @@ mod mutable_binding {
                     std::fs::write(std::path::PathBuf::from(home).join("Documents/consent-selection-picker-code.txt"), evidence)
                         .expect("write public Picker code evidence");
                 }
-                // ORIGINAL SDK bytes (entries.txt), not addresses displayed by
-                // the relocated prefix .o. Nongeneric public init reads all 72
-                // bytes from x0 and saves x8 in x19 before its first BL64.
+                // SDK18.5 run42562812505: public x0 owns the 72-byte Binding;
+                // x20 retains its address and x19 retains the indirect x8 result.
+                // The final loads transfer every Binding byte into the Picker.
                 for (offset, expected) in [
-                    (0, 0xd101_c3ff),
-                    (4, 0xa902_67fa),
-                    (8, 0xa903_5ff8),
-                    (12, 0xa904_57f6),
-                    (16, 0xa905_4ff4),
-                    (20, 0xa906_7bfd),
-                    (24, 0x9101_83fd),
-                    (28, 0xaa08_03f3),
-                    (32, 0xa940_5815),
-                    (36, 0x3940_4017),
-                    (40, 0x3cc1_8001),
-                    (44, 0x3cc2_8000),
-                    (48, 0xad00_07e0),
-                    (52, 0xa943_e418),
+                    (0, 0xa9bd_57f6),
+                    (4, 0xa901_4ff4),
+                    (8, 0xa902_7bfd),
+                    (12, 0x9100_83fd),
+                    (16, 0xaa00_03f4),
+                    (20, 0xaa08_03f3),
+                    (36, 0xf900_3a60),
+                    (40, 0x3901_e27f),
+                    (44, 0xd280_0000),
+                    (52, 0xb980_2415),
+                    (68, 0xf835_6a60),
+                    (84, 0xaa00_03e1),
+                    (88, 0x8b15_0260),
+                    (92, 0x5280_0002),
+                    (100, 0x6f00_e400),
+                    (104, 0x3c80_8260),
+                    (108, 0x3c81_8260),
+                    (112, 0xad40_0281),
+                    (116, 0x3c83_8260),
+                    (120, 0xad41_0a80),
+                    (124, 0x3c84_8260),
+                    (128, 0x3c85_8262),
+                    (132, 0x5280_0028),
+                    (136, 0x3900_0268),
+                    (140, 0xf940_2288),
+                    (144, 0xf900_3668),
+                    (148, 0x3c82_8261),
+                    (152, 0xa942_7bfd),
+                    (156, 0xa941_4ff4),
+                    (160, 0xa8c3_57f6),
+                    (164, 0xd65f_03c0),
                 ] {
                     assert!(
                         word(entry, offset, page) == expected,
-                        "Picker public argument prefix changed"
+                        "Picker public argument/transfer instruction changed at {offset}"
                     );
                 }
-                assert!(word(entry, 56, page) & 0x9f00_001f == 0x9000_0000);
-                assert!(word(entry, 60, page) & 0xffc0_03ff == 0x9100_0000);
-                let helper = branch(entry, 64, true, page);
+                for offset in [24, 56, 72] {
+                    assert!(word(entry, offset, page) & 0x9f00_001f == 0x9000_0000);
+                    assert!(word(entry, offset + 4, page) & 0xffc0_03ff == 0x9100_0000);
+                }
+                for offset in [32, 48, 64, 80, 96] {
+                    let _target = branch(entry, offset, true, page);
+                }
+                let helper = branch(entry, 32, true, page);
                 assert!(word(helper, 0, page) & 0x9f00_001f == 0x9000_0010);
                 assert!(word(helper, 4, page) & 0xffc0_03ff == 0xf940_0210);
                 assert!(word(helper, 8, page) == 0xd61f_0200);
                 // SILFunctionType.cpp 2515-2622/2717: allocator/initializer
                 // normal params Owned => Indirect_In, never borrowed. Calling
                 // Convention.rst 261-276 transfers the returned value to caller.
-                // Hosting PUBLIC entry requires x0=root, x20=metatype;
-                // its first BL12 saves x0 in x19 internally. Only the distinct
-                // hosting mode calls it, using the primary generic ABI below.
+                // Hosting is validated independently before its distinct mode calls it.
                 proof.picker.guarded.store(true, Ordering::SeqCst);
                 println!(
-                    "Picker value entry guards: public_x0_binding=true; public_x8_result=true; input_size=72; result_stride=152; alignment=8; nonpod=true; first_bl64_stub=true; extra_generic_arguments=0; owned_normal_parameter=true"
+                    "Picker value entry guards: public_x0_binding=true; public_x8_result=true; input_size=72; result_stride=152; alignment=8; nonpod=true; first_bl32_stub=true; extra_generic_arguments=0; owned_normal_parameter=true"
                 );
                 Self {
                     witnesses,
