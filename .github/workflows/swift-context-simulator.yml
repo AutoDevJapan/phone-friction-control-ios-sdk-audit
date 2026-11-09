@@ -45,6 +45,7 @@ jobs:
           test "$(grep -Ec '^binding_init_helper; bytes=[0-9a-f]+$' "$OUT/result.txt")" = 1
           for SLOT in destroy copy; do test "$(grep -Ec "^binding_vwt_entry=$SLOT; bytes=[0-9a-f]+$" "$OUT/result.txt")" = 1; done
           for OFFSET in 156 164 256 264; do test "$(grep -Ec "^binding_context_stub; offset=$OFFSET; bytes=[0-9a-f]+$" "$OUT/result.txt")" = 1; done
+          for OFFSET in 156 164 256 264; do test "$(grep -Fxc "binding_context_stub_resolved; offset=$OFFSET; exact_expected_entry=true" "$OUT/result.txt")" = 1; done
           for LINE in rust_owner_drop_calls=1 context_destroy_calls=1 context_dealloc_calls=1 copy_survived_original_release=true binding_verified=false full_teardown_verified=false; do test "$(grep -Fxc "$LINE" "$OUT/result.txt")" = 1; done
       - uses: actions/upload-artifact@v4
         if: always()

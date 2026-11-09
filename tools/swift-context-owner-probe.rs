@@ -163,6 +163,21 @@ fn inspect_binding_entry() {
       print!("binding_context_stub; offset={offset}; bytes=");
       for byte in std::slice::from_raw_parts(called.cast::<u8>(),count) {print!("{byte:02x}");}
       println!();
+      assert!(page-called.addr()%page>=12);
+      let adrp=called.cast::<u32>().read();let load=called.cast::<u32>().add(1).read();let branch=called.cast::<u32>().add(2).read();
+      assert_eq!(adrp&0x9f00001f,0x90000010);assert_eq!(load&0xffc003ff,0xf9400210);assert_eq!(branch,0xd61f0200);
+      let immediate=(((adrp>>5)&0x7ffff)<<2)|((adrp>>29)&3);
+      let signed=((immediate<<11)as i32>>11)as isize;
+      let relative=signed.checked_mul(4096).unwrap();
+      let slot_addr=(called.addr()&!4095usize).checked_add_signed(relative).unwrap().checked_add((((load>>10)&0xfff)as usize)*8).unwrap();
+      assert_eq!(slot_addr%std::mem::align_of::<usize>(),0);assert!(page-slot_addr%page>=std::mem::size_of::<usize>());
+      let displacement=slot_addr.checked_signed_diff(called.addr()).unwrap();
+      let slot=called.cast::<u8>().wrapping_offset(displacement).cast::<*const c_void>();
+      assert_eq!(slot.addr(),slot_addr);
+      let mut slot_info=DlInfo::default();assert_ne!(dladdr(slot.cast(),&mut slot_info),0);assert_eq!(slot_info.base,origin.base);
+      let resolved=slot.read(); assert!(!resolved.is_null());
+      println!("binding_context_stub_resolved; offset={offset}; exact_expected_entry={}",resolved==expected_entry);
+
 
      }
     }
