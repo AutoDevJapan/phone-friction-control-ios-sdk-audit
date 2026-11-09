@@ -565,14 +565,14 @@ jobs:
           # Content:View, so allocating init has no trailing generic arguments.
           # Keep the exact source/version for the parent's unsafe-call review.
           curl --fail --silent --show-error --location 'https://raw.githubusercontent.com/swiftlang/swift/swift-6.1.2-RELEASE/lib/IRGen/GenProto.cpp' -o "$RUNNER_TEMP/hosting-GenProto.cpp"
-          sed -n '197,245p;307,312p;383,446p;3847,3908p' "$RUNNER_TEMP/hosting-GenProto.cpp" > "$OUT/picker-hosting-generic-abi-primary.txt"
+          sed -n '197,245p;307,330p;383,470p;3890,3960p' "$RUNNER_TEMP/hosting-GenProto.cpp" > "$OUT/picker-hosting-generic-abi-primary.txt"
           grep -F 'Thick metatypes are sources of metadata.' "$OUT/picker-hosting-generic-abi-primary.txt"
           grep -F 'enumerateUnfulfilledRequirements' "$OUT/picker-hosting-generic-abi-primary.txt"
           curl --fail --silent --show-error --location 'https://raw.githubusercontent.com/swiftlang/swift/swift-6.1.2-RELEASE/include/swift/Runtime/HeapObject.h' -o "$RUNNER_TEMP/hosting-HeapObject.h"
-          sed -n '686,690p' "$RUNNER_TEMP/hosting-HeapObject.h" > "$OUT/picker-hosting-release-primary.txt"
+          sed -n '733,742p' "$RUNNER_TEMP/hosting-HeapObject.h" > "$OUT/picker-hosting-release-primary.txt"
           grep -Fx 'void swift_unknownObjectRelease(void *value);' "$OUT/picker-hosting-release-primary.txt"
           curl --fail --silent --show-error --location 'https://raw.githubusercontent.com/swiftlang/swift/swift-6.1.2-RELEASE/include/swift/Runtime/RuntimeFunctions.def' -o "$RUNNER_TEMP/hosting-RuntimeFunctions.def"
-          sed -n '335,342p' "$RUNNER_TEMP/hosting-RuntimeFunctions.def" >> "$OUT/picker-hosting-release-primary.txt"
+          sed -n '378,385p' "$RUNNER_TEMP/hosting-RuntimeFunctions.def" >> "$OUT/picker-hosting-release-primary.txt"
           grep -Fx '         C_CC, AlwaysAvailable,' "$OUT/picker-hosting-release-primary.txt"
       - name: Build and sign the Rust Simulator probe
         if: ${{ !inputs.collect_xctest_headers || inputs.ui_consent_test }}
