@@ -2354,6 +2354,8 @@ mod mutable_binding {
             (80, 0xf9400688), (84, 0xf9400109), (88, 0xf9403529),
             (92, 0x52800020), (96, 0xaa1403f6), (100, 0xaa0803f4),
             (104, 0xd63f0120),
+            (108, 0xb98022a8), // field offset from Binding metadata +32
+            (112, 0xf9400aa2), // Value metadata from Binding metadata +16
         ] {
             assert!(word(getter, offset, page) == expected,
                 "Binding getter ownership prefix changed");
@@ -4767,16 +4769,25 @@ mod native_host {
                     };
                     return;
                 }
-                let success = std::panic::catch_unwind(|| {
+                let construction = std::panic::catch_unwind(|| {
                     let controller = super::mutable_binding::host();
                     SETTER_BASELINE
                         .store(super::mutable_binding::setter_calls(), Ordering::Release);
                     CHOICE_ARMED.store(true, Ordering::Release);
                     present_picker(controller);
                     selection_updated();
-                })
-                .is_ok();
-                if !success {
+                });
+                if let Err(error) = construction {
+                    // Preserve only fixed guard text, never payload/debug data.
+                    let message = error.downcast_ref::<&str>().copied()
+                        .or_else(|| error.downcast_ref::<String>().map(String::as_str))
+                        .unwrap_or("non-string construction failure");
+                    let safe = if message.len() <= 160
+                        && message.bytes().all(|b| b.is_ascii_alphanumeric() || b" ._:-".contains(&b))
+                    { message } else { "construction guard failed" };
+                    std::fs::write(documents.join("consent-selection-construction-error.txt"),
+                        format!("picker_constructed=false\nguard_error={safe}\n"))
+                        .expect("write bounded construction failure");
                     eprintln!(
                         "Consent Picker construction failed; pinned state retained until exit"
                     );

@@ -839,7 +839,7 @@ jobs:
           if [ '${{ inputs.selection_inspection_mode }}' = consent-selection-acceptance ]; then
             printf 'xctest_exit_status=%s\nmac_acceptance_verified=false\n' "$UI_TEST_STATUS" > "$OUT/consent-selection-test-status.txt"
             if DATA=$(xcrun simctl get_app_container "$SIM_ID" com.autodevjapan.phonecontrol1614abiprobe data); then
-              for FILE in public-authorization-result.txt consent-selection-result.txt selection-count-entry-prefixes.txt selection-count-layout.txt; do
+              for FILE in public-authorization-result.txt consent-selection-result.txt consent-selection-construction-error.txt selection-count-entry-prefixes.txt selection-count-layout.txt; do
                 if [ -f "$DATA/Documents/$FILE" ]; then cp "$DATA/Documents/$FILE" "$OUT/$FILE"; fi
               done
             fi
@@ -971,13 +971,12 @@ jobs:
               grep -F 'Binding accessor inspection complete; helper_calls=0; getter_calls=0; setter_calls=0; closure_calls=0; ownership_verified=false' "$OUT/selection-layout.txt"
               test "$(grep -c '^Selection entry bytes: Binding.wrappedValue getter;' "$OUT/selection-layout.txt")" = 1
               test "$(grep -c '^Selection entry bytes: Binding.wrappedValue setter;' "$OUT/selection-layout.txt")" = 1
-              grep -Fx 'Binding control transfer: Binding.set; source_offset=40; kind=indirect_call; target_read=false' "$OUT/selection-layout.txt"
+              grep -Fx 'Binding control transfer: Binding.set; source_offset=56; kind=indirect_branch; target_read=false' "$OUT/selection-layout.txt"
               grep -F 'Binding control transfer: Binding.get; source_offset=0; kind=direct_branch;' "$OUT/selection-layout.txt" | grep -F 'same_image=true'
               test "$(grep -Fc 'Selection entry bytes: Binding.get.offset0 direct_branch target;' "$OUT/selection-layout.txt")" = 1
-              for OFFSET in 8 40; do
-                grep -F "Binding control transfer: Binding.init; source_offset=$OFFSET; kind=direct_call;" "$OUT/selection-layout.txt" | grep -F 'same_image=true'
-                test "$(grep -Fc "Selection entry bytes: Binding.init.offset$OFFSET direct_call target;" "$OUT/selection-layout.txt")" = 1
-              done
+              grep -F 'Binding control transfer: Binding.set; source_offset=24; kind=direct_call;' "$OUT/selection-layout.txt" | grep -F 'same_image=true'
+              grep -F 'Binding control transfer: Binding.init; source_offset=16; kind=direct_branch;' "$OUT/selection-layout.txt" | grep -F 'same_image=true'
+              test "$(grep -Fc 'Selection entry bytes: Binding.init.offset16 direct_branch target;' "$OUT/selection-layout.txt")" = 1
             fi
             printf 'phase=layout\nselection_layout_verified=true\nmetadata_complete=true\nmetadata_kind_struct=true\nbox_buffer_aligned=true\nbox_project_matches=true\nbox_uninitialized_deallocated=true\nentry_prefix_max_bytes=128\nentry_reads_page_bounded=true\nentry_registers_verified=false\nselection_values_constructed=0\nselection_values_read=0\ninitializer_calls=0\nclosure_calls=0\nvalue_witness_calls=0\ngrant_verified=false\nmonitoring_verified=false\nshielding_verified=false\n' > "$OUT/selection-layout-scope.txt"
             fi
