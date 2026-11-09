@@ -230,6 +230,9 @@ jobs:
           xcrun swift-api-digester -dump-sdk -module SwiftUI -sdk "$SDK" -target "$TARGET" -o "$RUNNER_TEMP/SwiftUI.json"
           jq '[.. | objects | select(.kind? == "TypeDecl" and (.name? | IN("Binding", "UIHostingController", "Transaction", "View"))) | {name, usr, declKind, genericSig, members: [.children[]? | select(.name? | IN("init", "wrappedValue", "projectedValue", "rootView", "body"))]}]' "$RUNNER_TEMP/SwiftUI.json" > "$OUT/SwiftUI-selected-declarations.json"
           test "$(jq length "$OUT/SwiftUI-selected-declarations.json")" -ge 4
+          # Keep exact public identities visible when a versioned ABI gate fails.
+          jq '[.[] | {name, usr, declKind, genericSig}]' "$OUT/SwiftUI-selected-declarations.json"
+          jq '[.[] | select(.name == "Binding") | .members[] | select(.printedName == "init(get:set:)") | {printedName, moduleName, genericSig, mangledName, children: [.children[] | {printedName, usr}]}]' "$OUT/SwiftUI-selected-declarations.json"
           # Collect the SDK's own enum declaration, not inferred raw values.
           FRAMEWORK="$SDK/System/Library/Frameworks/FamilyControls.framework"
           if grep -R -n -A 12 -B 3 'FamilyControlsMember' "$FRAMEWORK/Headers" > "$OUT/family-controls-member-header.txt"; then
