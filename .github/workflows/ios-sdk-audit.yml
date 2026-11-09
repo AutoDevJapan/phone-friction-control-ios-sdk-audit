@@ -839,7 +839,7 @@ jobs:
           if [ '${{ inputs.selection_inspection_mode }}' = consent-selection-acceptance ]; then
             printf 'xctest_exit_status=%s\nmac_acceptance_verified=false\n' "$UI_TEST_STATUS" > "$OUT/consent-selection-test-status.txt"
             if DATA=$(xcrun simctl get_app_container "$SIM_ID" com.autodevjapan.phonecontrol1614abiprobe data); then
-              for FILE in public-authorization-result.txt consent-selection-result.txt consent-selection-construction-error.txt selection-count-entry-prefixes.txt selection-count-layout.txt; do
+              for FILE in public-authorization-result.txt consent-selection-result.txt consent-selection-construction-error.txt consent-selection-picker-code.txt selection-count-entry-prefixes.txt selection-count-layout.txt; do
                 if [ -f "$DATA/Documents/$FILE" ]; then cp "$DATA/Documents/$FILE" "$OUT/$FILE"; fi
               done
             fi

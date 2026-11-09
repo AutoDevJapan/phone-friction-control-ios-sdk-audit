@@ -745,7 +745,12 @@ mod selection_layout {
     pub(super) fn prefix_bytes(scope: &str, label: &str, pointer: *const c_void, page: usize) {
         // This is a bounded entry prefix, not a claim about argument registers,
         // ownership, or a whole function. Do not follow branches or call it.
-        let count = 128.min(page_remaining(pointer, page));
+        // SDK 18.5 delays the Picker's owned Binding copy past its first
+        // 128 bytes. Capture a bounded, page-local public constructor body
+        // for review; other entries retain the original 128-byte bound.
+        let bound = if label == "FamilyActivityPicker.init(selection:)"
+            || label == "UIHostingController.init(rootView:) allocating" { 512 } else { 128 };
+        let count = bound.min(page_remaining(pointer, page));
         let bytes = unsafe { std::slice::from_raw_parts(pointer.cast::<u8>(), count) };
         print!("{scope} entry bytes: {label}; length={count}; hex=");
         for byte in bytes {
@@ -3299,6 +3304,18 @@ mod mutable_binding {
                 proof.picker.inc(Count::Superclass);
                 assert!(unsafe { class_getSuperclass(hosting.value) } == controller);
                 let entry = resolve(env!("PICKER_INIT_SYMBOL"));
+                #[cfg(consent_selection_acceptance)]
+                {
+                    // Public code words only: no pointer values or selection data.
+                    let home = std::env::var_os("HOME").expect("host HOME missing");
+                    let mut evidence = String::from("picker_constructor_calls=0\n");
+                    for offset in (0..128).step_by(4) {
+                        use std::fmt::Write;
+                        writeln!(evidence, "offset_{offset}=0x{:08x}", word(entry, offset, page)).unwrap();
+                    }
+                    std::fs::write(std::path::PathBuf::from(home).join("Documents/consent-selection-picker-code.txt"), evidence)
+                        .expect("write public Picker code evidence");
+                }
                 // ORIGINAL SDK bytes (entries.txt), not addresses displayed by
                 // the relocated prefix .o. Nongeneric public init reads all 72
                 // bytes from x0 and saves x8 in x19 before its first BL64.
