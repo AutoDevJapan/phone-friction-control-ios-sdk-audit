@@ -1,0 +1,53 @@
+name: Simulator Swift context ownership audit
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  simulator-owner:
+    runs-on: macos-15
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-07-19
+          targets: aarch64-apple-ios-sim
+      - name: Execute context owner on the actual iOS Simulator
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DEVELOPER_DIR=/Applications/Xcode_16.4.app/Contents/Developer
+          OUT="$RUNNER_TEMP/context-owner-simulator"
+          mkdir -p "$OUT/ContextOwner.app"
+          SDK=$(xcrun --sdk iphonesimulator --show-sdk-path)
+          xcodebuild -version > "$OUT/versions.txt"
+          xcrun --sdk iphonesimulator --show-sdk-version >> "$OUT/versions.txt"
+          rustc --version >> "$OUT/versions.txt"
+          rustc tools/swift-context-owner-probe.rs --edition 2024 --target aarch64-apple-ios-sim -L "native=$SDK/usr/lib/swift" -C link-arg=-Wl,-rpath,/usr/lib/swift -o "$OUT/ContextOwner.app/context-owner"
+          printf '<?xml version="1.0"?><plist version="1.0"><dict><key>CFBundleIdentifier</key><string>com.autodevjapan.contextowner</string><key>CFBundleExecutable</key><string>context-owner</string><key>CFBundlePackageType</key><string>APPL</string><key>CFBundleVersion</key><string>1</string><key>MinimumOSVersion</key><string>18.5</string><key>CFBundleSupportedPlatforms</key><array><string>iPhoneSimulator</string></array></dict></plist>\n' > "$OUT/ContextOwner.app/Info.plist"
+          codesign --sign - "$OUT/ContextOwner.app"
+          VERSION=$(xcrun --sdk iphonesimulator --show-sdk-version)
+          test "$VERSION" = 18.5
+          RUNTIME=$(xcrun simctl list runtimes -j | jq -er --arg version "$VERSION" '[.runtimes[] | select(.isAvailable and .version == $version and (.identifier | contains("iOS"))) | .identifier] | if length == 1 then .[0] else error("runtime unavailable") end')
+          SIM_ID=$(xcrun simctl create context-owner-audit com.apple.CoreSimulator.SimDeviceType.iPhone-15 "$RUNTIME")
+          trap 'xcrun simctl shutdown "$SIM_ID" || true; xcrun simctl delete "$SIM_ID" || true' EXIT
+          xcrun simctl boot "$SIM_ID"
+          xcrun simctl bootstatus "$SIM_ID" -b
+          xcrun simctl install "$SIM_ID" "$OUT/ContextOwner.app"
+          STATUS=0
+          perl -e 'alarm 45; exec @ARGV; die "exec failed\n"' xcrun simctl launch --console "$SIM_ID" com.autodevjapan.contextowner > "$OUT/result.txt" 2>&1 || STATUS=$?
+          printf 'exit_status=%s\n' "$STATUS" > "$OUT/status.txt"
+          test "$STATUS" = 0
+          test "$(grep -Fxc 'binding_metadata_data=bool; kind_struct=true' "$OUT/result.txt")" = 1
+          test "$(grep -Ec '^binding_bool_metadata_complete=true; size=[1-9][0-9]*; stride=[1-9][0-9]*; alignment=[1-9][0-9]*; nonpod=true$' "$OUT/result.txt")" = 1
+          for LABEL in binding_metadata binding_init binding_get binding_set; do test "$(grep -Ec "^binding_entry=$LABEL; bytes=[0-9a-f]+$" "$OUT/result.txt")" = 1; done
+          test "$(grep -Ec '^binding_init_helper; bytes=[0-9a-f]+$' "$OUT/result.txt")" = 1
+          for LINE in rust_owner_drop_calls=1 context_destroy_calls=1 context_dealloc_calls=1 copy_survived_original_release=true binding_verified=false full_teardown_verified=false; do test "$(grep -Fxc "$LINE" "$OUT/result.txt")" = 1; done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: swift-context-owner-simulator-audit
+          path: ${{ runner.temp }}/context-owner-simulator/*.txt
+          retention-days: 1
+          if-no-files-found: error

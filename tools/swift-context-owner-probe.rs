@@ -112,11 +112,12 @@ fn inspect_binding_entry() {
    for b in std::slice::from_raw_parts(entry.cast::<u8>(),count) { print!("{b:02x}"); }
    println!();
    if label == "binding_init" {
-    assert_eq!(entry.addr()%4,0); assert!(page-entry.addr()%page>=32);
-    let instruction=entry.cast::<u8>().add(28).cast::<u32>().read();
+    let offset=if cfg!(target_os="ios") {16usize} else {28usize};
+    assert_eq!(entry.addr()%4,0); assert!(page-entry.addr()%page>=offset+4);
+    let instruction=entry.cast::<u8>().add(offset).cast::<u32>().read();
     assert_eq!(instruction&0xfc000000,0x14000000);
     let relative=((instruction<<6) as i32>>6) as isize*4;
-    let displacement=28isize.checked_add(relative).unwrap();
+    let displacement=(offset as isize).checked_add(relative).unwrap();
     let address=entry.addr().checked_add_signed(displacement).unwrap();
     let target=entry.cast::<u8>().wrapping_offset(displacement).cast::<c_void>();
     assert_eq!(address,target.addr()); assert_eq!(address%4,0);
