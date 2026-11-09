@@ -80,10 +80,13 @@ jobs:
           rustc --version >> "$OUT/versions.txt"
           sw_vers >> "$OUT/versions.txt"
           rustc -vV >> "$OUT/versions.txt"
+          test "$(rustc -vV | sed -n 's/^host: //p')" = aarch64-apple-darwin
           xcrun --sdk macosx --show-sdk-version >> "$OUT/versions.txt"
           SDK=$(xcrun --sdk macosx --show-sdk-path)
           rustc tools/swift-context-owner-probe.rs --edition 2024 --emit="llvm-ir=$OUT/context.ll,asm=$OUT/context.s,link" -L "native=$SDK/usr/lib/swift" -C link-arg=-Wl,-rpath,/usr/lib/swift -o "$OUT/context-owner"
           otool -L "$OUT/context-owner" > "$OUT/linked-libraries.txt"
+          otool -hv "$OUT/context-owner" > "$OUT/macho-target.txt"
+          grep -Eq 'ARM64[[:space:]]+ALL' "$OUT/macho-target.txt"
           grep -E 'METADATA|declare.*swift_(allocObject|deallocObject|retain|release)|module asm' "$OUT/context.ll" > "$OUT/layout-and-calls.txt"
           # Collect the actual native SDK Binding boundary before calling it.
           xcrun swift-api-digester -dump-sdk -module SwiftUICore -sdk "$SDK" -target arm64-apple-macos15.0 -o "$RUNNER_TEMP/context-SwiftUICore.json"
@@ -98,12 +101,16 @@ jobs:
             grep -Fx "$SYMBOL" "$RUNNER_TEMP/context-binding-export-tokens.txt" > /dev/null
             printf 'public_export_verified=%s\n' "$SYMBOL" >> "$OUT/binding-public-exports.txt"
           done
+          printf '#if __has_feature(ptrauth_calls)\n#error authenticated_call_target\n#endif\n' > "$OUT/ptrauth-target.c"
+          xcrun clang -target arm64-apple-macos15.0 -isysroot "$SDK" -fsyntax-only "$OUT/ptrauth-target.c"
+          printf 'target=arm64-apple-macos15.0\nptrauth_calls_enabled=false\n' > "$OUT/call-target.txt"
           STATUS=0
           perl -e 'alarm 20; exec @ARGV; die "exec failed\n"' "$OUT/context-owner" > "$OUT/result.txt" 2>&1 || STATUS=$?
           printf 'exit_status=%s\n' "$STATUS" > "$OUT/status.txt"
           test "$STATUS" = 0
           test "$(grep -Fxc 'binding_metadata_data=bool; kind_struct=true' "$OUT/result.txt")" = 1
           test "$(grep -Ec '^binding_bool_metadata_complete=true; size=[1-9][0-9]*; stride=[1-9][0-9]*; alignment=[1-9][0-9]*; nonpod=true$' "$OUT/result.txt")" = 1
+          test "$(grep -Ec '^binding_init_helper; bytes=[0-9a-f]+$' "$OUT/result.txt")" = 1
           for LABEL in binding_metadata binding_init binding_get binding_set; do
             test "$(grep -Ec "^binding_entry=$LABEL; bytes=[0-9a-f]+$" "$OUT/result.txt")" = 1
           done

@@ -47,7 +47,10 @@ unsafe extern "C" fn rust_context_destroy_c(object: *mut c_void) {
 }
 #[link(name="SwiftUI", kind="framework")]
 unsafe extern "C" {}
-unsafe extern "C" { fn getpagesize()->i32; fn dlsym(handle:*mut c_void, name:*const std::ffi::c_char)->*mut c_void; }
+#[repr(C)]
+#[derive(Default)]
+struct DlInfo { filename:*const std::ffi::c_char, base:*mut c_void, symbol:*const std::ffi::c_char, address:*mut c_void }
+unsafe extern "C" { fn dladdr(p:*const c_void,info:*mut DlInfo)->i32; fn getpagesize()->i32; fn dlsym(handle:*mut c_void, name:*const std::ffi::c_char)->*mut c_void; }
 #[repr(C)]
 struct MetadataResponse { value:*const c_void, state:usize }
 #[repr(C)]
@@ -108,6 +111,24 @@ fn inspect_binding_entry() {
    print!("binding_entry={label}; bytes=");
    for b in std::slice::from_raw_parts(entry.cast::<u8>(),count) { print!("{b:02x}"); }
    println!();
+   if label == "binding_init" {
+    assert_eq!(entry.addr()%4,0); assert!(page-entry.addr()%page>=32);
+    let instruction=entry.cast::<u8>().add(28).cast::<u32>().read();
+    assert_eq!(instruction&0xfc000000,0x14000000);
+    let relative=((instruction<<6) as i32>>6) as isize*4;
+    let displacement=28isize.checked_add(relative).unwrap();
+    let address=entry.addr().checked_add_signed(displacement).unwrap();
+    let target=entry.cast::<u8>().wrapping_offset(displacement).cast::<c_void>();
+    assert_eq!(address,target.addr()); assert_eq!(address%4,0);
+    let mut origin=DlInfo::default(); let mut destination=DlInfo::default();
+    assert_ne!(dladdr(entry,&mut origin),0); assert_ne!(dladdr(target,&mut destination),0);
+    assert!(!origin.base.is_null()&&origin.base==destination.base);
+    let bytes=128usize.min(page-target.addr()%page);
+    print!("binding_init_helper; bytes=");
+    for byte in std::slice::from_raw_parts(target.cast::<u8>(),bytes) { print!("{byte:02x}"); }
+    println!();
+   }
+
   }
  }
 }
