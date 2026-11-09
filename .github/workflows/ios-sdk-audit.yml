@@ -68,10 +68,27 @@ jobs:
           # A newer runner must never silently select its default Xcode.
           mkdir -p "$RUNNER_TEMP/ios-sdk-audit"
           exec > >(tee "$RUNNER_TEMP/ios-sdk-audit/pinned-toolchain.txt") 2>&1
+          sw_vers
+          uname -m
+          df -h "$RUNNER_TEMP"
+          sysctl hw.memsize hw.logicalcpu
+          if command -v xcodes >/dev/null; then xcodes installed; fi
+          for CACHE in "$HOME/Library/Application Support/com.robotsandpencils.xcodes" "$HOME/Library/Caches/xcodes" "$HOME/Downloads"; do
+            if [ -d "$CACHE" ]; then
+              find "$CACHE" -maxdepth 2 -type f -name '*15.4*.xip' -print
+            fi
+          done
           PINNED=/Applications/Xcode_15.4.app/Contents/Developer
           if [ ! -d "$PINNED" ]; then
             echo '::error::Pinned Xcode 15.4 is missing; SDK 17.5 / Swift 5.10 ABI acceptance was not executed.'
             find /Applications -maxdepth 1 -name 'Xcode*.app' -print
+            # Inspect the supported installation without executing old ABI code.
+            xcodebuild -version
+            xcrun swiftc --version
+            xcrun --sdk iphonesimulator --show-sdk-version
+            xcrun simctl list runtimes
+            # Only HTTP status/size are logged; never cookies or signed URLs.
+            curl --silent --location --range 0-0 --max-time 20 --output /dev/null --write-out 'official_xcode_archive_http=%{http_code}; probe_bytes=%{size_download}\n' 'https://download.developer.apple.com/Developer_Tools/Xcode_15.4/Xcode_15.4.xip' || true
             exit 1
           fi
           export DEVELOPER_DIR="$PINNED"
