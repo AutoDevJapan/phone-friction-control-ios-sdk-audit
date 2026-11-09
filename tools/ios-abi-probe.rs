@@ -4449,6 +4449,18 @@ mod ui_authorization_test {
                 search = available_control(observer, c"Search", &[c"searchFields"]);
                 if search.is_some() { break; }
             }
+            if search.is_none() {
+                // The current captured Picker does not display its search bar.
+                // Try the public scroll gesture once, then re-query without assuming why.
+                action(app, c"swipeDown");
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+                while search.is_none() && std::time::Instant::now() < deadline {
+                    for observer in [app, system] {
+                        search = available_control(observer, c"Search", &[c"searchFields"]);
+                        if search.is_some() { break; }
+                    }
+                }
+            }
             let Some(search) = search else {
                 fail(test, c"Public Picker search control unavailable");
                 return;
