@@ -1457,7 +1457,8 @@ jobs:
           xcodebuild -version > "$OUT/versions.txt"
           rustc --version >> "$OUT/versions.txt"
           git -C app apply ../tools/ios-app-cargo-target-split.patch
-          (cd app && cargo build --release --bin phone-friction-control-preview --features desktop-preview --target aarch64-apple-ios-sim 2>&1 | tail -n 40) > "$OUT/build.txt"
+          (cd app && cargo build --release --bin phone-friction-control-preview --features desktop-preview --target aarch64-apple-ios-sim) > "$OUT/build-full.txt" 2>&1
+          tail -n 40 "$OUT/build-full.txt" > "$OUT/build.txt"
           cp app/target/aarch64-apple-ios-sim/release/phone-friction-control-preview "$OUT/Product.app/product"
           printf '<?xml version="1.0"?><plist version="1.0"><dict><key>CFBundleIdentifier</key><string>com.autodevjapan.phonefrictioncontrol.simulator</string><key>CFBundleName</key><string>PhoneFrictionControl</string><key>CFBundleExecutable</key><string>product</string><key>CFBundlePackageType</key><string>APPL</string><key>CFBundleVersion</key><string>1</string><key>CFBundleShortVersionString</key><string>0.1.0</string><key>MinimumOSVersion</key><string>18.5</string><key>UIDeviceFamily</key><array><integer>1</integer></array><key>UILaunchScreen</key><dict/><key>CFBundleSupportedPlatforms</key><array><string>iPhoneSimulator</string></array></dict></plist>\n' > "$OUT/Product.app/Info.plist"
           codesign --sign - "$OUT/Product.app"
@@ -1468,13 +1469,22 @@ jobs:
           xcrun simctl bootstatus "$SIM_ID" -b
           xcrun simctl install "$SIM_ID" "$OUT/Product.app"
           BID=com.autodevjapan.phonefrictioncontrol.simulator
-          xcrun simctl launch "$SIM_ID" "$BID" > "$OUT/launch.txt" 2>&1 || true
-          sleep 20
+          LAUNCH_STATUS=0
+          xcrun simctl launch --stdout="$OUT/stdout.txt" --stderr="$OUT/stderr.txt" "$SIM_ID" "$BID" > "$OUT/launch.txt" 2>&1 || LAUNCH_STATUS=$?
+          printf 'launch_status=%s\n' "$LAUNCH_STATUS" > "$OUT/launch_status.txt"
+          PID=$(awk -F': ' 'NR==1 {print $2}' "$OUT/launch.txt")
+          printf 'pid=%s\n' "$PID" > "$OUT/pid.txt"
+          sleep 3
+          xcrun simctl io "$SIM_ID" screenshot "$OUT/early.png" || true
+          sleep 17
           xcrun simctl spawn "$SIM_ID" launchctl list > "$OUT/launchctl.txt" 2>&1 || true
-          grep -c "$BID" "$OUT/launchctl.txt" > "$OUT/running_count.txt" || true
+          awk -v p="$PID" '$1 == p' "$OUT/launchctl.txt" > "$OUT/same_pid_alive.txt" || true
           xcrun simctl io "$SIM_ID" screenshot "$OUT/first.png" || true
           xcrun simctl spawn "$SIM_ID" log show --last 2m --style compact --predicate 'process == "product"' 2>&1 | tail -n 80 > "$OUT/log.txt" || true
           find ~/Library/Logs/DiagnosticReports -name 'product*' -maxdepth 1 2>/dev/null | head -n 3 > "$OUT/crash.txt" || true
+          test "$LAUNCH_STATUS" = 0
+          test -n "$PID"
+          test "$(wc -l < "$OUT/same_pid_alive.txt")" = 1
           test -s "$OUT/first.png"
       - uses: actions/upload-artifact@v4
         if: always()
@@ -1482,6 +1492,6 @@ jobs:
           name: product-simulator-launch
           path: |
             ${{ runner.temp }}/app-simulator/*.txt
-            ${{ runner.temp }}/app-simulator/first.png
+            ${{ runner.temp }}/app-simulator/*.png
           retention-days: 3
           if-no-files-found: error
