@@ -277,6 +277,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          trap 'printf "Runtime prerequisite failed at line %s\n" "$LINENO" >&2' ERR
+          if [ '${{ inputs.ui_consent_test }}' = true ]; then set -x; fi
           OUT="$RUNNER_TEMP/ios-sdk-audit"
           SDK=$(xcrun --sdk iphonesimulator --show-sdk-path)
           VERSION=$(xcrun --sdk iphonesimulator --show-sdk-version)
@@ -369,7 +371,7 @@ jobs:
               export HOSTING_INIT_SYMBOL=$(jq -er '[.[] | select(.usr == "s:7SwiftUI19UIHostingControllerC") | .members[] | select(.kind == "Constructor" and .printedName == "init(rootView:)" and .moduleName == "SwiftUI" and .genericSig == "<Content where Content : SwiftUI.View>" and .throwing != true and (.children | map(.printedName)) == ["SwiftUI.UIHostingController<Content>", "Content"] and .children[0].usr == "s:7SwiftUI19UIHostingControllerC" and .mangledName == "\u0024s7SwiftUI19UIHostingControllerC8rootViewACyxGx_tcfc") | .mangledName | sub("cfc$"; "cfC")] | if length == 1 then .[0] else error("expected exact hosting rootView allocating initializer") end' "$OUT/SwiftUI-selected-declarations.json")
               export VIEW_PROTOCOL_SYMBOL=$(jq -er '[.[] | select(.name == "View" and .declKind == "Protocol" and .usr == "s:7SwiftUI4ViewP") | .usr | sub("^s:"; "\u0024s") | sub("P$"; "Mp")] | if length == 1 then .[0] else error("expected SwiftUI.View protocol descriptor") end' "$OUT/SwiftUI-selected-declarations.json")
               grep -oE '\$s14FamilyControls0A14ActivityPickerV[[:alnum:]_]+' "$SDK/System/Library/Frameworks/FamilyControls.framework/FamilyControls.tbd" | sort -u > "$RUNNER_TEMP/picker-candidate-exports.txt"
-              grep -oE '\$s7SwiftUI(19UIHostingControllerC|4View)[[:alnum:]_]+' "$SDK/System/Library/Frameworks/SwiftUI.framework/SwiftUI.tbd" | sort -u > "$RUNNER_TEMP/hosting-candidate-exports.txt"
+              { grep -oE '\$s7SwiftUI19UIHostingControllerC[[:alnum:]_]+' "$SDK/System/Library/Frameworks/SwiftUI.framework/SwiftUI.tbd"; grep -oE '\$s7SwiftUI4View[[:alnum:]_]+' "$SDK/System/Library/Frameworks/SwiftUICore.framework/SwiftUICore.tbd"; } | sort -u > "$RUNNER_TEMP/hosting-candidate-exports.txt"
               grep -oE '_swift_conformsToProtocol[[:alnum:]_]*' "$SDK/usr/lib/swift/libswiftCore.tbd" | sort -u > "$RUNNER_TEMP/conformance-candidate-exports.txt"
               {
                 for SYMBOL in "$PICKER_METADATA_SYMBOL" "$PICKER_INIT_SYMBOL"; do grep -Fx "$SYMBOL" "$RUNNER_TEMP/picker-candidate-exports.txt"; done
