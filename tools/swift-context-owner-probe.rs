@@ -259,6 +259,11 @@ unsafe fn binding_copy_drop(metadata:*const c_void,vwt:*const Vwt) {
   let copy:unsafe extern "Swift" fn(*mut c_void,*const c_void,*const c_void)->*mut c_void=std::mem::transmute(table.functions[2]);
   let destroy:unsafe extern "Swift" fn(*mut c_void,*const c_void)=std::mem::transmute(table.functions[1]);
   assert_eq!(copy(copied,original,metadata),copied);
+  for name in [c"$s7SwiftUI7BindingV12wrappedValuexvg",c"$s7SwiftUI7BindingV12wrappedValuexvs"] {
+   let p=dlsym(handle,name.as_ptr()); println!("binding_accessor_present; name={}; present={}",name.to_str().unwrap(),!p.is_null());
+   if !p.is_null() && p.addr()%4==0 { let g=getpagesize(); assert!(g>0); let n=128usize.min(g as usize-p.addr()%g as usize); print!("binding_accessor_bytes; name={}; bytes=",name.to_str().unwrap()); for b in std::slice::from_raw_parts(p.cast::<u8>(),n){print!("{b:02x}");} println!(); }
+  }
+  for w in 0..3usize { let word=copied.cast::<*const c_void>().add(w).read(); let mut info=DlInfo::default(); let known=!word.is_null()&&dladdr(word,&mut info)!=0&&!info.symbol.is_null(); println!("binding_copy_word; index={w}; null={}; dladdr_symbol={}",word.is_null(),known); }
   destroy(original,metadata); std::alloc::dealloc(original.cast(),layout);
   assert_eq!(OWNER_DROPS.load(Ordering::SeqCst),1); // previous standalone payload only
   destroy(copied,metadata); std::alloc::dealloc(copied.cast(),layout);
