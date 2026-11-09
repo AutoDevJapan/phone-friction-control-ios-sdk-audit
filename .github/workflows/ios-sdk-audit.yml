@@ -56,10 +56,27 @@ permissions:
   contents: read
 jobs:
   sdk-audit:
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+      - name: Select the pinned SDK and Swift toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The Rust probe contains SDK 17.5 / Swift 5.10 ABI assumptions.
+          # A newer runner must never silently select its default Xcode.
+          PINNED=/Applications/Xcode_15.4.app/Contents/Developer
+          if [ ! -d "$PINNED" ]; then
+            echo '::error::Pinned Xcode 15.4 is missing; SDK 17.5 / Swift 5.10 ABI acceptance was not executed.'
+            find /Applications -maxdepth 1 -name 'Xcode*.app' -print
+            exit 1
+          fi
+          export DEVELOPER_DIR="$PINNED"
+          xcodebuild -version
+          test "$(xcrun --sdk iphonesimulator --show-sdk-version)" = 17.5
+          xcrun swiftc --version | grep -F 'Swift version 5.10'
+          printf 'DEVELOPER_DIR=%s\n' "$DEVELOPER_DIR" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: nightly-2026-07-18
