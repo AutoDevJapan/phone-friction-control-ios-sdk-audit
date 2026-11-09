@@ -92,7 +92,7 @@ fn inspect_binding_metadata() -> (*const c_void,*const Vwt) {
    let filename=std::ffi::CStr::from_ptr(info.filename).to_bytes();
    assert!(filename.ends_with(b"/SwiftUICore")||filename.ends_with(b"/libswiftCore.dylib"));
    assert_eq!(pointer.addr()%4,0);
-   let count=128usize.min(page-pointer.addr()%page);
+   let count=160usize.min(page-pointer.addr()%page);
    print!("binding_vwt_entry={name}; bytes=");
    for byte in std::slice::from_raw_parts(pointer.cast::<u8>(),count) { print!("{byte:02x}"); }
    println!();
@@ -139,6 +139,27 @@ fn inspect_binding_entry() {
     let mut origin=DlInfo::default(); let mut destination=DlInfo::default();
     assert_ne!(dladdr(entry,&mut origin),0); assert_ne!(dladdr(target,&mut destination),0);
     assert!(!origin.base.is_null()&&origin.base==destination.base);
+    if cfg!(target_os="ios") {
+     assert!(page-target.addr()%page>=0x10c);
+     for (offset,expected) in [(0x9cusize,c"swift_retain"),(0xa4,c"swift_retain"),(0x100,c"swift_release"),(0x108,c"swift_release")] {
+      let word=target.cast::<u8>().add(offset).cast::<u32>().read();
+      assert_eq!(word&0xfc000000,0x94000000);
+      let delta=((word<<6)as i32>>6)as isize*4;
+      let displacement=(offset as isize).checked_add(delta).unwrap();
+      let address=target.addr().checked_add_signed(displacement).unwrap();
+      let called=target.cast::<u8>().wrapping_offset(displacement).cast::<c_void>();
+      assert_eq!(called.addr(),address);assert_eq!(address%4,0);
+      let mut info=DlInfo::default();assert_ne!(dladdr(called,&mut info),0);
+      assert!(!info.base.is_null()&&!info.filename.is_null());
+      let expected_entry=dlsym(std::ptr::without_provenance_mut(usize::MAX-1),expected.as_ptr());
+      assert!(!expected_entry.is_null());
+      let symbol_matches=info.address==called && !info.symbol.is_null() && {
+       let name=std::ffi::CStr::from_ptr(info.symbol).to_bytes();
+       name==expected.to_bytes() || name.strip_prefix(b"_")==Some(expected.to_bytes())
+      };
+      println!("binding_context_callee; offset={offset}; exact_entry={}; expected_symbol={symbol_matches}",called==expected_entry);
+     }
+    }
     let bytes=512usize.min(page-target.addr()%page);
     print!("binding_init_helper; bytes=");
     for byte in std::slice::from_raw_parts(target.cast::<u8>(),bytes) { print!("{byte:02x}"); }
