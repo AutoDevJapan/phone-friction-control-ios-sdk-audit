@@ -1445,7 +1445,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: AutoDevJapan/phone-friction-control
-          ref: edff2beb21e7ef7924ba0e04a64cd575f6237c95
+          ref: 880275f
           path: app
       - uses: dtolnay/rust-toolchain@master
         with:
@@ -1460,14 +1460,14 @@ jobs:
           mkdir -p "$OUT/Product.app"
           xcodebuild -version > "$OUT/versions.txt"
           rustc --version >> "$OUT/versions.txt"
-          git -C app apply ../tools/ios-app-diag-logger-and-target-split.patch
-          git -C app apply ../tools/ios-product-metal-limits.patch
-          (cd app && cargo build --release --bin phone-friction-control-preview --features desktop-preview --target aarch64-apple-ios-sim) > "$OUT/build-full.txt" 2>&1
+          git -C app rev-parse HEAD > "$OUT/product-source.txt"
+          printf 'patches_applied=false\ndiagnostic_logger=false\n' > "$OUT/product-scope.txt"
+          (cd app && cargo build --locked --release --bin phone-friction-control-preview --features desktop-preview --target aarch64-apple-ios-sim) > "$OUT/build-full.txt" 2>&1
           tail -n 40 "$OUT/build-full.txt" > "$OUT/build.txt"
           cp app/target/aarch64-apple-ios-sim/release/phone-friction-control-preview "$OUT/Product.app/product"
           printf '<?xml version="1.0"?><plist version="1.0"><dict><key>CFBundleIdentifier</key><string>com.autodevjapan.phonefrictioncontrol.simulator</string><key>CFBundleName</key><string>PhoneFrictionControl</string><key>CFBundleExecutable</key><string>product</string><key>CFBundlePackageType</key><string>APPL</string><key>CFBundleVersion</key><string>1</string><key>CFBundleShortVersionString</key><string>0.1.0</string><key>MinimumOSVersion</key><string>18.5</string><key>UIDeviceFamily</key><array><integer>1</integer></array><key>UILaunchScreen</key><dict/><key>CFBundleSupportedPlatforms</key><array><string>iPhoneSimulator</string></array></dict></plist>\n' > "$OUT/Product.app/Info.plist"
           codesign --sign - "$OUT/Product.app"
-          shasum -a 256 "$OUT/Product.app/product" app/Cargo.lock tools/ios-app-diag-logger-and-target-split.patch tools/ios-product-metal-limits.patch > "$OUT/build-hashes.txt"
+          shasum -a 256 "$OUT/Product.app/product" app/Cargo.lock > "$OUT/build-hashes.txt"
           tar -czf "$OUT/Product.app.tar.gz" -C "$OUT" Product.app
           cp app/Cargo.lock "$OUT/effective-Cargo.lock"
           shasum -a 256 "$OUT/Product.app.tar.gz" > "$OUT/archive-hash.txt"
