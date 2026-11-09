@@ -6,6 +6,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 static DESTROYS: AtomicUsize = AtomicUsize::new(0);
 static DEALLOCS: AtomicUsize = AtomicUsize::new(0);
 static GETS:AtomicUsize=AtomicUsize::new(0);
+static SETS:AtomicUsize=AtomicUsize::new(0);
+static ACTIVE:std::sync::atomic::AtomicBool=std::sync::atomic::AtomicBool::new(false);
+static REJECTED:AtomicUsize=AtomicUsize::new(0);
 static OWNER_DROPS: AtomicUsize = AtomicUsize::new(0);
 struct Payload { value: usize }
 impl Drop for Payload { fn drop(&mut self) { OWNER_DROPS.fetch_add(1, Ordering::SeqCst); } }
@@ -215,19 +218,62 @@ unsafe extern "C" {
 }
 #[unsafe(no_mangle)]
 unsafe extern "C" fn binding_owned_get_c(dst:*mut u8,context:*mut c_void) {
+ if !ACTIVE.load(Ordering::SeqCst) { REJECTED.fetch_add(1,Ordering::SeqCst); return; }
  let payload=unsafe {context.cast::<u8>().add(16).cast::<*mut Payload>().read()};
  unsafe { dst.write(((*payload).value!=0) as u8); }
  GETS.fetch_add(1,Ordering::SeqCst);
 }
 #[unsafe(no_mangle)]
 unsafe extern "C" fn binding_owned_set_c(src:*const u8,context:*mut c_void) {
+ if !ACTIVE.load(Ordering::SeqCst) { REJECTED.fetch_add(1,Ordering::SeqCst); return; }
+ SETS.fetch_add(1,Ordering::SeqCst);
  let payload=unsafe {context.cast::<u8>().add(16).cast::<*mut Payload>().read()};
  unsafe {(*payload).value=src.read() as usize;}
 }
+core::arch::global_asm!(
+ ".text", ".p2align 2", ".globl _binding_call_get", "_binding_call_get:",
+ ".cfi_startproc",
+ "stp x20, x30, [sp, #-16]!", ".cfi_def_cfa_offset 16", ".cfi_offset 20, -16", ".cfi_offset 30, -8",
+ "mov x8, x2", "mov x9, x3", "mov x20, x1", "blr x9",
+ "ldp x20, x30, [sp], #16", ".cfi_restore 20", ".cfi_restore 30", ".cfi_def_cfa_offset 0", "ret", ".cfi_endproc",
+ ".globl _binding_call_set", "_binding_call_set:",
+ ".cfi_startproc",
+ "stp x20, x30, [sp, #-16]!", ".cfi_def_cfa_offset 16", ".cfi_offset 20, -16", ".cfi_offset 30, -8",
+ "mov x9, x3", "mov x20, x2", "blr x9",
+ "ldp x20, x30, [sp], #16", ".cfi_restore 20", ".cfi_restore 30", ".cfi_def_cfa_offset 0", "ret", ".cfi_endproc",
+);
+unsafe extern "C" {
+ fn binding_call_get(metadata:*const c_void,binding:*mut c_void,dst:*mut u8,function:*const c_void);
+ fn binding_call_set(value:*const u8,metadata:*const c_void,binding:*mut c_void,function:*const c_void);
+}
+unsafe fn follow_same_image_branch(p:*const c_void)->*const c_void { unsafe {
+ assert_eq!(p.addr()%4,0);let g=getpagesize();assert!(g>0);let g=g as usize;assert!(g-p.addr()%g>=4);
+ let ins=p.cast::<u32>().read();assert_eq!(ins&0xfc000000,0x14000000);
+ let rel=((ins<<6) as i32>>6) as isize*4;let t=p.cast::<u8>().wrapping_offset(rel).cast::<c_void>();
+ let (mut a,mut b)=(DlInfo::default(),DlInfo::default());
+ assert!(dladdr(p,&mut a)!=0&&dladdr(t,&mut b)!=0&&!a.base.is_null()&&a.base==b.base);assert_eq!(t.addr()%4,0);t
+}}
+unsafe fn verify_words(p:*const c_void,words:&[(usize,u32,u32)],span:usize) { unsafe {
+ let g=getpagesize();assert!(g>0);let g=g as usize;assert!(g-p.addr()%g>=span);
+ for &(o,m,e) in words { assert_eq!(p.cast::<u8>().add(o).cast::<u32>().read()&m,e); }
+}}
+unsafe fn verify_accessors(getter:*const c_void,setter:*const c_void)->*const c_void { unsafe {
+ assert!(!getter.is_null()&&!setter.is_null());
+ let target=follow_same_image_branch(getter);
+ let f=0xffffffffu32;
+ verify_words(target,&[(0,f,0xa9bd57f6),(4,f,0xa9014ff4),(8,f,0xa9027bfd),(12,f,0x910083fd),(16,f,0xaa0003f5),(20,f,0xaa0803f3),
+  (0x50,f,0xf9400688),(0x54,f,0xf9400109),(0x58,f,0xf9403529),(0x5c,f,0x52800020),(0x60,f,0xaa1403f6),(0x64,f,0xaa0803f4),(0x68,f,0xd63f0120),
+  (0x6c,f,0xb98022a8),(0x70,f,0xf9400aa2),(0x74,f,0xf85f8049),(0x78,f,0xf9400923),(0x7c,f,0x8b0802c1),(0x80,f,0xaa1303e0),(0x90,f,0xd61f0060),
+  (0x94,f,0xf9400694),(0x98,f,0xf9400288),(0x9c,f,0xf9403d09),(0xa0,f,0xaa1303e8),(0xa4,f,0xd63f0120),(0xb4,f,0xd65f03c0)],0xb8);
+ verify_words(setter,&[(0,f,0xa9bd57f6),(4,f,0xa9014ff4),(8,f,0xa9027bfd),(12,f,0x910083fd),(16,f,0xaa0103f3),(20,f,0xaa0003f5),(24,0xfc000000,0x94000000),
+  (28,f,0xf9400a61),(32,f,0xf85f8028),(36,f,0xf9400502),(40,f,0xaa1503e0),(44,f,0xa9427bfd),(48,f,0xa9414ff4),(52,f,0xa8c357f6),(56,f,0xd61f0040)],60);
+ target
+}}
 // Only the non-authenticated arm64 ABI is admitted by the build/target checks.
 // Function slots retain their original values; no pointer stripping/resigning.
 unsafe fn binding_copy_drop(metadata:*const c_void,vwt:*const Vwt) {
  assert!(cfg!(all(target_os="ios",target_env="sim",target_arch="aarch64")), "Binding copy requires the validated Simulator target");
+ ACTIVE.store(true,Ordering::SeqCst);
  unsafe {
   let table=&*vwt;
   assert_eq!((table.size,table.stride,(table.flags&255)+1),(17,24,8));
@@ -276,8 +322,28 @@ unsafe fn binding_copy_drop(metadata:*const c_void,vwt:*const Vwt) {
   for w in 0..3usize { let word=copied.cast::<*const c_void>().add(w).read(); let mut info=DlInfo::default(); let known=!word.is_null()&&dladdr(word,&mut info)!=0&&!info.symbol.is_null(); println!("binding_copy_word; index={w}; null={}; dladdr_symbol={}",word.is_null(),known); }
   destroy(original,metadata); std::alloc::dealloc(original.cast(),layout);
   assert_eq!(OWNER_DROPS.load(Ordering::SeqCst),1); // previous standalone payload only
+  let getter=dlsym(handle,c"$s7SwiftUI7BindingV12wrappedValuexvg".as_ptr());
+  let setter=dlsym(handle,c"$s7SwiftUI7BindingV12wrappedValuexvs".as_ptr());
+  verify_accessors(getter,setter);
+  let gets_before=GETS.load(Ordering::SeqCst);
+  let mut out:u8=0xff;
+  binding_call_get(metadata,copied,&mut out,getter);
+  assert_eq!(out,0);assert!(GETS.load(Ordering::SeqCst)>gets_before);
+  println!("binding_late_getter_initial_value=false\nbinding_late_getter_calls=1");
+  let new_value:u8=1;
+  binding_call_set(&new_value,metadata,copied,setter);
+  assert_eq!(SETS.load(Ordering::SeqCst),1);
+  out=0xff;binding_call_get(metadata,copied,&mut out,getter);
+  assert_eq!(out,1);
+  println!("binding_late_setter_calls=1\nbinding_late_value_after_set=true");
+  ACTIVE.store(false,Ordering::SeqCst);
   destroy(copied,metadata); std::alloc::dealloc(copied.cast(),layout);
   assert_eq!(OWNER_DROPS.load(Ordering::SeqCst),2);
+  let (gets,sets)=(GETS.load(Ordering::SeqCst),SETS.load(Ordering::SeqCst));
+  let mut closed:u8=0xaa;let closed_value:u8=1;
+  binding_owned_get_c(&mut closed,std::ptr::null_mut());binding_owned_set_c(&closed_value,std::ptr::null_mut());
+  assert_eq!((closed,GETS.load(Ordering::SeqCst),SETS.load(Ordering::SeqCst),REJECTED.load(Ordering::SeqCst)),(0xaa,gets,sets,2));
+  println!("binding_closed_rust_callback_rejections=2");
   println!("binding_constructor_calls=1\nbinding_copy_calls=1\nbinding_destroy_calls=2\nbinding_context_drop_calls=1");
  }
 }
