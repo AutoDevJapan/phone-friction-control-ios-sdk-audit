@@ -810,6 +810,29 @@ jobs:
           if [ '${{ inputs.selection_inspection_mode }}' = consent-selection-acceptance ]; then
             # Finite official fixture acquisition: built-in Messages in this NEW
             # Simulator only. No third-party app download/account/playback.
+            # A separate ordinary app bundle, with no Family Controls entitlement.
+            # Reuse our built Rust/UIKit executable; do not request permission
+            # in this fixture or manufacture activity tokens.
+            FIXTURE_APP="$OUT/PhoneControlFixture.app"
+            cp -R "$PROBE_APP" "$FIXTURE_APP"
+            /usr/libexec/PlistBuddy -c 'Set :CFBundleIdentifier com.autodevjapan.phonecontrolfixture' "$FIXTURE_APP/Info.plist"
+            /usr/libexec/PlistBuddy -c 'Set :CFBundleName Phone Control Fixture' "$FIXTURE_APP/Info.plist"
+            /usr/libexec/PlistBuddy -c 'Add :CFBundleDisplayName string Phone Control Fixture' "$FIXTURE_APP/Info.plist"
+            printf '<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict/></plist>\n' > "$RUNNER_TEMP/fixture-entitlements.plist"
+            codesign --force --sign - --entitlements "$RUNNER_TEMP/fixture-entitlements.plist" "$FIXTURE_APP" > "$OUT/fixture-signing.txt" 2>&1
+            codesign --verify --strict "$FIXTURE_APP" > "$OUT/fixture-signature-verify.txt" 2>&1
+            codesign --display --entitlements :- "$FIXTURE_APP" > "$OUT/fixture-signed-entitlements.plist" 2> "$OUT/fixture-signature-readback.txt"
+            plutil -convert json -o "$OUT/fixture-signed-entitlements.json" "$OUT/fixture-signed-entitlements.plist"
+            jq -e 'type == "object" and length == 0' "$OUT/fixture-signed-entitlements.json"
+            /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$FIXTURE_APP/Info.plist" > "$OUT/fixture-bundle-id.txt"
+            /usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$FIXTURE_APP/Info.plist" > "$OUT/fixture-display-name.txt"
+            grep -Fx 'com.autodevjapan.phonecontrolfixture' "$OUT/fixture-bundle-id.txt"
+            grep -Fx 'Phone Control Fixture' "$OUT/fixture-display-name.txt"
+            xcrun simctl install "$SIM_ID" "$FIXTURE_APP"
+            SIMCTL_CHILD_PHONE_CONTROL_ORDINARY_FIXTURE=1 xcrun simctl launch "$SIM_ID" com.autodevjapan.phonecontrolfixture > "$OUT/fixture-launch.txt"
+            sleep 20
+            xcrun simctl terminate "$SIM_ID" com.autodevjapan.phonecontrolfixture
+            printf 'fixture_source=owned_rust_uikit_bundle\nforeground_seconds_requested=20\npicker_selectable_verified=false\n' > "$OUT/fixture-install-scope.txt"
             xcrun simctl listapps "$SIM_ID" > "$RUNNER_TEMP/official-simulator-apps.plist"
             plutil -convert json -o "$RUNNER_TEMP/official-simulator-apps.json" "$RUNNER_TEMP/official-simulator-apps.plist"
             jq -e 'has("com.apple.MobileSMS")' "$RUNNER_TEMP/official-simulator-apps.json" > "$OUT/official-simulator-app-fixture.txt"
@@ -1123,6 +1146,8 @@ jobs:
           path: |
             ${{ runner.temp }}/ios-sdk-audit/consent-ui.xcresult
             ${{ runner.temp }}/ios-sdk-audit/consent-selection-*.txt
+            ${{ runner.temp }}/ios-sdk-audit/fixture-*.txt
+            ${{ runner.temp }}/ios-sdk-audit/fixture-signed-entitlements.*
             ${{ runner.temp }}/ios-sdk-audit/consent-selection-*.png
             ${{ runner.temp }}/ios-sdk-audit/consent-selection-attachments/
             ${{ runner.temp }}/ios-sdk-audit/selection-count-*.txt

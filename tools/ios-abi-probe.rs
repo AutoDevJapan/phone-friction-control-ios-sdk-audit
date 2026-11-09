@@ -4232,11 +4232,12 @@ mod ui_authorization_test {
     }
 
     #[cfg(ui_test_selection_acceptance)]
-    unsafe fn observe_fixture_roles(application: Id, observer: &str, messages: bool) {
-        let (fixture, fixture_kind) = if messages {
-            (c"Messages", "messages")
-        } else {
-            (c"Social", "social")
+    unsafe fn observe_fixture_roles(application: Id, observer: &str, fixture_id: u8) {
+        let (fixture, fixture_kind) = match fixture_id {
+            0 => (c"Social", "social"),
+            1 => (c"Messages", "messages"),
+            2 => (c"Phone Control Fixture", "owned-app"),
+            _ => panic!("unknown fixture"),
         };
         // Diagnostic only in the fresh, disposable CI Simulator. Record role
         // counts and frames of the already pictured Social fixture; never
@@ -4415,8 +4416,8 @@ mod ui_authorization_test {
                 }
             }
             let Some(category) = category else {
-                observe_fixture_roles(app, "host", false);
-                observe_fixture_roles(system, "system", false);
+                observe_fixture_roles(app, "host", 0);
+                observe_fixture_roles(system, "system", 0);
                 fail(test, c"Observed Social disclosure unavailable");
                 return;
             };
@@ -4441,14 +4442,31 @@ mod ui_authorization_test {
             println!(
                 "XCTest consent-selection: navigation_tap_returned=true; navigation_setter_delta=0; navigation_applications_count=0"
             );
+            // Search the separately installed ordinary fixture through the
+            // actual public search control; do not assume a category assignment.
+            let mut search = None;
+            for observer in [app, system] {
+                search = available_control(observer, c"Search", &[c"searchFields"]);
+                if search.is_some() { break; }
+            }
+            let Some(search) = search else {
+                fail(test, c"Public Picker search control unavailable");
+                return;
+            };
+            action(search.0, c"tap");
+            let fixture_name = string(c"Phone Control Fixture");
+            let type_text: unsafe extern "C" fn(Id, Sel, Id) =
+                std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+            type_text(search.0, sel_registerName(c"typeText:".as_ptr()), fixture_name.0);
+            println!("XCTest consent-selection: owned_fixture_search_submitted=true; picker_availability_unverified=true");
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(12);
             let mut candidate = None;
             while candidate.is_none() && std::time::Instant::now() < deadline {
                 for observer in [app, system] {
                     candidate = available_control(
                         observer,
-                        c"Messages",
-                        &[c"otherElements", c"cells", c"buttons"],
+                        c"Phone Control Fixture",
+                        &[c"otherElements", c"cells", c"buttons", c"staticTexts"],
                     );
                     if candidate.is_some() {
                         break;
@@ -4480,9 +4498,9 @@ mod ui_authorization_test {
                 action(application.0, c"tap");
                 println!("XCTest consent-selection: actual_app_control_tap_returned=true");
             } else {
-                observe_fixture_roles(app, "host-app-fixture", true);
-                observe_fixture_roles(system, "system-app-fixture", true);
-                fail(test, c"Official Simulator app fixture unavailable in Picker; category choice is not app selection");
+                observe_fixture_roles(app, "host-app-fixture", 2);
+                observe_fixture_roles(system, "system-app-fixture", 2);
+                fail(test, c"Owned installed fixture unavailable in Picker; category choice is not app selection");
                 return;
             }
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
@@ -4938,6 +4956,7 @@ mod native_host {
     }
     #[cfg(ui_test_host)]
     unsafe extern "C" fn request_clicked(_: Id, _: Sel, _: Id) {
+        if std::env::var_os("PHONE_CONTROL_ORDINARY_FIXTURE").is_some() { return; }
         if !REQUESTED.swap(true, Ordering::AcqRel) {
             start_request(super::inspect_singleton());
         }
@@ -5040,6 +5059,12 @@ mod native_host {
             return;
         }
         println!("Rust UIKit active callback observed");
+        // The separately signed ordinary inventory fixture reuses this binary,
+        // but must not initialize Family Controls or its test state.
+        if std::env::var_os("PHONE_CONTROL_ORDINARY_FIXTURE").is_some() {
+            println!("Ordinary fixture active; authorization_requested=false");
+            return;
+        }
         #[cfg(all(selection_layout_probe, not(consent_selection_acceptance)))]
         {
             // Keep the getter's allocation reference for this bounded process,
