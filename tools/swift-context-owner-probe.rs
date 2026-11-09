@@ -3,6 +3,9 @@
 #![feature(abi_swift)]
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(all(target_os="ios",target_env="sim",target_arch="aarch64"))]
+#[link(name="ManagedSettings",kind="framework")]
+unsafe extern "C" {}
 static DESTROYS: AtomicUsize = AtomicUsize::new(0);
 static DEALLOCS: AtomicUsize = AtomicUsize::new(0);
 static GETS:AtomicUsize=AtomicUsize::new(0);
@@ -517,7 +520,55 @@ unsafe fn verify_ios_binding_calls(entry:*const c_void,table:&Vwt) { unsafe {
  (76,0xffffffffu32,0xd61f0040u32),
  ] {assert_eq!(pointer.cast::<u8>().add(offset).cast::<u32>().read()&mask,expected);}
  }}
+#[cfg(all(target_os="ios",target_env="sim",target_arch="aarch64"))]
+fn inspect_category_token_metadata_only() {
+ unsafe {
+  let page=getpagesize();assert!(page>0);let page=page as usize;
+  let symbols=std::env::var("CATEGORY_TOKEN_SYMBOLS").expect("SDK-derived token symbols absent");
+  assert_eq!(symbols.lines().count(),3);
+  let handle=std::ptr::without_provenance_mut(usize::MAX-1);
+  let mut seen=0u8;
+  for line in symbols.lines() {
+   let (kind,name)=line.split_once('|').expect("symbol record");
+   assert!(["accessor","descriptor","hashable"].contains(&kind));
+   assert!(name.starts_with("$s15ManagedSettings5TokenV"));
+   let bit=match kind {"accessor"=>{assert!(name.ends_with("Ma"));1},"descriptor"=>{assert!(name.ends_with("Mn"));2},_=>{assert!(name.ends_with("Mc"));4}};
+   assert_eq!(seen&bit,0);seen|=bit;
+   let name=std::ffi::CString::new(name).unwrap();let p=dlsym(handle,name.as_ptr());assert!(!p.is_null());
+   let mut image=DlInfo::default();assert_ne!(dladdr(p,&mut image),0);
+   assert!(!image.base.is_null()&&!image.filename.is_null());
+   assert!(std::ffi::CStr::from_ptr(image.filename).to_bytes().ends_with(b"/ManagedSettings"));
+   assert_eq!(p.addr()%4,0);
+   let length=if kind=="accessor"{128usize}else{80usize}.min(page-p.addr()%page);
+   assert!(length>=if kind=="accessor"{20}else{64});
+   print!("category_token_metadata; kind={kind}; symbol={}; bytes=",name.to_str().unwrap());
+   for b in std::slice::from_raw_parts(p.cast::<u8>(),length){print!("{b:02x}");} println!();
+   if kind=="accessor" {
+    for offset in (0..20usize).step_by(4) {
+     let ins=p.cast::<u8>().add(offset).cast::<u32>().read();
+     if ins&0xfc000000!=0x14000000 {continue;}
+     let relative=((ins<<6)as i32>>6)as isize*4;
+     let delta=(offset as isize).checked_add(relative).unwrap();
+     let address=p.addr().checked_add_signed(delta).unwrap();
+     let target=p.cast::<u8>().wrapping_offset(delta).cast::<c_void>();assert_eq!(target.addr(),address);assert_eq!(address%4,0);
+     let mut info=DlInfo::default();assert_ne!(dladdr(target,&mut info),0);assert_eq!(info.base,image.base);
+     let count=128usize.min(page-address%page);assert!(count>=4);
+     print!("category_token_accessor_branch; offset={offset}; bytes=");
+     for b in std::slice::from_raw_parts(target.cast::<u8>(),count){print!("{b:02x}");}println!();break;
+    }
+   }
+  }
+  assert_eq!(seen,7);
+  assert_eq!(OWNER_DROPS.load(Ordering::SeqCst),0);
+  assert_eq!(GETS.load(Ordering::SeqCst),0);
+  println!("category_token_metadata_only=true\nnew_metadata_accessor_calls=0\nnew_category_getter_calls=0\nbinding_lifecycle_reexecuted=false");
+ }
+}
 fn main() {
+ #[cfg(all(target_os="ios",target_env="sim",target_arch="aarch64"))]
+ if std::env::var_os("CATEGORY_TOKEN_METADATA_ONLY").as_deref()==Some(std::ffi::OsStr::new("1")) {
+  inspect_category_token_metadata_only();return;
+ }
  inspect_binding_entry();
  let binding=inspect_binding_metadata();
  assert_eq!(std::mem::offset_of!(FullMetadata, local),24);

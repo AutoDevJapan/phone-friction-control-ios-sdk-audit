@@ -2,6 +2,10 @@ name: Manual iOS SDK audit
 on:
   workflow_dispatch:
     inputs:
+      category_token_metadata_only:
+        description: Capture SDK Token generic metadata boundaries without invoking the accessor or getter
+        type: boolean
+        default: false
       category_selection_observation:
         description: Observe the real category cell and setter delta without claiming token counts or app selection
         type: boolean
@@ -76,7 +80,7 @@ permissions:
   contents: read
 jobs:
   ownership:
-    if: ${{ inputs.context_owner_probe && !inputs.context_owner_simulator }}
+    if: ${{ inputs.context_owner_probe && !inputs.context_owner_simulator && !inputs.category_token_metadata_only }}
     runs-on: macos-15
     timeout-minutes: 5
     steps:
@@ -142,7 +146,7 @@ jobs:
           if-no-files-found: error
 
   simulator-owner:
-    if: inputs.context_owner_simulator
+    if: inputs.context_owner_simulator || inputs.category_token_metadata_only
     runs-on: macos-15
     timeout-minutes: 8
     steps:
@@ -162,6 +166,29 @@ jobs:
           xcodebuild -version > "$OUT/versions.txt"
           xcrun --sdk iphonesimulator --show-sdk-version >> "$OUT/versions.txt"
           rustc --version >> "$OUT/versions.txt"
+          if [ '${{ inputs.category_token_metadata_only }}' = true ]; then
+            xcrun swift --version >> "$OUT/versions.txt"
+            xcrun swift-api-digester -dump-sdk -module ManagedSettings -sdk "$SDK" -target arm64-apple-ios18.5-simulator -o "$RUNNER_TEMP/ManagedSettings-token.json"
+            jq '[.. | objects | select(.kind? == "TypeDecl" and .name? == "Token" and .usr? == "s:15ManagedSettings5TokenV") | {name,usr,declKind,genericSig,conformances}] | unique_by(.usr)' "$RUNNER_TEMP/ManagedSettings-token.json" > "$OUT/category-token-sdk.txt"
+            TOKEN_USR=$(jq -er 'if length == 1 and .[0].declKind == "Struct" then .[0].usr else error("public Token type absent") end' "$OUT/category-token-sdk.txt")
+            TOKEN_BASE="\$${TOKEN_USR/s:/s}"
+            grep -oE '\$s[[:alnum:]_]+' "$SDK/System/Library/Frameworks/ManagedSettings.framework/ManagedSettings.tbd" | sort -u > "$RUNNER_TEMP/token-exports.txt"
+            : > "$OUT/category-token-symbols.txt"
+            for SUFFIX in Ma Mn; do
+              grep -Fx "$TOKEN_BASE$SUFFIX" "$RUNNER_TEMP/token-exports.txt"
+              if [ "$SUFFIX" = Ma ]; then KIND=accessor; else KIND=descriptor; fi
+              printf '%s|%s\n' "$KIND" "$TOKEN_BASE$SUFFIX" >> "$OUT/category-token-symbols.txt"
+            done
+            while IFS= read -r ENTRY; do
+              case "$ENTRY" in *Mc)
+                TEXT=$(printf '%s\n' "$ENTRY" | xcrun swift-demangle --compact)
+                case "$TEXT" in 'protocol conformance descriptor for ManagedSettings.Token<'*'> : Swift.Hashable in ManagedSettings') printf 'hashable|%s\n' "$ENTRY" >> "$OUT/category-token-symbols.txt" ;; esac ;;
+              esac
+            done < <(grep -F "$TOKEN_BASE" "$RUNNER_TEMP/token-exports.txt")
+            test "$(wc -l < "$OUT/category-token-symbols.txt" | tr -d ' ')" = 3
+            export SIMCTL_CHILD_CATEGORY_TOKEN_METADATA_ONLY=1
+            export SIMCTL_CHILD_CATEGORY_TOKEN_SYMBOLS="$(cat "$OUT/category-token-symbols.txt")"
+          fi
           rustc tools/swift-context-owner-probe.rs --edition 2024 --target aarch64-apple-ios-sim -L "native=$SDK/usr/lib/swift" -C link-arg=-Wl,-rpath,/usr/lib/swift -o "$OUT/ContextOwner.app/context-owner"
           printf '<?xml version="1.0"?><plist version="1.0"><dict><key>CFBundleIdentifier</key><string>com.autodevjapan.contextowner</string><key>CFBundleExecutable</key><string>context-owner</string><key>CFBundlePackageType</key><string>APPL</string><key>CFBundleVersion</key><string>1</string><key>MinimumOSVersion</key><string>18.5</string><key>CFBundleSupportedPlatforms</key><array><string>iPhoneSimulator</string></array></dict></plist>\n' > "$OUT/ContextOwner.app/Info.plist"
           codesign --sign - "$OUT/ContextOwner.app"
@@ -177,6 +204,11 @@ jobs:
           perl -e 'alarm 45; exec @ARGV; die "exec failed\n"' xcrun simctl launch --console "$SIM_ID" com.autodevjapan.contextowner > "$OUT/result.txt" 2>&1 || STATUS=$?
           printf 'exit_status=%s\n' "$STATUS" > "$OUT/status.txt"
           test "$STATUS" = 0
+          if [ '${{ inputs.category_token_metadata_only }}' = true ]; then
+            for KIND in accessor descriptor hashable; do test "$(grep -c "^category_token_metadata; kind=$KIND;" "$OUT/result.txt")" = 1; done
+            for LINE in category_token_metadata_only=true new_metadata_accessor_calls=0 new_category_getter_calls=0 binding_lifecycle_reexecuted=false; do grep -Fx "$LINE" "$OUT/result.txt"; done
+            exit 0
+          fi
           test "$(grep -Fxc 'binding_metadata_data=bool; kind_struct=true' "$OUT/result.txt")" = 1
           test "$(grep -Ec '^binding_bool_metadata_complete=true; size=[1-9][0-9]*; stride=[1-9][0-9]*; alignment=[1-9][0-9]*; nonpod=true$' "$OUT/result.txt")" = 1
           for LABEL in binding_metadata binding_init binding_get binding_set; do test "$(grep -Ec "^binding_entry=$LABEL; bytes=[0-9a-f]+$" "$OUT/result.txt")" = 1; done
@@ -194,7 +226,7 @@ jobs:
           if-no-files-found: error
 
   sdk-audit:
-    if: ${{ !inputs.context_owner_probe && !inputs.context_owner_simulator && !inputs.app_simulator_launch && !inputs.product_restore_smoke }}
+    if: ${{ !inputs.context_owner_probe && !inputs.context_owner_simulator && !inputs.category_token_metadata_only && !inputs.app_simulator_launch && !inputs.product_restore_smoke }}
     runs-on: macos-15
     # The measured consent run reached XCTest after 9m40s of SDK/build/boot.
     # Preserve the existing 180s test limit and leave time to export evidence.
