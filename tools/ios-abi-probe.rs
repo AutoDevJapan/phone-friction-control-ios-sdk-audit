@@ -1171,7 +1171,7 @@ mod picker_entry {
             "status_getter_calls=0",
             "private_api_calls=0",
             "private_api_reads=0",
-            "entry_prefix_max_bytes=128",
+            "entry_prefix_max_bytes=512",
             "entry_reads_page_bounded=true",
             "direct_helper_max_depth=1",
             "metadata_inspection_verified=true",

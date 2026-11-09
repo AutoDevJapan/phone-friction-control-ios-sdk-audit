@@ -959,7 +959,16 @@ jobs:
               bash "$RUNNER_TEMP/check-picker-values.sh" "$OUT" "$LAUNCH_STATUS"
               exit 0
             fi
-            test "$LAUNCH_STATUS" = 0
+            if [ "$LAUNCH_STATUS" != 0 ]; then
+              echo "::error::Simulator inspection launch failed: status=$LAUNCH_STATUS"
+              exit "$LAUNCH_STATUS"
+            fi
+            if [ '${{ inputs.selection_inspection_mode }}' = picker-entries ]; then
+              if [ ! -s "$OUT/picker-hosting-results.txt" ] || [ ! -s "$OUT/picker-hosting-entries.txt" ]; then
+                echo '::error::Required Picker entry evidence is empty'
+                exit 1
+              fi
+            fi
             if [ '${{ inputs.selection_inspection_mode }}' != picker-entries ]; then
             grep -F 'Selection box: buffer_aligned=true; project_matches=true; uninitialized_deallocated=true' "$OUT/selection-layout.txt"
             grep -F 'Selection layout inspection complete; phase=layout; selection_values_constructed=0; selection_values_read=0; initializer_calls=0; closure_calls=0; value_witness_calls=0; authorization_requests=0;' "$OUT/selection-layout.txt"
@@ -1016,7 +1025,7 @@ jobs:
             fi
             if [ '${{ inputs.selection_inspection_mode }}' = picker-entries ]; then
               RESULTS="$OUT/picker-hosting-results.txt"
-              for EXPECTED in phase=picker_hosting_entry picker_metadata_calls=1 hosting_metadata_calls=1 conformance_calls=1 entry_prefix_max_bytes=128 entry_reads_page_bounded=true direct_helper_max_depth=1 metadata_inspection_verified=true; do test "$(grep -Fxc "$EXPECTED" "$RESULTS")" = 1; done
+              for EXPECTED in phase=picker_hosting_entry picker_metadata_calls=1 hosting_metadata_calls=1 conformance_calls=1 entry_prefix_max_bytes=512 entry_reads_page_bounded=true direct_helper_max_depth=1 metadata_inspection_verified=true; do test "$(grep -Fxc "$EXPECTED" "$RESULTS")" = 1; done
               for FIELD in picker_constructor_calls hosting_constructor_calls picker_values_constructed hosting_instances_constructed value_witness_calls box_api_calls authorization_requests status_getter_calls private_api_calls private_api_reads; do test "$(grep -Fxc "$FIELD=0" "$RESULTS")" = 1; done
               for FIELD in constructor_arguments_verified constructor_ownership_verified picker_ui_verified selection_contents_output reconstructed_addresses_used; do test "$(grep -Fxc "$FIELD=false" "$RESULTS")" = 1; done
               test "$(wc -l < "$RESULTS" | tr -d ' ')" = 23
