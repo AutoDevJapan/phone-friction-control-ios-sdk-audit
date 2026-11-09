@@ -89,7 +89,7 @@ jobs:
           perl -e 'alarm 20; exec @ARGV; die "exec failed\n"' "$OUT/context-owner" > "$OUT/result.txt" 2>&1 || STATUS=$?
           printf 'exit_status=%s\n' "$STATUS" > "$OUT/status.txt"
           test "$STATUS" = 0
-          for LINE in context_destroy_calls=1 context_dealloc_calls=1 copy_survived_original_release=true binding_verified=false full_teardown_verified=false; do
+          for LINE in rust_owner_drop_calls=1 context_destroy_calls=1 context_dealloc_calls=1 copy_survived_original_release=true binding_verified=false full_teardown_verified=false; do
             test "$(grep -Fxc "$LINE" "$OUT/result.txt")" = 1
           done
       - uses: actions/upload-artifact@v4
