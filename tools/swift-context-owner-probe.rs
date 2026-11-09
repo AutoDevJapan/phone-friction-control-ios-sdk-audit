@@ -262,6 +262,16 @@ unsafe fn binding_copy_drop(metadata:*const c_void,vwt:*const Vwt) {
   for name in [c"$s7SwiftUI7BindingV12wrappedValuexvg",c"$s7SwiftUI7BindingV12wrappedValuexvs"] {
    let p=dlsym(handle,name.as_ptr()); println!("binding_accessor_present; name={}; present={}",name.to_str().unwrap(),!p.is_null());
    if !p.is_null() && p.addr()%4==0 { let g=getpagesize(); assert!(g>0); let n=128usize.min(g as usize-p.addr()%g as usize); print!("binding_accessor_bytes; name={}; bytes=",name.to_str().unwrap()); for b in std::slice::from_raw_parts(p.cast::<u8>(),n){print!("{b:02x}");} println!(); }
+   if !p.is_null() && p.addr()%4==0 && getpagesize() as usize-p.addr()%(getpagesize() as usize)>=4 {
+    let ins=p.cast::<u32>().read();
+    if ins&0xfc000000==0x14000000 {
+     let rel=((ins<<6) as i32>>6) as isize*4; let t=p.cast::<u8>().wrapping_offset(rel).cast::<c_void>();
+     let (mut a,mut b)=(DlInfo::default(),DlInfo::default());
+     let same=dladdr(p,&mut a)!=0&&dladdr(t,&mut b)!=0&&!a.base.is_null()&&a.base==b.base&&t.addr()%4==0;
+     println!("binding_accessor_branch; name={}; same_image={}",name.to_str().unwrap(),same);
+     if same { let g=getpagesize() as usize; let n=256usize.min(g-t.addr()%g); print!("binding_accessor_target_bytes; name={}; bytes=",name.to_str().unwrap()); for x in std::slice::from_raw_parts(t.cast::<u8>(),n){print!("{x:02x}");} println!(); }
+    }
+   }
   }
   for w in 0..3usize { let word=copied.cast::<*const c_void>().add(w).read(); let mut info=DlInfo::default(); let known=!word.is_null()&&dladdr(word,&mut info)!=0&&!info.symbol.is_null(); println!("binding_copy_word; index={w}; null={}; dladdr_symbol={}",word.is_null(),known); }
   destroy(original,metadata); std::alloc::dealloc(original.cast(),layout);
