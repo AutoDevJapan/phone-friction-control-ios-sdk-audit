@@ -228,6 +228,7 @@ jobs:
           # Collect only the public declarations needed for a mutable selection
           # Binding and its hosting controller. Keep the full SDK dump in scratch.
           xcrun swift-api-digester -dump-sdk -module SwiftUI -sdk "$SDK" -target "$TARGET" -o "$RUNNER_TEMP/SwiftUI.json"
+ 
           # SDK 18 splits core value types into SwiftUICore. Inspect its actual
           # public declarations before adapting any runtime symbol or layout.
           xcrun swift-api-digester -dump-sdk -module SwiftUICore -sdk "$SDK" -target "$TARGET" -o "$RUNNER_TEMP/SwiftUICore.json"
