@@ -167,6 +167,47 @@ fn validate(teardown: &str, prior_selection: &str) -> Result<(), String> {
             "Rust value buffers not balanced",
         )?;
     }
+    for (total, first, second) in [
+        (
+            "mutable_rust_value_allocations",
+            "preflight_mutable_allocations",
+            "picker_preflight_mutable_allocations",
+        ),
+        (
+            "mutable_rust_value_deallocations",
+            "preflight_mutable_deallocations",
+            "picker_preflight_mutable_deallocations",
+        ),
+    ] {
+        let subtotal = number(&output, first)?
+            .checked_add(number(&output, second)?)
+            .ok_or("mutable preflight subtotal overflow")?;
+        // UI constructs and releases its own Value buffers after both phases.
+        require(
+            number(&output, total)? > subtotal,
+            "mutable total omits preflight or UI buffers",
+        )?;
+    }
+    for (total, preflight) in [
+        (
+            "picker_rust_value_allocations",
+            "picker_preflight_picker_allocations",
+        ),
+        (
+            "picker_rust_value_deallocations",
+            "picker_preflight_picker_deallocations",
+        ),
+    ] {
+        // Plan.host constructs one Picker and one owned root input, in
+        // addition to the two owned Picker values in standalone Plan.execute.
+        let expected = number(&output, preflight)?
+            .checked_add(2)
+            .ok_or("Picker buffer total overflow")?;
+        require(
+            number(&output, total)? == expected,
+            "Picker total omits or duplicates Hosting buffers",
+        )?;
+    }
     let selected = number(&prior, "selected_category_tokens_count")?;
     require(
         selected > 0 && number(&prior, "initial_category_tokens_count")? == 0,
@@ -229,7 +270,7 @@ mod tests {
             "hosting_reference_releases=1\nwindow_reference_releases=1\ndelegate_owned_reference_releases=1\nbootstrap_watchdog_joins=1\nproof_owners_before_final_drop=1\n",
             "close_probe_rejected_set_callbacks=1\nclose_probe_binding_copy_destroy_calls=1\ncaptured_context_input_retains=2\ncaptured_context_deferred_main_drops=0\n",
             "captured_validated_context_callbacks=8\nclose_probe_readonly_get_callbacks=2\nclose_probe_initial_category_count=1\nclose_probe_final_category_count=1\nclose_probe_empty_input_count=0\n",
-            "mutable_rust_value_allocations=13\nmutable_rust_value_deallocations=13\npicker_rust_value_allocations=2\npicker_rust_value_deallocations=2\n"
+            "mutable_rust_value_allocations=55\nmutable_rust_value_deallocations=55\npicker_rust_value_allocations=4\npicker_rust_value_deallocations=4\n"
         ).to_owned();
         (text, "initial_category_tokens_count=0\nselected_category_tokens_count=1\nselection_snapshot_category_tokens_count=1\nselection_snapshot_lifetime_verified=true\n".into())
     }
@@ -265,12 +306,12 @@ mod tests {
                 "captured_context_deallocation_completed=0",
             ),
             (
-                "mutable_rust_value_deallocations=13",
-                "mutable_rust_value_deallocations=12",
+                "mutable_rust_value_deallocations=55",
+                "mutable_rust_value_deallocations=54",
             ),
             (
-                "picker_rust_value_deallocations=2",
-                "picker_rust_value_deallocations=1",
+                "picker_rust_value_deallocations=4",
+                "picker_rust_value_deallocations=3",
             ),
             (
                 "close_probe_rejected_set_callbacks=1",
@@ -359,5 +400,66 @@ mod tests {
             assert_ne!(changed, result);
             assert!(validate(&changed, &prior).is_err(), "incomplete {key}");
         }
+    }
+    #[test]
+    fn rejects_phase_subtotal_contradictions_and_overflow() {
+        let with_totals = |mutable: u64, picker: u64| {
+            let (result, prior) = fixture();
+            let result = result
+                .lines()
+                .map(|line| {
+                    let (key, _) = line.split_once('=').unwrap();
+                    match key {
+                        "mutable_rust_value_allocations" | "mutable_rust_value_deallocations" => {
+                            format!("{key}={mutable}")
+                        }
+                        "picker_rust_value_allocations" | "picker_rust_value_deallocations" => {
+                            format!("{key}={picker}")
+                        }
+                        _ => line.to_owned(),
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n";
+            (result, prior)
+        };
+        let (valid, prior) = with_totals(55, 4);
+        validate(&valid, &prior).unwrap();
+        let mut accepted = Vec::new();
+        for (mutable, picker) in [(1, 4), (8, 4), (9, 4), (55, 2), (55, 3), (55, 5)] {
+            let (result, prior) = with_totals(mutable, picker);
+            if validate(&result, &prior).is_ok() {
+                accepted.push((mutable, picker));
+            }
+        }
+        let overflow = valid
+            .replace(
+                "preflight_mutable_allocations=4\n",
+                &format!("preflight_mutable_allocations={}\n", u64::MAX),
+            )
+            .replace(
+                "preflight_mutable_deallocations=4\n",
+                &format!("preflight_mutable_deallocations={}\n", u64::MAX),
+            );
+        let overflow_rejected = validate(&overflow, &prior).is_err();
+        assert!(
+            accepted.is_empty() && overflow_rejected,
+            "inconsistent cumulative allocation totals accepted: {accepted:?}; overflow_rejected={overflow_rejected}"
+        );
+        let (max_total, prior) = with_totals(u64::MAX, 4);
+        let max_subtotal = max_total
+            .replace(
+                "preflight_mutable_allocations=4\n",
+                &format!("preflight_mutable_allocations={}\n", u64::MAX - 5),
+            )
+            .replace(
+                "preflight_mutable_deallocations=4\n",
+                &format!("preflight_mutable_deallocations={}\n", u64::MAX - 5),
+            );
+        assert!(
+            validate(&max_subtotal, &prior).is_err(),
+            "maximum subtotal leaves no UI buffers"
+        );
     }
 }
