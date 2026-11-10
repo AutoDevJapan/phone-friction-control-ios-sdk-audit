@@ -13,13 +13,14 @@ struct SelectionCaptureResources {
 static SELECTION_CAPTURE_RESOURCES: AtomicPtr<SelectionCaptureResources> =
     AtomicPtr::new(std::ptr::null_mut());
 
-// Run separate owned lifetimes before Hosting: Binding alone, then a fresh
-// Binding used to construct/copy/destroy real Picker values. Each phase owns a
-// distinct State/context. A failed phase is preserved and prevents continuation.
+// Separate fresh Binding, Picker-value and unpresented-Hosting lifetimes.
+// The Hosting phase never attaches its controller or explicitly requests its
+// view. A failed phase is preserved before any later presentation can start.
 fn selection_lifetime_preflights(
     resources: &'static SelectionCaptureResources,
     category: *const c_void,
     init: *const c_void,
+    page: usize,
 ) {
     let proof: &'static Arc<Proof> = &resources.proof;
     assert!(!SELECTION_CAPTURE_PREFLIGHT_ACTIVE.swap(true, Ordering::AcqRel));
@@ -45,17 +46,21 @@ fn selection_lifetime_preflights(
     let home = std::env::var_os("HOME").expect("preflight HOME missing");
     let path = std::path::PathBuf::from(home).join("Documents/captured-selection-preflight.txt");
     let mut evidence = String::new();
-    for with_picker in [false, true] {
-        let prefix = if with_picker {
-            "picker_preflight"
-        } else {
-            "preflight"
+    for phase_index in 0..3 {
+        let prefix = match phase_index {
+            0 => "preflight",
+            1 => "picker_preflight",
+            _ => "hosting_preflight",
         };
         std::fs::write(&path, format!("{evidence}{prefix}_phase=started\n"))
             .expect("write native lifetime preflight start");
         let before = SelectionCaptureCounts::current();
         let operations_before = operation_counts();
         let picker_before = picker_counts();
+        let host_before = [
+            proof.hosting_calls.load(Ordering::Acquire),
+            proof.root_transfers.load(Ordering::Acquire),
+        ];
         let mut stable = Value::allocate(&resources.selection, proof, false);
         stable.category(false, category);
         let context = create_selection_capture(Box::new(Installed::install(stable, proof)));
@@ -83,11 +88,19 @@ fn selection_lifetime_preflights(
             resolve(env!("BINDING_GET_SYMBOL")),
         );
         drop(output);
-        if with_picker {
+        let mut hosting_weak_nil = true;
+        let mut hosting_releases = 0;
+        if phase_index == 1 {
             // Reuse the existing guarded ctor and full Picker VWT operations.
             // execute returns after destroying both genuine Picker owners; it
             // does not construct Hosting, inspect tokens or create a UI graph.
             resources.plan.execute(&copy, proof);
+        }
+        if phase_index == 2 {
+            (hosting_weak_nil, hosting_releases) =
+                super::native_host::inspect_unpresented_hosting(|| {
+                    resources.plan.host(&copy, proof, page)
+                });
         }
         begin_selection_capture_close();
         drop(copy);
@@ -105,10 +118,29 @@ fn selection_lifetime_preflights(
                 .checked_sub(picker_before[index])
                 .unwrap()
         });
+        let hosting = [
+            proof
+                .hosting_calls
+                .load(Ordering::Acquire)
+                .checked_sub(host_before[0])
+                .unwrap(),
+            proof
+                .root_transfers
+                .load(Ordering::Acquire)
+                .checked_sub(host_before[1])
+                .unwrap(),
+        ];
         let identity_clear = SELECTION_CAPTURE_ID.load(Ordering::Acquire).is_null();
         let state_clear = STATE.load(Ordering::Acquire).is_null();
-        let expected_copies = if with_picker { 2 } else { 1 };
-        let expected_picker = if with_picker { [1, 1, 2, 2, 2] } else { [0; 5] };
+        let expected_copies = if phase_index == 0 { 1 } else { 2 };
+        let expected_picker = match phase_index {
+            0 => [0; 5],
+            1 => [1, 1, 2, 2, 2],
+            // The public Hosting allocator consumes/destroys the copied root;
+            // only the original Picker destroy is an explicit Rust VWT call.
+            _ => [1, 1, 1, 2, 2],
+        };
+        let expected_hosting = if phase_index == 2 { [1, 1] } else { [0; 2] };
         let drained = measured.allocations == 1
             && measured.state_drops == 1
             && measured.destroys == 1
@@ -119,6 +151,9 @@ fn selection_lifetime_preflights(
             && operations[4] > 0
             && operations[4] == operations[5]
             && picker == expected_picker
+            && hosting == expected_hosting
+            && hosting_releases == usize::from(phase_index == 2)
+            && hosting_weak_nil
             && identity_clear
             && state_clear
             && proof.n(Count::Active) == 0
@@ -132,10 +167,16 @@ fn selection_lifetime_preflights(
             measured.deallocations, measured.input_retains, measured.root_releases,
             operations[4], operations[5]
         ));
-        if with_picker {
+        if phase_index > 0 {
             evidence.push_str(&format!(
-                "picker_preflight_picker_constructor_calls={}\npicker_preflight_picker_copy_calls={}\npicker_preflight_picker_destroy_calls={}\npicker_preflight_picker_allocations={}\npicker_preflight_picker_deallocations={}\n",
+                "{prefix}_picker_constructor_calls={}\n{prefix}_picker_copy_calls={}\n{prefix}_picker_destroy_calls={}\n{prefix}_picker_allocations={}\n{prefix}_picker_deallocations={}\n",
                 picker[0], picker[1], picker[2], picker[3], picker[4]
+            ));
+        }
+        if phase_index == 2 {
+            evidence.push_str(&format!(
+                "hosting_preflight_hosting_constructor_calls={}\nhosting_preflight_root_transfer_calls={}\nhosting_preflight_owned_controller_releases={hosting_releases}\nhosting_preflight_weak_controller_nil={hosting_weak_nil}\n",
+                hosting[0], hosting[1]
             ));
         }
         std::fs::write(&path, &evidence).expect("write native lifetime preflight result");
@@ -146,7 +187,7 @@ fn selection_lifetime_preflights(
     }
     assert!(SELECTION_CAPTURE_PREFLIGHT_EVIDENCE.set(evidence).is_ok());
     // Preserve monotonic global counters; UI output uses the measured delta
-    // from both completed preflights rather than resetting/relabeling totals.
+    // from all completed preflights rather than resetting/relabeling totals.
     assert!(
         SELECTION_CAPTURE_UI_BASELINE
             .set(SelectionCaptureCounts::current())
@@ -227,7 +268,7 @@ fn selection_capture_host() -> *mut c_void {
     // and stopping/joining the watchdog before freeing any referenced field.
     let resources: &'static SelectionCaptureResources = unsafe { &*resources };
     let proof: &'static Arc<Proof> = &resources.proof;
-    selection_lifetime_preflights(resources, category, init);
+    selection_lifetime_preflights(resources, category, init, page);
     let mut stable = Value::allocate(&resources.selection, proof, false);
     stable.category(false, category);
     let installed = Box::new(Installed::install(stable, proof));

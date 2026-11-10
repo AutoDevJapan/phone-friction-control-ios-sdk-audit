@@ -38,6 +38,7 @@ fn validate(teardown: &str, prior_selection: &str) -> Result<(), String> {
     exact(&output, "phase", "complete")?;
     exact(&output, "preflight_phase", "complete")?;
     exact(&output, "picker_preflight_phase", "complete")?;
+    exact(&output, "hosting_preflight_phase", "complete")?;
     for key in [
         "weak_initial_controller_nil",
         "weak_hosting_controller_nil",
@@ -48,6 +49,9 @@ fn validate(teardown: &str, prior_selection: &str) -> Result<(), String> {
         "preflight_state_pointer_cleared",
         "picker_preflight_context_identity_cleared",
         "picker_preflight_state_pointer_cleared",
+        "hosting_preflight_context_identity_cleared",
+        "hosting_preflight_state_pointer_cleared",
+        "hosting_preflight_weak_controller_nil",
         "captured_context_identity_cleared",
         "state_pointer_cleared",
         "selection_state_watchdog_stopped_and_joined",
@@ -100,6 +104,19 @@ fn validate(teardown: &str, prior_selection: &str) -> Result<(), String> {
         "picker_preflight_root_releases",
         "picker_preflight_picker_constructor_calls",
         "picker_preflight_picker_copy_calls",
+        "hosting_preflight_binding_initializer_calls",
+        "hosting_preflight_public_getter_calls",
+        "hosting_preflight_context_allocations",
+        "hosting_preflight_state_drop_completed",
+        "hosting_preflight_context_destroy_entered",
+        "hosting_preflight_context_deallocation_completed",
+        "hosting_preflight_root_releases",
+        "hosting_preflight_picker_constructor_calls",
+        "hosting_preflight_picker_copy_calls",
+        "hosting_preflight_picker_destroy_calls",
+        "hosting_preflight_hosting_constructor_calls",
+        "hosting_preflight_root_transfer_calls",
+        "hosting_preflight_owned_controller_releases",
     ] {
         require(
             number(&output, key)? == 1,
@@ -125,6 +142,11 @@ fn validate(teardown: &str, prior_selection: &str) -> Result<(), String> {
         "picker_preflight_picker_destroy_calls",
         "picker_preflight_picker_allocations",
         "picker_preflight_picker_deallocations",
+        "hosting_preflight_binding_copy_calls",
+        "hosting_preflight_binding_destroy_calls",
+        "hosting_preflight_input_retains",
+        "hosting_preflight_picker_allocations",
+        "hosting_preflight_picker_deallocations",
     ] {
         require(
             number(&output, key)? == 2,
@@ -160,6 +182,10 @@ fn validate(teardown: &str, prior_selection: &str) -> Result<(), String> {
             "picker_preflight_mutable_allocations",
             "picker_preflight_mutable_deallocations",
         ),
+        (
+            "hosting_preflight_mutable_allocations",
+            "hosting_preflight_mutable_deallocations",
+        ),
     ] {
         let allocations = number(&output, allocate)?;
         require(
@@ -167,20 +193,25 @@ fn validate(teardown: &str, prior_selection: &str) -> Result<(), String> {
             "Rust value buffers not balanced",
         )?;
     }
-    for (total, first, second) in [
+    for (total, first, second, third) in [
         (
             "mutable_rust_value_allocations",
             "preflight_mutable_allocations",
             "picker_preflight_mutable_allocations",
+            "hosting_preflight_mutable_allocations",
         ),
         (
             "mutable_rust_value_deallocations",
             "preflight_mutable_deallocations",
             "picker_preflight_mutable_deallocations",
+            "hosting_preflight_mutable_deallocations",
         ),
     ] {
-        let subtotal = number(&output, first)?
+        let first_two = number(&output, first)?
             .checked_add(number(&output, second)?)
+            .ok_or("mutable preflight subtotal overflow")?;
+        let subtotal = first_two
+            .checked_add(number(&output, third)?)
             .ok_or("mutable preflight subtotal overflow")?;
         // UI requires four Values: stable Selection, original Binding,
         // preserved Binding copy, and Plan.construct's owned Binding input.
@@ -195,20 +226,23 @@ fn validate(teardown: &str, prior_selection: &str) -> Result<(), String> {
             "mutable total omits mandatory preflight/UI buffers",
         )?;
     }
-    for (total, preflight) in [
+    for (total, picker_preflight, hosting_preflight) in [
         (
             "picker_rust_value_allocations",
             "picker_preflight_picker_allocations",
+            "hosting_preflight_picker_allocations",
         ),
         (
             "picker_rust_value_deallocations",
             "picker_preflight_picker_deallocations",
+            "hosting_preflight_picker_deallocations",
         ),
     ] {
-        // Plan.host constructs one Picker and one owned root input, in
-        // addition to the two owned Picker values in standalone Plan.execute.
-        let expected = number(&output, preflight)?
-            .checked_add(2)
+        // Each Hosting call adds a Picker and root input. Keep both standalone
+        // phase totals distinct from the two buffers in the final UI Hosting.
+        let expected = number(&output, picker_preflight)?
+            .checked_add(number(&output, hosting_preflight)?)
+            .and_then(|sum| sum.checked_add(2))
             .ok_or("Picker buffer total overflow")?;
         require(
             number(&output, total)? == expected,
@@ -267,6 +301,11 @@ mod tests {
             "picker_preflight_context_allocations=1\npicker_preflight_state_drop_completed=1\npicker_preflight_context_destroy_entered=1\npicker_preflight_context_deallocation_completed=1\npicker_preflight_input_retains=2\npicker_preflight_root_releases=1\n",
             "picker_preflight_mutable_allocations=5\npicker_preflight_mutable_deallocations=5\npicker_preflight_context_identity_cleared=true\npicker_preflight_state_pointer_cleared=true\n",
             "picker_preflight_picker_constructor_calls=1\npicker_preflight_picker_copy_calls=1\npicker_preflight_picker_destroy_calls=2\npicker_preflight_picker_allocations=2\npicker_preflight_picker_deallocations=2\n",
+            "hosting_preflight_phase=complete\nhosting_preflight_binding_initializer_calls=1\nhosting_preflight_binding_copy_calls=2\nhosting_preflight_binding_destroy_calls=2\nhosting_preflight_public_getter_calls=1\n",
+            "hosting_preflight_context_allocations=1\nhosting_preflight_state_drop_completed=1\nhosting_preflight_context_destroy_entered=1\nhosting_preflight_context_deallocation_completed=1\nhosting_preflight_input_retains=2\nhosting_preflight_root_releases=1\n",
+            "hosting_preflight_mutable_allocations=5\nhosting_preflight_mutable_deallocations=5\nhosting_preflight_context_identity_cleared=true\nhosting_preflight_state_pointer_cleared=true\n",
+            "hosting_preflight_picker_constructor_calls=1\nhosting_preflight_picker_copy_calls=1\nhosting_preflight_picker_destroy_calls=1\nhosting_preflight_picker_allocations=2\nhosting_preflight_picker_deallocations=2\n",
+            "hosting_preflight_hosting_constructor_calls=1\nhosting_preflight_root_transfer_calls=1\nhosting_preflight_owned_controller_releases=1\nhosting_preflight_weak_controller_nil=true\n",
             "weak_initial_controller_nil=true\nweak_hosting_controller_nil=true\nweak_window_nil=true\nweak_button_nil=true\n",
             "captured_context_identity_cleared=true\nstate_pointer_cleared=true\n",
             "selection_state_watchdog_stopped_and_joined=true\nwindow_pointer_cleared=true\ncontroller_pointer_cleared=true\nbutton_pointer_cleared=true\n",
@@ -277,7 +316,7 @@ mod tests {
             "hosting_reference_releases=1\nwindow_reference_releases=1\ndelegate_owned_reference_releases=1\nbootstrap_watchdog_joins=1\nproof_owners_before_final_drop=1\n",
             "close_probe_rejected_set_callbacks=1\nclose_probe_binding_copy_destroy_calls=1\ncaptured_context_input_retains=2\ncaptured_context_deferred_main_drops=0\n",
             "captured_validated_context_callbacks=8\nclose_probe_readonly_get_callbacks=2\nclose_probe_initial_category_count=1\nclose_probe_final_category_count=1\nclose_probe_empty_input_count=0\n",
-            "mutable_rust_value_allocations=55\nmutable_rust_value_deallocations=55\npicker_rust_value_allocations=4\npicker_rust_value_deallocations=4\n"
+            "mutable_rust_value_allocations=60\nmutable_rust_value_deallocations=60\npicker_rust_value_allocations=6\npicker_rust_value_deallocations=6\n"
         ).to_owned();
         (text, "initial_category_tokens_count=0\nselected_category_tokens_count=1\nselection_snapshot_category_tokens_count=1\nselection_snapshot_lifetime_verified=true\n".into())
     }
@@ -313,12 +352,12 @@ mod tests {
                 "captured_context_deallocation_completed=0",
             ),
             (
-                "mutable_rust_value_deallocations=55",
-                "mutable_rust_value_deallocations=54",
+                "mutable_rust_value_deallocations=60",
+                "mutable_rust_value_deallocations=59",
             ),
             (
-                "picker_rust_value_deallocations=4",
-                "picker_rust_value_deallocations=3",
+                "picker_rust_value_deallocations=6",
+                "picker_rust_value_deallocations=5",
             ),
             (
                 "close_probe_rejected_set_callbacks=1",
@@ -409,6 +448,37 @@ mod tests {
         }
     }
     #[test]
+    fn rejects_each_missing_or_incomplete_unpresented_hosting_field() {
+        let (result, prior) = fixture();
+        let fields: Vec<_> = result
+            .lines()
+            .filter(|line| line.starts_with("hosting_preflight_"))
+            .collect();
+        assert_eq!(fields.len(), 24);
+        for field in fields {
+            let (key, value) = field.split_once('=').unwrap();
+            let missing = result
+                .lines()
+                .filter(|line| *line != field)
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n";
+            assert!(validate(&missing, &prior).is_err(), "missing {key}");
+            assert!(
+                validate(&(result.clone() + field + "\n"), &prior).is_err(),
+                "duplicate {key}"
+            );
+            let invalid = match value {
+                "complete" => "not_drained",
+                "true" => "false",
+                _ => "0",
+            };
+            let changed = result.replace(field, &format!("{key}={invalid}"));
+            assert_ne!(changed, result);
+            assert!(validate(&changed, &prior).is_err(), "incomplete {key}");
+        }
+    }
+    #[test]
     fn rejects_phase_subtotal_contradictions_and_overflow() {
         let with_totals = |mutable: u64, picker: u64| {
             let (result, prior) = fixture();
@@ -431,10 +501,10 @@ mod tests {
                 + "\n";
             (result, prior)
         };
-        let (valid, prior) = with_totals(55, 4);
+        let (valid, prior) = with_totals(60, 6);
         validate(&valid, &prior).unwrap();
         let mut accepted = Vec::new();
-        for (mutable, picker) in [(1, 4), (8, 4), (9, 4), (55, 2), (55, 3), (55, 5)] {
+        for (mutable, picker) in [(1, 6), (13, 6), (14, 6), (60, 2), (60, 4), (60, 5), (60, 7)] {
             let (result, prior) = with_totals(mutable, picker);
             if validate(&result, &prior).is_ok() {
                 accepted.push((mutable, picker));
@@ -454,15 +524,15 @@ mod tests {
             accepted.is_empty() && overflow_rejected,
             "inconsistent cumulative allocation totals accepted: {accepted:?}; overflow_rejected={overflow_rejected}"
         );
-        let (max_total, prior) = with_totals(u64::MAX, 4);
+        let (max_total, prior) = with_totals(u64::MAX, 6);
         let max_subtotal = max_total
             .replace(
                 "preflight_mutable_allocations=4\n",
-                &format!("preflight_mutable_allocations={}\n", u64::MAX - 5),
+                &format!("preflight_mutable_allocations={}\n", u64::MAX - 10),
             )
             .replace(
                 "preflight_mutable_deallocations=4\n",
-                &format!("preflight_mutable_deallocations={}\n", u64::MAX - 5),
+                &format!("preflight_mutable_deallocations={}\n", u64::MAX - 10),
             );
         assert!(
             validate(&max_subtotal, &prior).is_err(),
@@ -475,25 +545,25 @@ mod tests {
         validate(&base, &prior).unwrap();
         let with_total = |total: u64| {
             base.replace(
-                "mutable_rust_value_allocations=55\n",
+                "mutable_rust_value_allocations=60\n",
                 &format!("mutable_rust_value_allocations={total}\n"),
             )
             .replace(
-                "mutable_rust_value_deallocations=55\n",
+                "mutable_rust_value_deallocations=60\n",
                 &format!("mutable_rust_value_deallocations={total}\n"),
             )
         };
-        let accepted: Vec<_> = (10..=16)
+        let accepted: Vec<_> = (15..=21)
             .filter(|total| validate(&with_total(*total), &prior).is_ok())
             .collect();
         let minimum_overflow = with_total(u64::MAX)
             .replace(
                 "preflight_mutable_allocations=4\n",
-                &format!("preflight_mutable_allocations={}\n", u64::MAX - 12),
+                &format!("preflight_mutable_allocations={}\n", u64::MAX - 17),
             )
             .replace(
                 "preflight_mutable_deallocations=4\n",
-                &format!("preflight_mutable_deallocations={}\n", u64::MAX - 12),
+                &format!("preflight_mutable_deallocations={}\n", u64::MAX - 17),
             );
         let overflow_rejected = validate(&minimum_overflow, &prior).is_err();
         assert!(

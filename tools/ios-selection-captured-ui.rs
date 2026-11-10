@@ -80,6 +80,32 @@ fn capture_weak_record(index: usize, object: Id) {
     }
 }
 
+// Consume exactly the allocator's returned +1, without view access or attach.
+// The local weak table has its own +1 and both observation scopes drain before
+// returning scalars. Initial app/window ownership is unrelated to this target.
+pub(super) fn inspect_unpresented_hosting<F: FnOnce() -> Id>(create: F) -> (bool, usize) {
+    let mut table = std::ptr::null_mut();
+    let mut releases = 0;
+    capture_autorelease_scope(|| unsafe {
+        let controller = create();
+        assert!(!controller.is_null());
+        let class = objc_getClass(c"NSHashTable".as_ptr());
+        assert!(!class.is_null());
+        table = objc_retain(send0(class, c"weakObjectsHashTable"));
+        assert!(!table.is_null());
+        send_id(table, c"addObject:", controller);
+        assert!(send0(table, c"anyObject") == controller);
+        swift_unknownObjectRelease(controller);
+        releases += 1;
+    });
+    let mut empty = false;
+    capture_autorelease_scope(|| unsafe {
+        empty = send0(table, c"anyObject").is_null();
+        objc_release(table);
+    });
+    (empty, releases)
+}
+
 fn capture_write_ui_evidence(
     phase: &str,
     weak_nil: Option<[bool; 5]>,
