@@ -182,10 +182,17 @@ fn validate(teardown: &str, prior_selection: &str) -> Result<(), String> {
         let subtotal = number(&output, first)?
             .checked_add(number(&output, second)?)
             .ok_or("mutable preflight subtotal overflow")?;
-        // UI constructs and releases its own Value buffers after both phases.
+        // UI requires four Values: stable Selection, original Binding,
+        // preserved Binding copy, and Plan.construct's owned Binding input.
+        // The required close probe adds two getter outputs, an empty Selection
+        // and its transferred copy. Set reads can add more buffers; these eight
+        // are a conservative mandatory minimum, not an exact native total.
+        let minimum = subtotal
+            .checked_add(8)
+            .ok_or("mutable mandatory UI buffer minimum overflow")?;
         require(
-            number(&output, total)? > subtotal,
-            "mutable total omits preflight or UI buffers",
+            number(&output, total)? >= minimum,
+            "mutable total omits mandatory preflight/UI buffers",
         )?;
     }
     for (total, preflight) in [
@@ -460,6 +467,38 @@ mod tests {
         assert!(
             validate(&max_subtotal, &prior).is_err(),
             "maximum subtotal leaves no UI buffers"
+        );
+    }
+    #[test]
+    fn rejects_missing_mandatory_ui_buffers_and_minimum_overflow() {
+        let (base, prior) = fixture();
+        validate(&base, &prior).unwrap();
+        let with_total = |total: u64| {
+            base.replace(
+                "mutable_rust_value_allocations=55\n",
+                &format!("mutable_rust_value_allocations={total}\n"),
+            )
+            .replace(
+                "mutable_rust_value_deallocations=55\n",
+                &format!("mutable_rust_value_deallocations={total}\n"),
+            )
+        };
+        let accepted: Vec<_> = (10..=16)
+            .filter(|total| validate(&with_total(*total), &prior).is_ok())
+            .collect();
+        let minimum_overflow = with_total(u64::MAX)
+            .replace(
+                "preflight_mutable_allocations=4\n",
+                &format!("preflight_mutable_allocations={}\n", u64::MAX - 12),
+            )
+            .replace(
+                "preflight_mutable_deallocations=4\n",
+                &format!("preflight_mutable_deallocations={}\n", u64::MAX - 12),
+            );
+        let overflow_rejected = validate(&minimum_overflow, &prior).is_err();
+        assert!(
+            accepted.is_empty() && overflow_rejected,
+            "mandatory UI buffer lower bound accepted: totals={accepted:?}; minimum_overflow_rejected={overflow_rejected}"
         );
     }
 }
