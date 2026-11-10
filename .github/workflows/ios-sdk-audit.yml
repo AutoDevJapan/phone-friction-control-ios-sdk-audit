@@ -889,16 +889,7 @@ jobs:
             test -n "$NATIVE_LIBS"
             printf 'OTHER_LDFLAGS = $(inherited) -L$(SDKROOT)/usr/lib/swift %s\n' "$NATIVE_LIBS" > "$XCODE_ROOT/Host.xcconfig"
             if [ '${{ inputs.selection_capture_owner_acceptance }}' = true ]; then
-              # Use a compiler-generated language boundary, not guessed releases
-              # of any SwiftUI/FamilyControls object or runtime pointer edits.
-              xcrun clang --version > "$OUT/captured-autorelease-compiler.txt"
-              xcrun clang -target arm64-apple-ios18.5-simulator -isysroot "$SDK" -fobjc-arc -Werror -S -emit-llvm tools/CapturedSelectionAutoreleasePool.m -o "$OUT/captured-autorelease-lowering.txt"
-              grep -Eq 'call.*@(llvm\.objc\.autoreleasePoolPush|objc_autoreleasePoolPush)\(' "$OUT/captured-autorelease-lowering.txt"
-              grep -Eq 'call.*@(llvm\.objc\.autoreleasePoolPop|objc_autoreleasePoolPop)\(' "$OUT/captured-autorelease-lowering.txt"
-              xcrun clang -target arm64-apple-ios18.5-simulator -isysroot "$SDK" -fobjc-arc -Werror -c tools/CapturedSelectionAutoreleasePool.m -o "$XCODE_ROOT/captured-autorelease.o"
-              xcrun nm -gU "$XCODE_ROOT/captured-autorelease.o" > "$OUT/captured-autorelease-symbols.txt"
-              grep -Eq '[[:space:]]T[[:space:]]+_audit_capture_autorelease_pool$' "$OUT/captured-autorelease-symbols.txt"
-              printf 'OTHER_LDFLAGS = $(inherited) -L$(SDKROOT)/usr/lib/swift %s "%s"\n' "$NATIVE_LIBS" "$XCODE_ROOT/captured-autorelease.o" > "$XCODE_ROOT/Host.xcconfig"
+              bash tools/build-captured-autorelease.sh "$SDK" "$OUT" "$XCODE_ROOT" "$NATIVE_LIBS"
             fi
             : > "$XCODE_ROOT/UITest.xcconfig"
             if [ '${{ inputs.ui_consent_test }}' = true ]; then
@@ -1103,7 +1094,7 @@ jobs:
             {
               printf 'audit_source=%s\nmode=selection_capture_owner_acceptance\ncargo_lock_applicable=false\n' "$(git rev-parse HEAD)"
               rustc --version --verbose
-              shasum -a 256 tools/ios-abi-probe.rs tools/ios-selection-captured-owner.rs tools/ios-selection-captured-callback.rs tools/ios-selection-captured-guards.rs tools/ios-selection-captured-host.rs tools/ios-selection-captured-ui.rs tools/ios-selection-autorelease.rs tools/CapturedSelectionAutoreleasePool.m tools/check-captured-selection-result.rs tools/CapturedSelectionDeclarations.m tools/PickerCategoryObservation.m .github/workflows/ios-sdk-audit.yml "$PROBE_APP/authorization-center-probe" "$XCODE_ROOT/libui-test.a" "$XCODE_ROOT/category-observation.o" "$XCODE_ROOT/captured-autorelease.o"
+              shasum -a 256 tools/ios-abi-probe.rs tools/ios-selection-captured-owner.rs tools/ios-selection-captured-callback.rs tools/ios-selection-captured-guards.rs tools/ios-selection-captured-host.rs tools/ios-selection-captured-ui.rs tools/ios-selection-autorelease.rs tools/CapturedSelectionAutoreleasePool.m tools/build-captured-autorelease.sh tools/check-captured-selection-result.rs tools/CapturedSelectionDeclarations.m tools/PickerCategoryObservation.m .github/workflows/ios-sdk-audit.yml "$PROBE_APP/authorization-center-probe" "$XCODE_ROOT/libui-test.a" "$XCODE_ROOT/category-observation.o" "$XCODE_ROOT/captured-autorelease.o"
               shasum -a 256 "$RUNNER_TEMP/check-captured-selection-result"
             } > "$OUT/captured-selection-build.txt"
           fi
