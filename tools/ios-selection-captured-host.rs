@@ -13,17 +13,16 @@ struct SelectionCaptureResources {
 static SELECTION_CAPTURE_RESOURCES: AtomicPtr<SelectionCaptureResources> =
     AtomicPtr::new(std::ptr::null_mut());
 
-// Isolate the same nontrivial Binding/State lifetime before any Picker/Hosting
-// owner is created. These are genuine empty Selection values, not fake tokens.
-// A failed native preflight is preserved and prevents the UI phase from starting.
-fn selection_binding_lifetime_preflight(
+// Run separate owned lifetimes before Hosting: Binding alone, then a fresh
+// Binding used to construct/copy/destroy real Picker values. Each phase owns a
+// distinct State/context. A failed phase is preserved and prevents continuation.
+fn selection_lifetime_preflights(
     resources: &'static SelectionCaptureResources,
     category: *const c_void,
     init: *const c_void,
 ) {
     let proof: &'static Arc<Proof> = &resources.proof;
     assert!(!SELECTION_CAPTURE_PREFLIGHT_ACTIVE.swap(true, Ordering::AcqRel));
-    let before = SelectionCaptureCounts::current();
     let operation_counts = || {
         [
             proof.n(Count::BindingInit),
@@ -34,95 +33,125 @@ fn selection_binding_lifetime_preflight(
             proof.n(Count::Dealloc),
         ]
     };
-    let operations_before = operation_counts();
+    let picker_counts = || {
+        [
+            proof.picker.n(picker_values::Count::Constructor),
+            proof.picker.n(picker_values::Count::Copy),
+            proof.picker.n(picker_values::Count::Destroy),
+            proof.picker.n(picker_values::Count::Alloc),
+            proof.picker.n(picker_values::Count::Free),
+        ]
+    };
     let home = std::env::var_os("HOME").expect("preflight HOME missing");
     let path = std::path::PathBuf::from(home).join("Documents/captured-selection-preflight.txt");
-    std::fs::write(&path, "preflight_phase=started\n")
-        .expect("write native Binding preflight start");
-    let mut stable = Value::allocate(&resources.selection, proof, false);
-    stable.category(false, category);
-    let context = create_selection_capture(Box::new(Installed::install(stable, proof)));
-    let mut original = Value::allocate(&resources.binding, proof, true);
-    retain_selection_capture_inputs(context);
-    proof.inc(Count::BindingInit);
-    unsafe {
-        rust_selection_capture_binding_init(
-            original.ptr(),
-            rust_mutable_get_closure as *const c_void,
-            rust_mutable_set_closure as *const c_void,
+    let mut evidence = String::new();
+    for with_picker in [false, true] {
+        let prefix = if with_picker {
+            "picker_preflight"
+        } else {
+            "preflight"
+        };
+        std::fs::write(&path, format!("{evidence}{prefix}_phase=started\n"))
+            .expect("write native lifetime preflight start");
+        let before = SelectionCaptureCounts::current();
+        let operations_before = operation_counts();
+        let picker_before = picker_counts();
+        let mut stable = Value::allocate(&resources.selection, proof, false);
+        stable.category(false, category);
+        let context = create_selection_capture(Box::new(Installed::install(stable, proof)));
+        let mut original = Value::allocate(&resources.binding, proof, true);
+        retain_selection_capture_inputs(context);
+        proof.inc(Count::BindingInit);
+        unsafe {
+            rust_selection_capture_binding_init(
+                original.ptr(),
+                rust_mutable_get_closure as *const c_void,
+                rust_mutable_set_closure as *const c_void,
+                resources.selection.metadata,
+                init,
+                context,
+            )
+        };
+        original.initialized = true;
+        let mut copy = Value::allocate(&resources.binding, proof, true);
+        copy.copy(&original);
+        drop(original);
+        let mut output = Value::allocate(&resources.selection, proof, false);
+        copy.get(
+            &mut output,
             resources.selection.metadata,
-            init,
-            context,
-        )
-    };
-    original.initialized = true;
-    let mut copy = Value::allocate(&resources.binding, proof, true);
-    copy.copy(&original);
-    drop(original);
-    let mut output = Value::allocate(&resources.selection, proof, false);
-    copy.get(
-        &mut output,
-        resources.selection.metadata,
-        resolve(env!("BINDING_GET_SYMBOL")),
-    );
-    drop(output);
-    begin_selection_capture_close();
-    drop(copy);
-    release_selection_capture_root();
-    // Root is no longer dereferenced. The global identity/destructor counters
-    // determine whether a surviving framework owner exists even without UI.
-    let measured = SelectionCaptureCounts::current().since(before);
-    let operations = std::array::from_fn::<_, 6, _>(|index| {
-        operation_counts()[index]
-            .checked_sub(operations_before[index])
-            .unwrap()
-    });
-    let identity_clear = SELECTION_CAPTURE_ID.load(Ordering::Acquire).is_null();
-    let state_clear = STATE.load(Ordering::Acquire).is_null();
-    let drained = measured.allocations == 1
-        && measured.state_drops == 1
-        && measured.destroys == 1
-        && measured.deallocations == 1
-        && measured.input_retains == 2
-        && measured.root_releases == 1
-        && operations[0..4] == [1, 1, 2, 1]
-        && operations[4] > 0
-        && operations[4] == operations[5]
-        && identity_clear
-        && state_clear
-        && proof.n(Count::Active) == 0
-        && !COUNT_READING.load(Ordering::Acquire)
-        && DIAGNOSTICS.lock().unwrap().is_none();
-    let phase = if drained { "complete" } else { "not_drained" };
-    let evidence = format!(
-        "preflight_phase={phase}\npreflight_binding_initializer_calls={}\npreflight_binding_copy_calls={}\npreflight_binding_destroy_calls={}\npreflight_public_getter_calls={}\npreflight_context_allocations={}\npreflight_state_drop_completed={}\npreflight_context_destroy_entered={}\npreflight_context_deallocation_completed={}\npreflight_input_retains={}\npreflight_root_releases={}\npreflight_mutable_allocations={}\npreflight_mutable_deallocations={}\npreflight_context_identity_cleared={identity_clear}\npreflight_state_pointer_cleared={state_clear}\n",
-        operations[0],
-        operations[1],
-        operations[2],
-        operations[3],
-        measured.allocations,
-        measured.state_drops,
-        measured.destroys,
-        measured.deallocations,
-        measured.input_retains,
-        measured.root_releases,
-        operations[4],
-        operations[5]
-    );
-    std::fs::write(path, &evidence).expect("write native Binding preflight result");
-    assert!(
-        drained,
-        "nontrivial Binding lifetime preflight did not drain"
-    );
+            resolve(env!("BINDING_GET_SYMBOL")),
+        );
+        drop(output);
+        if with_picker {
+            // Reuse the existing guarded ctor and full Picker VWT operations.
+            // execute returns after destroying both genuine Picker owners; it
+            // does not construct Hosting, inspect tokens or create a UI graph.
+            resources.plan.execute(&copy, proof);
+        }
+        begin_selection_capture_close();
+        drop(copy);
+        release_selection_capture_root();
+        // No dereference of the released root. Keep phase-specific monotonic
+        // deltas; prior successful destruction cannot satisfy this new phase.
+        let measured = SelectionCaptureCounts::current().since(before);
+        let operations = std::array::from_fn::<_, 6, _>(|index| {
+            operation_counts()[index]
+                .checked_sub(operations_before[index])
+                .unwrap()
+        });
+        let picker = std::array::from_fn::<_, 5, _>(|index| {
+            picker_counts()[index]
+                .checked_sub(picker_before[index])
+                .unwrap()
+        });
+        let identity_clear = SELECTION_CAPTURE_ID.load(Ordering::Acquire).is_null();
+        let state_clear = STATE.load(Ordering::Acquire).is_null();
+        let expected_copies = if with_picker { 2 } else { 1 };
+        let expected_picker = if with_picker { [1, 1, 2, 2, 2] } else { [0; 5] };
+        let drained = measured.allocations == 1
+            && measured.state_drops == 1
+            && measured.destroys == 1
+            && measured.deallocations == 1
+            && measured.input_retains == 2
+            && measured.root_releases == 1
+            && operations[0..4] == [1, expected_copies, 2, 1]
+            && operations[4] > 0
+            && operations[4] == operations[5]
+            && picker == expected_picker
+            && identity_clear
+            && state_clear
+            && proof.n(Count::Active) == 0
+            && !COUNT_READING.load(Ordering::Acquire)
+            && DIAGNOSTICS.lock().unwrap().is_none();
+        let phase = if drained { "complete" } else { "not_drained" };
+        evidence.push_str(&format!(
+            "{prefix}_phase={phase}\n{prefix}_binding_initializer_calls={}\n{prefix}_binding_copy_calls={}\n{prefix}_binding_destroy_calls={}\n{prefix}_public_getter_calls={}\n{prefix}_context_allocations={}\n{prefix}_state_drop_completed={}\n{prefix}_context_destroy_entered={}\n{prefix}_context_deallocation_completed={}\n{prefix}_input_retains={}\n{prefix}_root_releases={}\n{prefix}_mutable_allocations={}\n{prefix}_mutable_deallocations={}\n{prefix}_context_identity_cleared={identity_clear}\n{prefix}_state_pointer_cleared={state_clear}\n",
+            operations[0], operations[1], operations[2], operations[3],
+            measured.allocations, measured.state_drops, measured.destroys,
+            measured.deallocations, measured.input_retains, measured.root_releases,
+            operations[4], operations[5]
+        ));
+        if with_picker {
+            evidence.push_str(&format!(
+                "picker_preflight_picker_constructor_calls={}\npicker_preflight_picker_copy_calls={}\npicker_preflight_picker_destroy_calls={}\npicker_preflight_picker_allocations={}\npicker_preflight_picker_deallocations={}\n",
+                picker[0], picker[1], picker[2], picker[3], picker[4]
+            ));
+        }
+        std::fs::write(&path, &evidence).expect("write native lifetime preflight result");
+        assert!(drained, "nontrivial {prefix} lifetime did not drain");
+        // Reopen only after this entire context/State lifetime completed. The
+        // next phase allocates a distinct owner and never reuses a live context.
+        assert!(SELECTION_CAPTURE_CLOSING.swap(false, Ordering::AcqRel));
+    }
     assert!(SELECTION_CAPTURE_PREFLIGHT_EVIDENCE.set(evidence).is_ok());
     // Preserve monotonic global counters; UI output uses the measured delta
-    // from this completed preflight rather than resetting/relabeling the totals.
+    // from both completed preflights rather than resetting/relabeling totals.
     assert!(
         SELECTION_CAPTURE_UI_BASELINE
             .set(SelectionCaptureCounts::current())
             .is_ok()
     );
-    assert!(SELECTION_CAPTURE_CLOSING.swap(false, Ordering::AcqRel));
     assert!(SELECTION_CAPTURE_PREFLIGHT_ACTIVE.swap(false, Ordering::AcqRel));
 }
 
@@ -198,7 +227,7 @@ fn selection_capture_host() -> *mut c_void {
     // and stopping/joining the watchdog before freeing any referenced field.
     let resources: &'static SelectionCaptureResources = unsafe { &*resources };
     let proof: &'static Arc<Proof> = &resources.proof;
-    selection_binding_lifetime_preflight(resources, category, init);
+    selection_lifetime_preflights(resources, category, init);
     let mut stable = Value::allocate(&resources.selection, proof, false);
     stable.category(false, category);
     let installed = Box::new(Installed::install(stable, proof));

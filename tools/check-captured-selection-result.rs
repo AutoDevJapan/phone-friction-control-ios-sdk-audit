@@ -37,6 +37,7 @@ fn validate(teardown: &str, prior_selection: &str) -> Result<(), String> {
     let prior = parse(prior_selection)?;
     exact(&output, "phase", "complete")?;
     exact(&output, "preflight_phase", "complete")?;
+    exact(&output, "picker_preflight_phase", "complete")?;
     for key in [
         "weak_initial_controller_nil",
         "weak_hosting_controller_nil",
@@ -45,6 +46,8 @@ fn validate(teardown: &str, prior_selection: &str) -> Result<(), String> {
         "weak_hosting_view_nil",
         "preflight_context_identity_cleared",
         "preflight_state_pointer_cleared",
+        "picker_preflight_context_identity_cleared",
+        "picker_preflight_state_pointer_cleared",
         "captured_context_identity_cleared",
         "state_pointer_cleared",
         "selection_state_watchdog_stopped_and_joined",
@@ -88,6 +91,15 @@ fn validate(teardown: &str, prior_selection: &str) -> Result<(), String> {
         "preflight_context_destroy_entered",
         "preflight_context_deallocation_completed",
         "preflight_root_releases",
+        "picker_preflight_binding_initializer_calls",
+        "picker_preflight_public_getter_calls",
+        "picker_preflight_context_allocations",
+        "picker_preflight_state_drop_completed",
+        "picker_preflight_context_destroy_entered",
+        "picker_preflight_context_deallocation_completed",
+        "picker_preflight_root_releases",
+        "picker_preflight_picker_constructor_calls",
+        "picker_preflight_picker_copy_calls",
     ] {
         require(
             number(&output, key)? == 1,
@@ -106,6 +118,19 @@ fn validate(teardown: &str, prior_selection: &str) -> Result<(), String> {
         number(&output, "preflight_input_retains")? == 2,
         "standalone closure input retains missing",
     )?;
+    for key in [
+        "picker_preflight_binding_copy_calls",
+        "picker_preflight_binding_destroy_calls",
+        "picker_preflight_input_retains",
+        "picker_preflight_picker_destroy_calls",
+        "picker_preflight_picker_allocations",
+        "picker_preflight_picker_deallocations",
+    ] {
+        require(
+            number(&output, key)? == 2,
+            "standalone Picker ownership count rejected",
+        )?;
+    }
     require(
         number(&output, "captured_context_deferred_main_drops")? <= 1,
         "deferred drop count rejected",
@@ -130,6 +155,10 @@ fn validate(teardown: &str, prior_selection: &str) -> Result<(), String> {
         (
             "preflight_mutable_allocations",
             "preflight_mutable_deallocations",
+        ),
+        (
+            "picker_preflight_mutable_allocations",
+            "picker_preflight_mutable_deallocations",
         ),
     ] {
         let allocations = number(&output, allocate)?;
@@ -186,6 +215,10 @@ mod tests {
             "preflight_phase=complete\npreflight_binding_initializer_calls=1\npreflight_binding_copy_calls=1\npreflight_binding_destroy_calls=2\npreflight_public_getter_calls=1\n",
             "preflight_context_allocations=1\npreflight_state_drop_completed=1\npreflight_context_destroy_entered=1\npreflight_context_deallocation_completed=1\npreflight_input_retains=2\npreflight_root_releases=1\n",
             "preflight_mutable_allocations=4\npreflight_mutable_deallocations=4\npreflight_context_identity_cleared=true\npreflight_state_pointer_cleared=true\nweak_hosting_view_nil=true\n",
+            "picker_preflight_phase=complete\npicker_preflight_binding_initializer_calls=1\npicker_preflight_binding_copy_calls=2\npicker_preflight_binding_destroy_calls=2\npicker_preflight_public_getter_calls=1\n",
+            "picker_preflight_context_allocations=1\npicker_preflight_state_drop_completed=1\npicker_preflight_context_destroy_entered=1\npicker_preflight_context_deallocation_completed=1\npicker_preflight_input_retains=2\npicker_preflight_root_releases=1\n",
+            "picker_preflight_mutable_allocations=5\npicker_preflight_mutable_deallocations=5\npicker_preflight_context_identity_cleared=true\npicker_preflight_state_pointer_cleared=true\n",
+            "picker_preflight_picker_constructor_calls=1\npicker_preflight_picker_copy_calls=1\npicker_preflight_picker_destroy_calls=2\npicker_preflight_picker_allocations=2\npicker_preflight_picker_deallocations=2\n",
             "weak_initial_controller_nil=true\nweak_hosting_controller_nil=true\nweak_window_nil=true\nweak_button_nil=true\n",
             "captured_context_identity_cleared=true\nstate_pointer_cleared=true\n",
             "selection_state_watchdog_stopped_and_joined=true\nwindow_pointer_cleared=true\ncontroller_pointer_cleared=true\nbutton_pointer_cleared=true\n",
@@ -293,5 +326,38 @@ mod tests {
             )
             .is_err()
         );
+    }
+    #[test]
+    fn rejects_each_missing_or_incomplete_picker_preflight_field() {
+        let (result, prior) = fixture();
+        let fields: Vec<_> = result
+            .lines()
+            .filter(|line| line.starts_with("picker_preflight_"))
+            .collect();
+        assert_eq!(fields.len(), 20);
+        for field in fields {
+            let (key, value) = field.split_once('=').unwrap();
+            let missing = result
+                .lines()
+                .filter(|line| *line != field)
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n";
+            assert!(validate(&missing, &prior).is_err(), "missing {key}");
+            assert!(
+                validate(&(result.clone() + field + "\n"), &prior).is_err(),
+                "duplicate {key}"
+            );
+            let rejected = if value == "complete" {
+                "not_drained"
+            } else if value == "true" {
+                "false"
+            } else {
+                "0"
+            };
+            let changed = result.replace(field, &format!("{key}={rejected}"));
+            assert_ne!(changed, result);
+            assert!(validate(&changed, &prior).is_err(), "incomplete {key}");
+        }
     }
 }
