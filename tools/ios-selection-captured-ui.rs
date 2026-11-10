@@ -151,7 +151,11 @@ fn capture_ui_close_if_ready() -> bool {
     true
 }
 
-unsafe extern "C" fn capture_ui_detach(_: *mut c_void) {
+unsafe extern "C" fn capture_ui_detach(context: *mut c_void) {
+    capture_autorelease_scope(|| unsafe { capture_ui_detach_body(context) });
+}
+
+unsafe fn capture_ui_detach_body(_: *mut c_void) {
     let outcome = std::panic::catch_unwind(|| unsafe {
         // Clear raw entry points before detaching any owning hierarchy.
         let window = WINDOW.swap(0, Ordering::AcqRel) as Id;
@@ -196,10 +200,15 @@ fn capture_schedule_ui_poll() {
 
 unsafe extern "C" fn capture_ui_poll(_: *mut c_void) {
     let outcome = std::panic::catch_unwind(|| unsafe {
-        let weak_nil = std::array::from_fn(|index| {
-            let table = CAPTURE_WEAK_TABLES[index].load(Ordering::Acquire) as Id;
-            assert!(!table.is_null());
-            send0(table, c"anyObject").is_null()
+        // Return only scalar observations. Any temporary strong/autoreleased
+        // objects returned by the weak tables expire before the next poll.
+        let mut weak_nil = [false; 5];
+        capture_autorelease_scope(|| {
+            weak_nil = std::array::from_fn(|index| {
+                let table = CAPTURE_WEAK_TABLES[index].load(Ordering::Acquire) as Id;
+                assert!(!table.is_null());
+                send0(table, c"anyObject").is_null()
+            });
         });
         let state = if weak_nil.iter().all(|empty| *empty) {
             super::mutable_binding::finish_selection_capture_resources().ok()

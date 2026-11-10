@@ -4867,6 +4867,8 @@ mod native_host {
     #[cfg(consent_selection_acceptance)]
     static SETTER_BASELINE: AtomicUsize = AtomicUsize::new(0);
     #[cfg(selection_capture_owner_acceptance)]
+    include!("ios-selection-autorelease.rs");
+    #[cfg(selection_capture_owner_acceptance)]
     include!("ios-selection-captured-ui.rs");
     #[link(name = "UIKit", kind = "framework")]
     unsafe extern "C" {
@@ -4965,7 +4967,14 @@ mod native_host {
         }
     }
     #[cfg(ui_test_host)]
-    unsafe extern "C" fn completed_on_main(_: *mut c_void) {
+    unsafe extern "C" fn completed_on_main(context: *mut c_void) {
+        #[cfg(selection_capture_owner_acceptance)]
+        capture_autorelease_scope(|| unsafe { completed_on_main_body(context) });
+        #[cfg(not(selection_capture_owner_acceptance))]
+        unsafe { completed_on_main_body(context) };
+    }
+    #[cfg(ui_test_host)]
+    unsafe fn completed_on_main_body(_: *mut c_void) {
         #[cfg(authorization_status_consent_probe)]
         {
             let is_main: unsafe extern "C" fn(Id, Sel) -> bool = unsafe {
@@ -5108,7 +5117,20 @@ mod native_host {
         true
     }
     #[cfg(any(consent_selection_acceptance, not(picker_value_probe)))]
-    unsafe extern "C" fn launched(delegate: Id, _: Sel, _: Id, _: Id) -> bool {
+    unsafe extern "C" fn launched(delegate: Id, selector: Sel, app: Id, options: Id) -> bool {
+        #[cfg(selection_capture_owner_acceptance)]
+        {
+            let mut result = false;
+            capture_autorelease_scope(|| {
+                result = unsafe { launched_body(delegate, selector, app, options) };
+            });
+            result
+        }
+        #[cfg(not(selection_capture_owner_acceptance))]
+        unsafe { launched_body(delegate, selector, app, options) }
+    }
+    #[cfg(any(consent_selection_acceptance, not(picker_value_probe)))]
+    unsafe fn launched_body(delegate: Id, _: Sel, _: Id, _: Id) -> bool {
         assert!(!delegate.is_null());
         DELEGATE.store(unsafe { objc_retain(delegate) }.addr(), Ordering::Release);
         let screen = unsafe { send0(objc_getClass(c"UIScreen".as_ptr()), c"mainScreen") };
