@@ -13,6 +13,119 @@ struct SelectionCaptureResources {
 static SELECTION_CAPTURE_RESOURCES: AtomicPtr<SelectionCaptureResources> =
     AtomicPtr::new(std::ptr::null_mut());
 
+// Isolate the same nontrivial Binding/State lifetime before any Picker/Hosting
+// owner is created. These are genuine empty Selection values, not fake tokens.
+// A failed native preflight is preserved and prevents the UI phase from starting.
+fn selection_binding_lifetime_preflight(
+    resources: &'static SelectionCaptureResources,
+    category: *const c_void,
+    init: *const c_void,
+) {
+    let proof: &'static Arc<Proof> = &resources.proof;
+    assert!(!SELECTION_CAPTURE_PREFLIGHT_ACTIVE.swap(true, Ordering::AcqRel));
+    let before = SelectionCaptureCounts::current();
+    let operation_counts = || {
+        [
+            proof.n(Count::BindingInit),
+            proof.n(Count::BindingCopy),
+            proof.n(Count::BindingDestroy),
+            proof.n(Count::PublicGet),
+            proof.n(Count::Alloc),
+            proof.n(Count::Dealloc),
+        ]
+    };
+    let operations_before = operation_counts();
+    let home = std::env::var_os("HOME").expect("preflight HOME missing");
+    let path = std::path::PathBuf::from(home).join("Documents/captured-selection-preflight.txt");
+    std::fs::write(&path, "preflight_phase=started\n")
+        .expect("write native Binding preflight start");
+    let mut stable = Value::allocate(&resources.selection, proof, false);
+    stable.category(false, category);
+    let context = create_selection_capture(Box::new(Installed::install(stable, proof)));
+    let mut original = Value::allocate(&resources.binding, proof, true);
+    retain_selection_capture_inputs(context);
+    proof.inc(Count::BindingInit);
+    unsafe {
+        rust_selection_capture_binding_init(
+            original.ptr(),
+            rust_mutable_get_closure as *const c_void,
+            rust_mutable_set_closure as *const c_void,
+            resources.selection.metadata,
+            init,
+            context,
+        )
+    };
+    original.initialized = true;
+    let mut copy = Value::allocate(&resources.binding, proof, true);
+    copy.copy(&original);
+    drop(original);
+    let mut output = Value::allocate(&resources.selection, proof, false);
+    copy.get(
+        &mut output,
+        resources.selection.metadata,
+        resolve(env!("BINDING_GET_SYMBOL")),
+    );
+    drop(output);
+    begin_selection_capture_close();
+    drop(copy);
+    release_selection_capture_root();
+    // Root is no longer dereferenced. The global identity/destructor counters
+    // determine whether a surviving framework owner exists even without UI.
+    let measured = SelectionCaptureCounts::current().since(before);
+    let operations = std::array::from_fn::<_, 6, _>(|index| {
+        operation_counts()[index]
+            .checked_sub(operations_before[index])
+            .unwrap()
+    });
+    let identity_clear = SELECTION_CAPTURE_ID.load(Ordering::Acquire).is_null();
+    let state_clear = STATE.load(Ordering::Acquire).is_null();
+    let drained = measured.allocations == 1
+        && measured.state_drops == 1
+        && measured.destroys == 1
+        && measured.deallocations == 1
+        && measured.input_retains == 2
+        && measured.root_releases == 1
+        && operations[0..4] == [1, 1, 2, 1]
+        && operations[4] > 0
+        && operations[4] == operations[5]
+        && identity_clear
+        && state_clear
+        && proof.n(Count::Active) == 0
+        && !COUNT_READING.load(Ordering::Acquire)
+        && DIAGNOSTICS.lock().unwrap().is_none();
+    let phase = if drained { "complete" } else { "not_drained" };
+    let evidence = format!(
+        "preflight_phase={phase}\npreflight_binding_initializer_calls={}\npreflight_binding_copy_calls={}\npreflight_binding_destroy_calls={}\npreflight_public_getter_calls={}\npreflight_context_allocations={}\npreflight_state_drop_completed={}\npreflight_context_destroy_entered={}\npreflight_context_deallocation_completed={}\npreflight_input_retains={}\npreflight_root_releases={}\npreflight_mutable_allocations={}\npreflight_mutable_deallocations={}\npreflight_context_identity_cleared={identity_clear}\npreflight_state_pointer_cleared={state_clear}\n",
+        operations[0],
+        operations[1],
+        operations[2],
+        operations[3],
+        measured.allocations,
+        measured.state_drops,
+        measured.destroys,
+        measured.deallocations,
+        measured.input_retains,
+        measured.root_releases,
+        operations[4],
+        operations[5]
+    );
+    std::fs::write(path, &evidence).expect("write native Binding preflight result");
+    assert!(
+        drained,
+        "nontrivial Binding lifetime preflight did not drain"
+    );
+    assert!(SELECTION_CAPTURE_PREFLIGHT_EVIDENCE.set(evidence).is_ok());
+    // Preserve monotonic global counters; UI output uses the measured delta
+    // from this completed preflight rather than resetting/relabeling the totals.
+    assert!(
+        SELECTION_CAPTURE_UI_BASELINE
+            .set(SelectionCaptureCounts::current())
+            .is_ok()
+    );
+    assert!(SELECTION_CAPTURE_CLOSING.swap(false, Ordering::AcqRel));
+    assert!(SELECTION_CAPTURE_PREFLIGHT_ACTIVE.swap(false, Ordering::AcqRel));
+}
+
 fn selection_capture_host() -> *mut c_void {
     assert!(unsafe { pthread_main_np() } == 1);
     assert!(cfg!(all(
@@ -85,6 +198,7 @@ fn selection_capture_host() -> *mut c_void {
     // and stopping/joining the watchdog before freeing any referenced field.
     let resources: &'static SelectionCaptureResources = unsafe { &*resources };
     let proof: &'static Arc<Proof> = &resources.proof;
+    selection_binding_lifetime_preflight(resources, category, init);
     let mut stable = Value::allocate(&resources.selection, proof, false);
     stable.category(false, category);
     let installed = Box::new(Installed::install(stable, proof));
@@ -123,18 +237,19 @@ pub(super) fn finish_selection_capture_resources() -> Result<String, &'static st
     if unsafe { pthread_main_np() } != 1 {
         return Err("Selection resource cleanup requires MAIN");
     }
+    let measured = selection_capture_ui_counts();
     if !SELECTION_CAPTURE_CLOSING.load(Ordering::Acquire)
         || !SELECTION_CAPTURE_ROOT.load(Ordering::Acquire).is_null()
         || !SELECTION_CAPTURE_ID.load(Ordering::Acquire).is_null()
         || !SELECTION_CAPTURE_BINDING_COPY
             .load(Ordering::Acquire)
             .is_null()
-        || SELECTION_CAPTURE_STATE_DROPS.load(Ordering::Acquire) != 1
-        || SELECTION_CAPTURE_DESTROY_ENTERED.load(Ordering::Acquire) != 1
-        || SELECTION_CAPTURE_DEALLOC_COMPLETED.load(Ordering::Acquire) != 1
-        || SELECTION_CAPTURE_ALLOCATED.load(Ordering::Acquire) != 1
-        || SELECTION_CAPTURE_INPUT_RETAINS.load(Ordering::Acquire) != 2
-        || SELECTION_CAPTURE_ROOT_RELEASES.load(Ordering::Acquire) != 1
+        || measured.state_drops != 1
+        || measured.destroys != 1
+        || measured.deallocations != 1
+        || measured.allocations != 1
+        || measured.input_retains != 2
+        || measured.root_releases != 1
         || !STATE.load(Ordering::Acquire).is_null()
         || COUNT_READING.load(Ordering::Acquire)
         || DIAGNOSTICS.lock().unwrap().is_some()

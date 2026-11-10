@@ -1,5 +1,5 @@
 // Held audit-host teardown wiring. Public Foundation weak tables observe only
-// the four named UIKit objects; they do not hook framework deallocation or
+// the five named UIKit objects; they do not hook framework deallocation or
 // retain any target. Same-SDK declarations and independent review are required
 // before this opt-in candidate may be enabled for an actual acceptance run.
 
@@ -11,7 +11,7 @@ static CAPTURE_BUTTON_TEMP_RELEASES: AtomicUsize = AtomicUsize::new(0);
 static CAPTURE_HOSTING_RELEASES: AtomicUsize = AtomicUsize::new(0);
 static CAPTURE_WINDOW_RELEASES: AtomicUsize = AtomicUsize::new(0);
 static CAPTURE_DELEGATE_RELEASES: AtomicUsize = AtomicUsize::new(0);
-static CAPTURE_WEAK_TABLES: [AtomicUsize; 4] = [const { AtomicUsize::new(0) }; 4];
+static CAPTURE_WEAK_TABLES: [AtomicUsize; 5] = [const { AtomicUsize::new(0) }; 5];
 static CAPTURE_CLOSE_EVIDENCE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
 static CAPTURE_UI_STARTED: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
 static CAPTURE_BOOTSTRAP_WATCHDOG: std::sync::Mutex<Option<CaptureBootstrapWatchdog>> =
@@ -82,7 +82,7 @@ fn capture_weak_record(index: usize, object: Id) {
 
 fn capture_write_ui_evidence(
     phase: &str,
-    weak_nil: Option<[bool; 4]>,
+    weak_nil: Option<[bool; 5]>,
     state: &str,
     accepted: bool,
 ) {
@@ -94,14 +94,16 @@ fn capture_write_ui_evidence(
             .map(|values| values[index].to_string())
             .unwrap_or_else(|| "unobserved".to_owned())
     };
+    let preflight = super::mutable_binding::selection_capture_preflight_evidence();
     let evidence = format!(
-        "phase={phase}\n{}{}weak_initial_controller_nil={}\nweak_hosting_controller_nil={}\nweak_window_nil={}\nweak_button_nil={}\ninitial_controller_reference_releases={}\nbutton_temporary_retains={}\nbutton_temporary_releases={}\nhosting_reference_releases={}\nwindow_reference_releases={}\ndelegate_owned_reference_releases={}\nbootstrap_watchdog_joins={}\nwindow_pointer_cleared={}\ncontroller_pointer_cleared={}\nbutton_pointer_cleared={}\nnamed_ui_and_state_graph_release_verified={accepted}\nfull_framework_teardown_not_established=true\nindividual_app_selection_verified=false\nmonitoring_verified=false\nshielding_verified=false\n",
+        "phase={phase}\n{preflight}{}{}weak_initial_controller_nil={}\nweak_hosting_controller_nil={}\nweak_window_nil={}\nweak_button_nil={}\nweak_hosting_view_nil={}\ninitial_controller_reference_releases={}\nbutton_temporary_retains={}\nbutton_temporary_releases={}\nhosting_reference_releases={}\nwindow_reference_releases={}\ndelegate_owned_reference_releases={}\nbootstrap_watchdog_joins={}\nwindow_pointer_cleared={}\ncontroller_pointer_cleared={}\nbutton_pointer_cleared={}\nnamed_ui_and_state_graph_release_verified={accepted}\nfull_framework_teardown_not_established=true\nindividual_app_selection_verified=false\nmonitoring_verified=false\nshielding_verified=false\n",
         CAPTURE_CLOSE_EVIDENCE.lock().unwrap().as_str(),
         state,
         weak_value(0),
         weak_value(1),
         weak_value(2),
         weak_value(3),
+        weak_value(4),
         CAPTURE_INITIAL_RELEASES.load(Ordering::Acquire),
         CAPTURE_BUTTON_TEMP_RETAINS.load(Ordering::Acquire),
         CAPTURE_BUTTON_TEMP_RELEASES.load(Ordering::Acquire),

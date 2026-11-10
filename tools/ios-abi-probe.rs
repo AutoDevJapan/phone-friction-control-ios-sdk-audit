@@ -5320,6 +5320,8 @@ mod native_host {
             }
             send_void(window, c"makeKeyAndVisible");
             send_void(send0(controller, c"view"), c"layoutIfNeeded");
+            #[cfg(selection_capture_owner_acceptance)]
+            capture_weak_record(4, send0(controller, c"view"));
             #[cfg(consent_selection_acceptance)]
             {
                 // Reuse the explicit host control as an aggregate test marker.

@@ -36,11 +36,15 @@ fn validate(teardown: &str, prior_selection: &str) -> Result<(), String> {
     let output = parse(teardown)?;
     let prior = parse(prior_selection)?;
     exact(&output, "phase", "complete")?;
+    exact(&output, "preflight_phase", "complete")?;
     for key in [
         "weak_initial_controller_nil",
         "weak_hosting_controller_nil",
         "weak_window_nil",
         "weak_button_nil",
+        "weak_hosting_view_nil",
+        "preflight_context_identity_cleared",
+        "preflight_state_pointer_cleared",
         "captured_context_identity_cleared",
         "state_pointer_cleared",
         "selection_state_watchdog_stopped_and_joined",
@@ -76,6 +80,14 @@ fn validate(teardown: &str, prior_selection: &str) -> Result<(), String> {
         "proof_owners_before_final_drop",
         "close_probe_rejected_set_callbacks",
         "close_probe_binding_copy_destroy_calls",
+        "preflight_binding_initializer_calls",
+        "preflight_binding_copy_calls",
+        "preflight_public_getter_calls",
+        "preflight_context_allocations",
+        "preflight_state_drop_completed",
+        "preflight_context_destroy_entered",
+        "preflight_context_deallocation_completed",
+        "preflight_root_releases",
     ] {
         require(
             number(&output, key)? == 1,
@@ -85,6 +97,14 @@ fn validate(teardown: &str, prior_selection: &str) -> Result<(), String> {
     require(
         number(&output, "captured_context_input_retains")? == 2,
         "closure input retain count rejected",
+    )?;
+    require(
+        number(&output, "preflight_binding_destroy_calls")? == 2,
+        "standalone Binding destroys missing",
+    )?;
+    require(
+        number(&output, "preflight_input_retains")? == 2,
+        "standalone closure input retains missing",
     )?;
     require(
         number(&output, "captured_context_deferred_main_drops")? <= 1,
@@ -106,6 +126,10 @@ fn validate(teardown: &str, prior_selection: &str) -> Result<(), String> {
         (
             "picker_rust_value_allocations",
             "picker_rust_value_deallocations",
+        ),
+        (
+            "preflight_mutable_allocations",
+            "preflight_mutable_deallocations",
         ),
     ] {
         let allocations = number(&output, allocate)?;
@@ -159,6 +183,9 @@ mod tests {
         // action or actual lifetime result is constructed by these host tests.
         let text = concat!(
             "phase=complete\n",
+            "preflight_phase=complete\npreflight_binding_initializer_calls=1\npreflight_binding_copy_calls=1\npreflight_binding_destroy_calls=2\npreflight_public_getter_calls=1\n",
+            "preflight_context_allocations=1\npreflight_state_drop_completed=1\npreflight_context_destroy_entered=1\npreflight_context_deallocation_completed=1\npreflight_input_retains=2\npreflight_root_releases=1\n",
+            "preflight_mutable_allocations=4\npreflight_mutable_deallocations=4\npreflight_context_identity_cleared=true\npreflight_state_pointer_cleared=true\nweak_hosting_view_nil=true\n",
             "weak_initial_controller_nil=true\nweak_hosting_controller_nil=true\nweak_window_nil=true\nweak_button_nil=true\n",
             "captured_context_identity_cleared=true\nstate_pointer_cleared=true\n",
             "selection_state_watchdog_stopped_and_joined=true\nwindow_pointer_cleared=true\ncontroller_pointer_cleared=true\nbutton_pointer_cleared=true\n",
@@ -229,6 +256,12 @@ mod tests {
                 "close_probe_empty_input_count=1",
             ),
             ("bootstrap_watchdog_joins=1", "bootstrap_watchdog_joins=0"),
+            (
+                "preflight_context_deallocation_completed=1",
+                "preflight_context_deallocation_completed=0",
+            ),
+            ("preflight_phase=complete", "preflight_phase=not_drained"),
+            ("weak_hosting_view_nil=true", "weak_hosting_view_nil=false"),
         ] {
             assert!(result.contains(from));
             assert!(validate(&result.replace(from, to), &prior).is_err());

@@ -59,6 +59,7 @@ static SELECTION_CAPTURE_ID: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_m
 // The two closure input +1 references are separately retained then transferred.
 static SELECTION_CAPTURE_ROOT: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 static SELECTION_CAPTURE_CLOSING: AtomicBool = AtomicBool::new(false);
+static SELECTION_CAPTURE_PREFLIGHT_ACTIVE: AtomicBool = AtomicBool::new(false);
 static SELECTION_CAPTURE_DESTROY_ENTERED: AtomicUsize = AtomicUsize::new(0);
 static SELECTION_CAPTURE_DEALLOC_COMPLETED: AtomicUsize = AtomicUsize::new(0);
 static SELECTION_CAPTURE_STATE_DROPS: AtomicUsize = AtomicUsize::new(0);
@@ -71,6 +72,71 @@ static SELECTION_CAPTURE_ALLOCATED: AtomicUsize = AtomicUsize::new(0);
 static SELECTION_CAPTURE_VALIDATED_CALLBACKS: AtomicUsize = AtomicUsize::new(0);
 static SELECTION_CAPTURE_BINDING_COPY: AtomicPtr<Value<'static>> =
     AtomicPtr::new(std::ptr::null_mut());
+
+#[derive(Clone, Copy, Default)]
+struct SelectionCaptureCounts {
+    allocations: usize,
+    state_drops: usize,
+    destroys: usize,
+    deallocations: usize,
+    deferred: usize,
+    input_retains: usize,
+    root_releases: usize,
+    callbacks: usize,
+}
+impl SelectionCaptureCounts {
+    fn current() -> Self {
+        Self {
+            allocations: SELECTION_CAPTURE_ALLOCATED.load(Ordering::Acquire),
+            state_drops: SELECTION_CAPTURE_STATE_DROPS.load(Ordering::Acquire),
+            destroys: SELECTION_CAPTURE_DESTROY_ENTERED.load(Ordering::Acquire),
+            deallocations: SELECTION_CAPTURE_DEALLOC_COMPLETED.load(Ordering::Acquire),
+            deferred: SELECTION_CAPTURE_DEFERRED_DROPS.load(Ordering::Acquire),
+            input_retains: SELECTION_CAPTURE_INPUT_RETAINS.load(Ordering::Acquire),
+            root_releases: SELECTION_CAPTURE_ROOT_RELEASES.load(Ordering::Acquire),
+            callbacks: SELECTION_CAPTURE_VALIDATED_CALLBACKS.load(Ordering::Acquire),
+        }
+    }
+    fn since(self, before: Self) -> Self {
+        Self {
+            allocations: self.allocations.checked_sub(before.allocations).unwrap(),
+            state_drops: self.state_drops.checked_sub(before.state_drops).unwrap(),
+            destroys: self.destroys.checked_sub(before.destroys).unwrap(),
+            deallocations: self
+                .deallocations
+                .checked_sub(before.deallocations)
+                .unwrap(),
+            deferred: self.deferred.checked_sub(before.deferred).unwrap(),
+            input_retains: self
+                .input_retains
+                .checked_sub(before.input_retains)
+                .unwrap(),
+            root_releases: self
+                .root_releases
+                .checked_sub(before.root_releases)
+                .unwrap(),
+            callbacks: self.callbacks.checked_sub(before.callbacks).unwrap(),
+        }
+    }
+}
+static SELECTION_CAPTURE_UI_BASELINE: std::sync::OnceLock<SelectionCaptureCounts> =
+    std::sync::OnceLock::new();
+static SELECTION_CAPTURE_PREFLIGHT_EVIDENCE: std::sync::OnceLock<String> =
+    std::sync::OnceLock::new();
+fn selection_capture_ui_counts() -> SelectionCaptureCounts {
+    SelectionCaptureCounts::current().since(
+        SELECTION_CAPTURE_UI_BASELINE
+            .get()
+            .copied()
+            .unwrap_or_default(),
+    )
+}
+pub(super) fn selection_capture_preflight_evidence() -> &'static str {
+    SELECTION_CAPTURE_PREFLIGHT_EVIDENCE
+        .get()
+        .map(String::as_str)
+        .unwrap_or("")
+}
 
 struct SelectionCapturePayload {
     installed: Option<Box<Installed<'static>>>,
@@ -297,16 +363,17 @@ fn validate_selection_capture_callback(context: *mut c_void) {
 }
 
 pub(super) fn selection_capture_partial_evidence() -> String {
+    let measured = selection_capture_ui_counts();
     format!(
         "captured_context_allocations={}\ncaptured_selection_state_drop_completed={}\ncaptured_context_destroy_entered={}\ncaptured_context_deallocation_completed={}\ncaptured_context_deferred_main_drops={}\ncaptured_context_input_retains={}\ncaptured_context_root_releases={}\ncaptured_validated_context_callbacks={}\ncaptured_context_identity_cleared={}\nstate_pointer_cleared={}\n",
-        SELECTION_CAPTURE_ALLOCATED.load(Ordering::Acquire),
-        SELECTION_CAPTURE_STATE_DROPS.load(Ordering::Acquire),
-        SELECTION_CAPTURE_DESTROY_ENTERED.load(Ordering::Acquire),
-        SELECTION_CAPTURE_DEALLOC_COMPLETED.load(Ordering::Acquire),
-        SELECTION_CAPTURE_DEFERRED_DROPS.load(Ordering::Acquire),
-        SELECTION_CAPTURE_INPUT_RETAINS.load(Ordering::Acquire),
-        SELECTION_CAPTURE_ROOT_RELEASES.load(Ordering::Acquire),
-        SELECTION_CAPTURE_VALIDATED_CALLBACKS.load(Ordering::Acquire),
+        measured.allocations,
+        measured.state_drops,
+        measured.destroys,
+        measured.deallocations,
+        measured.deferred,
+        measured.input_retains,
+        measured.root_releases,
+        measured.callbacks,
         SELECTION_CAPTURE_ID.load(Ordering::Acquire).is_null(),
         STATE.load(Ordering::Acquire).is_null()
     )

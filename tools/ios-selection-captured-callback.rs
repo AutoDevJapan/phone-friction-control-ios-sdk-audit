@@ -78,7 +78,12 @@ fn selection_capture_callback(pointer: *mut c_void, context: *mut c_void, getter
         if !getter {
             drop(value);
             drop(active);
-            super::native_host::selection_updated();
+            // Initializer callbacks are allowed during the standalone phase,
+            // before semantic-reader plans or a Hosting view exist. Mutation
+            // still completes, but UI/semantic badge work belongs to UI phase.
+            if !SELECTION_CAPTURE_PREFLIGHT_ACTIVE.load(Ordering::Acquire) {
+                super::native_host::selection_updated();
+            }
         }
     });
     if outcome.is_err() {
