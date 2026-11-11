@@ -1152,10 +1152,11 @@ jobs:
           xcrun simctl spawn "$SIM_ID" log stream --style compact --predicate 'process == "authorization-center-probe" AND (eventMessage CONTAINS "panicked at" OR eventMessage CONTAINS "prefix changed" OR eventMessage CONTAINS "Selection snapshot setters=" OR eventMessage CONTAINS "timed out")' > "$OUT/consent-selection-host-runtime.txt" 2>&1 &
           HOST_LOG_PID=$!
           UI_COMMAND=(xcodebuild -project "$XCODE_ROOT/Probe.xcodeproj" -scheme Probe -configuration Debug -sdk iphonesimulator -destination "id=$SIM_ID" -parallel-testing-enabled NO -test-timeouts-enabled YES -default-test-execution-time-allowance "$TEST_SECONDS" -maximum-test-execution-time-allowance "$TEST_SECONDS" -resultBundlePath "$OUT/consent-ui.xcresult" SYMROOT="$OUT/xcode-products" OBJROOT="$RUNNER_TEMP/xcode-objects" test-without-building)
-          if [ '${{ inputs.selection_context_arc_trace }}' = true ]; then
-            UI_COMMAND=(perl tools/ios-xctest-process-owner.pl "$OUT" "${UI_COMMAND[@]}")
-            UI_TEST_GROUP=true
-          fi
+          # Both normal XCTest and ARC diagnostics use the same child owner.
+          # Cleanup submits a stop request rather than waiting on an unowned
+          # live xcodebuild or signalling a recyclable Bash child PID.
+          UI_COMMAND=(perl tools/ios-xctest-process-owner.pl "$OUT" "${UI_COMMAND[@]}")
+          UI_TEST_GROUP=true
           UI_PROCESS_STARTED=$SECONDS
           "${UI_COMMAND[@]}" > "$OUT/xcode-ui-test.txt" 2>&1 &
           UI_TEST_PID=$!
