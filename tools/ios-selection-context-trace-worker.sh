@@ -77,13 +77,10 @@ printf 'simulator=%s\nbundle_id=%s\ninstalled_binary=%s\n' "$SIM_ID" "$BID" "$IN
 xcrun dwarfdump --uuid "$INSTALLED_BIN" > "$TRACE-image-uuid.txt"
 UUID=$(awk '/^UUID: / {print $2}' "$TRACE-image-uuid.txt")
 [[ "$UUID" =~ ^[A-Fa-f0-9-]{36}$ ]]
-# Start this same owned generation suspended, before UIKit runs. The debugger
-# sets the fourth-init breakpoint before its first admitted continue.
-LAUNCH_STATUS=0
-perl -e 'alarm 30; exec @ARGV; die "exec failed\n"' xcrun simctl launch --wait-for-debugger "$SIM_ID" "$BID" > "$TRACE-launch.txt" 2>&1 || LAUNCH_STATUS=$?
-printf 'launch_wait_for_debugger=true\nlaunch_status=%s\n' "$LAUNCH_STATUS" >> "$TRACE-status.txt"
-test "$LAUNCH_STATUS" = 0
-PID=$(awk -v b="$BID" 'index($0,b ": ")==1 {p=substr($0,length(b)+3);if(p~/^[1-9][0-9]*$/)print p}' "$TRACE-launch.txt")
+# XCTest has already launched and observed the request control through AX.
+# No permission tap occurs before this same PID's debugger admission.
+PID=$(sed -n 's/^host_pid=//p' "$TRACE-runner-expected.txt")
+printf 'launch_source=public_xctest_ax_ready\nlaunch_wait_for_debugger=false\n' >> "$TRACE-status.txt"
 [[ "$PID" =~ ^[1-9][0-9]*$ ]]
 xcrun simctl spawn "$SIM_ID" launchctl list > "$TRACE-owned-processes.txt"
 test "$(awk -v p="$PID" -v b="$BID" '$1==p&&index($0,b)>0{n++}END{print n+0}' "$TRACE-owned-processes.txt")" = 1

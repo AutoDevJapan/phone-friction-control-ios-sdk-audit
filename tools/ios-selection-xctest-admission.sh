@@ -32,14 +32,16 @@ while :; do
   test "$(LC_ALL=C bounded_ps -p "$XCTEST_PID" -o lstart=)" = "$XCTEST_STARTED"
   test "$((SECONDS-START))" -lt 180
   if [ -f "$OUT/xcode-ui-test.txt" ]; then
-    LINES=$(grep -Ec '^XCTest context-trace: runner_ready_pid=[1-9][0-9]*; nonce=[1-9][0-9]*-[0-9]+$' "$OUT/xcode-ui-test.txt" || true)
+    LINES=$(grep -Ec '^XCTest context-trace: runner_ready_pid=[1-9][0-9]*; nonce=[1-9][0-9]*-[0-9]+; host_pid=[1-9][0-9]*$' "$OUT/xcode-ui-test.txt" || true)
     if [ "$LINES" = 1 ]; then break; fi
     test "$LINES" = 0
   fi
   sleep 0.1
 done
-RUNNER_PID=$(sed -nE 's/^XCTest context-trace: runner_ready_pid=([1-9][0-9]*); nonce=[1-9][0-9]*-[0-9]+$/\1/p' "$OUT/xcode-ui-test.txt")
-NONCE=$(sed -nE 's/^XCTest context-trace: runner_ready_pid=[1-9][0-9]*; nonce=([1-9][0-9]*-[0-9]+)$/\1/p' "$OUT/xcode-ui-test.txt")
+RUNNER_PID=$(sed -nE 's/^XCTest context-trace: runner_ready_pid=([1-9][0-9]*); nonce=[1-9][0-9]*-[0-9]+; host_pid=[1-9][0-9]*$/\1/p' "$OUT/xcode-ui-test.txt")
+NONCE=$(sed -nE 's/^XCTest context-trace: runner_ready_pid=[1-9][0-9]*; nonce=([1-9][0-9]*-[0-9]+); host_pid=[1-9][0-9]*$/\1/p' "$OUT/xcode-ui-test.txt")
+HOST_READY_PID=$(sed -nE 's/^XCTest context-trace: runner_ready_pid=[1-9][0-9]*; nonce=[1-9][0-9]*-[0-9]+; host_pid=([1-9][0-9]*)$/\1/p' "$OUT/xcode-ui-test.txt")
+[[ "$HOST_READY_PID" =~ ^[1-9][0-9]*$ ]]
 [[ "$RUNNER_PID" =~ ^[1-9][0-9]*$ ]]
 [[ "$NONCE" =~ ^$RUNNER_PID-[0-9]+$ ]]
 DATA=$(perl -e 'alarm 5; exec @ARGV; die "exec failed\n"' xcrun simctl get_app_container "$SIM_ID" "$RUNNER_BID" data)
@@ -47,7 +49,7 @@ RUNNER_APP=$(perl -e 'alarm 5; exec @ARGV; die "exec failed\n"' xcrun simctl get
 RUNNER_BIN="$RUNNER_APP/ProbeUITests-Runner"
 test -x "$RUNNER_BIN"
 READY="$DATA/Documents/captured-selection-trace-runner-ready.txt"
-printf 'runner_pid=%s\nnonce=%s\n' "$RUNNER_PID" "$NONCE" > "$TRACE-runner-expected.txt"
+printf 'runner_pid=%s\nnonce=%s\nhost_pid=%s\n' "$RUNNER_PID" "$NONCE" "$HOST_READY_PID" > "$TRACE-runner-expected.txt"
 cmp "$READY" "$TRACE-runner-expected.txt"
 STARTED=$(LC_ALL=C bounded_ps -p "$RUNNER_PID" -o lstart=)
 test -n "$STARTED"
@@ -71,6 +73,7 @@ test "$(bounded_ps -p "$RUNNER_PID" -o comm=)" = "$RUNNER_BIN"
 cmp "$READY" "$TRACE-runner-expected.txt"
 HOST_PID=$(sed -n 's/^pid=//p' "$TRACE-process-identity.txt")
 [[ "$HOST_PID" =~ ^[1-9][0-9]*$ ]]
+test "$HOST_PID" = "$HOST_READY_PID"
 test "$(sed -n 's/^simulator=//p' "$TRACE-process-identity.txt")" = "$SIM_ID"
 cat "$TRACE-process-identity.txt" "$TRACE-image-uuid.txt" "$TRACE-binary-hash.txt" > "$TRACE-admitted-host-identity.txt"
 printf 'runner_pid=%s\nnonce=%s\nhost_pid=%s\n' "$RUNNER_PID" "$NONCE" "$HOST_PID" > "$TRACE-runner-admission.txt"

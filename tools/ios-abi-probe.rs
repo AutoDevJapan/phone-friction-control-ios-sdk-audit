@@ -4641,8 +4641,50 @@ mod ui_authorization_test {
 
     unsafe extern "C" fn choose_consent(test: Id, _: Sel) {
         unsafe {
+            let application_class = objc_getClass(c"XCUIApplication".as_ptr());
+            if application_class.is_null() {
+                fail(test, c"Public XCUIApplication class missing");
+                return;
+            }
+            let identifier = string(c"com.autodevjapan.phonecontrol1614abiprobe");
+            let app = Owned(object_arg(
+                object(application_class, c"alloc"),
+                c"initWithBundleIdentifier:",
+                identifier.0,
+            ));
+            if app.0.is_null() {
+                fail(test, c"Cannot construct test application");
+                return;
+            }
+            // Establish ordinary UIKit/AX readiness before debugger attach.
+            action(app.0, c"launch");
+            let request_label = string(c"Request Screen Time access");
+            let request_buttons = retained_object(app.0, c"buttons");
+            let request_query =
+                retained_object_arg(request_buttons.0, c"matchingIdentifier:", request_label.0);
+            let request_button = retained_object(request_query.0, c"firstMatch");
+            if !wait_for(request_button.0, 15.0) {
+                fail(test, c"Test host request button not observed");
+                return;
+            }
             #[cfg(ui_test_context_arc_trace)]
-            let admitted_pid = {
+            {
+                let description = retained_object(app.0, c"debugDescription");
+                let bytes = utf8_string(description.0);
+                let pid = if bytes.is_null() {
+                    None
+                } else {
+                    std::ffi::CStr::from_ptr(bytes).to_str().ok().and_then(|text| {
+                        let (_, tail) = text.split_once("pid: ")?;
+                        let digits = tail.split(|c: char| !c.is_ascii_digit()).next()?;
+                        digits.parse::<u32>().ok().filter(|pid| *pid > 0)
+                    })
+                };
+                let Some(pid) = pid else {
+                    fail(test, c"ARC diagnostic target PID unavailable");
+                    return;
+                };
+                let admitted_pid = {
                 // The runner must be executing the test before the bounded
                 // debugger flight starts. Only this fresh runner's container
                 // receives the independently verified host PID.
@@ -4661,14 +4703,14 @@ mod ui_authorization_test {
                     return;
                 }
                 let ready = documents.join("captured-selection-trace-runner-ready.txt");
-                let ready_text = format!("runner_pid={runner_pid}\nnonce={nonce}\n");
+                let ready_text = format!("runner_pid={runner_pid}\nnonce={nonce}\nhost_pid={pid}\n");
                 let created = std::fs::OpenOptions::new().write(true).create_new(true).open(ready)
                     .and_then(|mut file| std::io::Write::write_all(&mut file, ready_text.as_bytes()));
                 if created.is_err() {
                     fail(test, c"ARC runner readiness file is not fresh");
                     return;
                 }
-                println!("XCTest context-trace: runner_ready_pid={runner_pid}; nonce={nonce}");
+                println!("XCTest context-trace: runner_ready_pid={runner_pid}; nonce={nonce}; host_pid={pid}");
                 if std::io::Write::flush(&mut std::io::stdout()).is_err() {
                     fail(test, c"ARC runner readiness output failed");
                     return;
@@ -4702,51 +4744,6 @@ mod ui_authorization_test {
                 }
                 pid
             };
-            let application_class = objc_getClass(c"XCUIApplication".as_ptr());
-            if application_class.is_null() {
-                fail(test, c"Public XCUIApplication class missing");
-                return;
-            }
-            let identifier = string(c"com.autodevjapan.phonecontrol1614abiprobe");
-            let app = Owned(object_arg(
-                object(application_class, c"alloc"),
-                c"initWithBundleIdentifier:",
-                identifier.0,
-            ));
-            if app.0.is_null() {
-                fail(test, c"Cannot construct test application");
-                return;
-            }
-            // ARC diagnostics prelaunch the owned bundle and attach to its
-            // exact PID. Do not replace it with a fresh XCTest launch.
-            #[cfg(not(ui_test_context_arc_trace))]
-            action(app.0, c"launch");
-            let request_label = string(c"Request Screen Time access");
-            let request_buttons = retained_object(app.0, c"buttons");
-            let request_query =
-                retained_object_arg(request_buttons.0, c"matchingIdentifier:", request_label.0);
-            let request_button = retained_object(request_query.0, c"firstMatch");
-            if !wait_for(request_button.0, 15.0) {
-                fail(test, c"Test host request button not observed");
-                return;
-            }
-            #[cfg(ui_test_context_arc_trace)]
-            {
-                let description = retained_object(app.0, c"debugDescription");
-                let bytes = utf8_string(description.0);
-                let pid = if bytes.is_null() {
-                    None
-                } else {
-                    std::ffi::CStr::from_ptr(bytes).to_str().ok().and_then(|text| {
-                        let (_, tail) = text.split_once("pid: ")?;
-                        let digits = tail.split(|c: char| !c.is_ascii_digit()).next()?;
-                        digits.parse::<u32>().ok().filter(|pid| *pid > 0)
-                    })
-                };
-                let Some(pid) = pid else {
-                    fail(test, c"ARC diagnostic target PID unavailable");
-                    return;
-                };
                 if pid != admitted_pid {
                     fail(test, c"ARC diagnostic target generation changed after admission");
                     return;

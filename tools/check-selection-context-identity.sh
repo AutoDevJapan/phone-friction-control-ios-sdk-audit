@@ -47,7 +47,7 @@ test "$(one "$TRACE-runner-binding.txt" runner_bundle_id)" = com.autodevjapan.ph
 test "$(one "$TRACE-runner-admission.txt" runner_pid)" = "$RUNNER_PID"
 test "$(one "$TRACE-runner-admission.txt" nonce)" = "$NONCE"
 test "$(one "$TRACE-runner-admission.txt" host_pid)" = "$PID"
-test "$(grep -Fxc "XCTest context-trace: runner_ready_pid=$RUNNER_PID; nonce=$NONCE" "$OUT/xcode-ui-test.txt")" = 1
+test "$(grep -Fxc "XCTest context-trace: runner_ready_pid=$RUNNER_PID; nonce=$NONCE; host_pid=$PID" "$OUT/xcode-ui-test.txt")" = 1
 test "$(grep -Fxc "XCTest context-trace: admitted_runner_pid=$RUNNER_PID; nonce=$NONCE; host_pid=$PID" "$OUT/xcode-ui-test.txt")" = 1
 test "$(grep -Ec '^XCTest context-trace: target_pid_before=[1-9][0-9]*$' "$OUT/xcode-ui-test.txt")" = 1
 test "$(grep -Ec '^XCTest context-trace: target_pid_before_close=[1-9][0-9]*$' "$OUT/xcode-ui-test.txt")" = 1
