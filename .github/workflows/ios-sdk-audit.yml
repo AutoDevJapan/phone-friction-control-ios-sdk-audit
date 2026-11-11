@@ -1601,7 +1601,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: AutoDevJapan/phone-friction-control
-          ref: e594c97ed49246991e08c0704904a756ea1c3c4e
+          ref: 3d6e7a9278e7dcf43758588745953b5e1a1ed268
           path: app
       - uses: dtolnay/rust-toolchain@master
         with:

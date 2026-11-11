@@ -31,7 +31,7 @@ cleanup() {
 }
 trap cleanup EXIT
 test "$(uname -m)" = arm64
-test "$(git -C app rev-parse HEAD)" = e594c97ed49246991e08c0704904a756ea1c3c4e
+test "$(git -C app rev-parse HEAD)" = 3d6e7a9278e7dcf43758588745953b5e1a1ed268
 git -C app rev-parse HEAD > "$OUT/product-source.txt"
 git rev-parse HEAD > "$OUT/audit-source.txt"
 printf 'entry=phone-friction-control-ios-runtime\nfeature=ios-runtime\npatches_applied=false\ndiagnostic_logger=false\nindividual_app_selection_verified=false\nmonitoring_verified=false\nshielding_verified=false\n' > "$OUT/product-scope.txt"
