@@ -63,8 +63,12 @@ test "$(awk -v p="$RUNNER_PID" -v b="$RUNNER_BID" '$1==p&&index($0,b)>0{n++}END{
 printf 'runner_pid=%s\nnonce=%s\nsimulator=%s\nrunner_bundle_id=%s\nrunner_started=%s\nrunner_binary=%s\n' "$RUNNER_PID" "$NONCE" "$SIM_ID" "$RUNNER_BID" "$STARTED" "$RUNNER_BIN" > "$TRACE-runner-binding.txt"
 ADMISSION="$DATA/Documents/captured-selection-trace-admission.txt"
 RECEIVED="$DATA/Documents/captured-selection-trace-received.txt"
+BEGIN="$DATA/Documents/captured-selection-trace-begin.txt"
+WAITING="$DATA/Documents/captured-selection-trace-waiting.txt"
 test ! -e "$ADMISSION"
 test ! -e "$RECEIVED"
+test ! -e "$BEGIN"
+test ! -e "$WAITING"
 bash tools/ios-selection-context-trace.sh "$OUT" "$APP" "$SIM_ID" &
 TRACE_PID=$!
 event_time trace_worker_started
@@ -85,6 +89,23 @@ test "$HOST_PID" = "$HOST_READY_PID"
 test "$(sed -n 's/^simulator=//p' "$TRACE-process-identity.txt")" = "$SIM_ID"
 cat "$TRACE-process-identity.txt" "$TRACE-image-uuid.txt" "$TRACE-binary-hash.txt" > "$TRACE-admitted-host-identity.txt"
 printf 'runner_pid=%s\nnonce=%s\nhost_pid=%s\n' "$RUNNER_PID" "$NONCE" "$HOST_PID" > "$TRACE-runner-admission.txt"
+# The receiver starts its 60-second admission clock only for this exact
+# debugger-ready generation. File-only acknowledgement works while attached;
+# querying AX here could wait on the stopped host and create a cycle.
+START=$SECONDS
+(set -o noclobber; cat "$TRACE-runner-admission.txt" > "$BEGIN.pending")
+ln "$BEGIN.pending" "$BEGIN"
+rm "$BEGIN.pending"
+event_time runner_wait_begin_published
+while :; do
+  test "$((SECONDS-START))" -lt 60
+  kill -0 "$TRACE_PID" 2>/dev/null
+  test "$(LC_ALL=C bounded_ps -p "$RUNNER_PID" -o lstart=)" = "$STARTED"
+  if [ -f "$WAITING" ] && cmp -s "$WAITING" "$TRACE-runner-admission.txt"; then break; fi
+  sleep 0.1
+done
+cp "$WAITING" "$TRACE-runner-waiting.txt"
+event_time runner_wait_started
 # Publish complete bytes once to only the verified runner's own container.
 # Linking the completed sibling never exposes a partially written admission.
 (set -o noclobber; cat "$TRACE-runner-admission.txt" > "$ADMISSION.pending")

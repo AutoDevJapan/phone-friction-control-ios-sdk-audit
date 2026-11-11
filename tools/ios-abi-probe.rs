@@ -4694,11 +4694,15 @@ mod ui_authorization_test {
                 };
                 let documents = std::path::PathBuf::from(home).join("Documents");
                 let admission = documents.join("captured-selection-trace-admission.txt");
+                let begin = documents.join("captured-selection-trace-begin.txt");
+                let waiting = documents.join("captured-selection-trace-waiting.txt");
                 let runner_pid = std::process::id();
                 let generation = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH).expect("runner clock").as_nanos();
                 let nonce = format!("{runner_pid}-{generation}");
-                if std::fs::create_dir_all(&documents).is_err() || admission.exists() {
+                if std::fs::create_dir_all(&documents).is_err()
+                    || admission.exists() || begin.exists() || waiting.exists()
+                {
                     fail(test, c"ARC runner admission is not fresh");
                     return;
                 }
@@ -4715,11 +4719,35 @@ mod ui_authorization_test {
                     fail(test, c"ARC runner readiness output failed");
                     return;
                 }
+                // Wait for the debugger-ready event using only files, which
+                // need no AX response from an attached/stopped host. The owner
+                // still bounds the complete test process to 180 seconds.
+                let preparation_started = std::time::Instant::now();
+                let mut begin_seen = false;
+                while preparation_started.elapsed() < std::time::Duration::from_secs(180) {
+                    match std::fs::read_to_string(&begin) {
+                        Ok(text) => { begin_seen = text == ready_text; break; }
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                            std::thread::sleep(std::time::Duration::from_millis(50));
+                        }
+                        Err(_) => break,
+                    }
+                }
+                if !begin_seen || preparation_started.elapsed() >= std::time::Duration::from_secs(180) {
+                    fail(test, c"ARC debugger-ready start event missing or invalid");
+                    return;
+                }
                 let started = std::time::Instant::now();
                 let wait_wall_ms = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH).expect("runner clock").as_millis();
                 println!("XCTest context-trace: admission_wait_start_wall_ms={wait_wall_ms}; limit_seconds=60");
                 let _ = std::io::Write::flush(&mut std::io::stdout());
+                if std::fs::OpenOptions::new().write(true).create_new(true).open(waiting)
+                    .and_then(|mut file| std::io::Write::write_all(&mut file, ready_text.as_bytes())).is_err()
+                {
+                    fail(test, c"ARC admission wait acknowledgement is not fresh");
+                    return;
+                }
                 let mut observed = None;
                 let mut read_result = "not_found";
                 while started.elapsed() < std::time::Duration::from_secs(60) {
