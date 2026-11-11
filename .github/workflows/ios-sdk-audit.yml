@@ -2,6 +2,10 @@ name: Manual iOS SDK audit
 on:
   workflow_dispatch:
     inputs:
+      selection_context_arc_trace:
+        description: Diagnose bounded own UI-context ARC stacks; not product drain acceptance
+        type: boolean
+        default: false
       selection_capture_owner_acceptance:
         description: Audit captured nonempty Selection lifetime and finite owned UIKit teardown
         type: boolean
@@ -249,6 +253,9 @@ jobs:
           # validates SDK 18.5 / Swift 6.1.2; runtime guards remain mandatory.
           # Never silently select the runner's default Xcode.
           mkdir -p "$RUNNER_TEMP/ios-sdk-audit"
+          if [ '${{ inputs.selection_context_arc_trace }}' = true ]; then
+            test '${{ inputs.selection_capture_owner_acceptance }}' = true
+          fi
           if [ '${{ inputs.selection_capture_owner_acceptance }}' = true ]; then
             test '${{ inputs.selection_inspection_mode }}' = consent-selection-acceptance
             test '${{ inputs.category_selection_observation }}' = true
@@ -1044,6 +1051,19 @@ jobs:
           set -euo pipefail
           SIM_ID=$1
           OUT="$RUNNER_TEMP/ios-sdk-audit"
+          TRACE_PID=''
+          HOST_LOG_PID=''
+          cleanup_observers() {
+            STATUS=$?
+            trap - EXIT
+            if [ -n "$HOST_LOG_PID" ]; then kill "$HOST_LOG_PID" 2>/dev/null || true; wait "$HOST_LOG_PID" 2>/dev/null || true; fi
+            if [ -n "$TRACE_PID" ]; then
+              kill "$TRACE_PID" 2>/dev/null || true
+              wait "$TRACE_PID" 2>/dev/null || true
+            fi
+            exit "$STATUS"
+          }
+          trap cleanup_observers EXIT
           if [ '${{ inputs.selection_inspection_mode }}' = consent-selection-acceptance ] && [ '${{ inputs.category_selection_observation }}' != true ]; then
             # Finite official fixture acquisition: built-in Messages in this NEW
             # Simulator only. No third-party app download/account/playback.
@@ -1101,6 +1121,12 @@ jobs:
           TEST_SECONDS=90
           if [ '${{ inputs.selection_inspection_mode }}' = consent-selection-acceptance ]; then TEST_SECONDS=180; fi
           printf 'xctest_started_at=%s\ntest_limit_seconds=%s\n' "$(date -u +%FT%TZ)" "$TEST_SECONDS" > "$OUT/consent-selection-phase.txt"
+          if [ '${{ inputs.selection_context_arc_trace }}' = true ]; then
+            tar -czf "$OUT/captured-selection-probe.app.tar.gz" -C "$(dirname "$PROBE_APP")" "$(basename "$PROBE_APP")"
+            shasum -a 256 "$OUT/captured-selection-probe.app.tar.gz" > "$OUT/captured-selection-probe-archive-hash.txt"
+            bash tools/ios-selection-context-trace.sh "$OUT" "$PROBE_APP" &
+            TRACE_PID=$!
+          fi
           # Capture host errors (including a pre-UI ABI guard panic) independently
           # of whether XCTest reaches its first application control.
           # Limit exported diagnostics to known guard failures and aggregates;
@@ -1110,6 +1136,13 @@ jobs:
           if xcodebuild -project "$XCODE_ROOT/Probe.xcodeproj" -scheme Probe -configuration Debug -sdk iphonesimulator -destination "id=$SIM_ID" -parallel-testing-enabled NO -test-timeouts-enabled YES -default-test-execution-time-allowance "$TEST_SECONDS" -maximum-test-execution-time-allowance "$TEST_SECONDS" -resultBundlePath "$OUT/consent-ui.xcresult" SYMROOT="$OUT/xcode-products" OBJROOT="$RUNNER_TEMP/xcode-objects" test-without-building > "$OUT/xcode-ui-test.txt" 2>&1; then UI_TEST_STATUS=0; else UI_TEST_STATUS=$?; fi
           kill "$HOST_LOG_PID" 2>/dev/null || true
           wait "$HOST_LOG_PID" 2>/dev/null || true
+          HOST_LOG_PID=''
+          TRACE_STATUS=0
+          if [ -n "$TRACE_PID" ]; then
+            wait "$TRACE_PID" || TRACE_STATUS=$?
+            TRACE_PID=''
+            printf 'trace_process_status=%s\n' "$TRACE_STATUS" >> "$OUT/captured-selection-context-status.txt"
+          fi
           # Always preserve partial app files BEFORE asserting test success.
           if [ '${{ inputs.selection_inspection_mode }}' = consent-selection-acceptance ]; then
             printf 'xctest_exit_status=%s\nmac_acceptance_verified=false\n' "$UI_TEST_STATUS" > "$OUT/consent-selection-test-status.txt"
@@ -1167,6 +1200,13 @@ jobs:
                 printf 'xctest_exit_status=0\ncategory_ui_setter_delta_observed=true\ncategory_token_count_verified=true\nselection_snapshot_lifetime_verified=true\nindividual_app_selection_verified=false\ncategory_instance_count_verified=false\nfull_teardown_verified=false\n' > "$OUT/consent-selection-test-status.txt"
                 if [ '${{ inputs.selection_capture_owner_acceptance }}' = true ]; then
                   grep -Fx 'XCTest consent-selection: owned_teardown_requested=true; target_not_running=true; teardown_file_acceptance_required=true' "$OUT/consent-selection-xctest-observations.txt"
+                  if [ '${{ inputs.selection_context_arc_trace }}' = true ]; then
+                    test "$TRACE_STATUS" = 0
+                    grep -Fx 'context_arc_stack_capture_complete=true' "$OUT/captured-selection-context-status.txt"
+                    grep -Fx 'product_drain_accepted=false' "$OUT/captured-selection-context-status.txt"
+                    printf 'diagnostic_only=true\ncontext_arc_stack_capture_complete=true\nproduct_drain_accepted=false\n' > "$OUT/captured-selection-context-result.txt"
+                    exit 0
+                  fi
                   "$RUNNER_TEMP/check-captured-selection-result" "$OUT/captured-selection-teardown.txt" "$RESULTS" > "$OUT/captured-selection-result-gate.txt"
                   cat "$OUT/captured-selection-result-gate.txt" >> "$OUT/consent-selection-test-status.txt"
                 fi
@@ -1441,6 +1481,7 @@ jobs:
             ${{ runner.temp }}/ios-sdk-audit/consent-ui.xcresult
             ${{ runner.temp }}/ios-sdk-audit/consent-selection-*.txt
             ${{ runner.temp }}/ios-sdk-audit/captured-selection-*.txt
+            ${{ runner.temp }}/ios-sdk-audit/captured-selection-probe.app.tar.gz
             ${{ runner.temp }}/ios-sdk-audit/captured-hosting-ownership-sil.txt
             ${{ runner.temp }}/ios-sdk-audit/captured-hosting-allocator-convention.txt
             ${{ runner.temp }}/ios-sdk-audit/fixture-*.txt
