@@ -50,9 +50,16 @@ await_marker() {
   done
   test "$(( $(date +%s) - START ))" -lt "$LIMIT"
 }
-send_continue() { CONTINUES=$((CONTINUES + 1)); printf 'continue\n' >&3; }
+send_continue() {
+  CONTINUES=$((CONTINUES + 1))
+  # The official command-file mode drives the debugger synchronously until
+  # an actual stop. The outer owner still enforces the same 90-second flight.
+  printf 'command source --stop-on-error true --stop-on-continue false "%s-continue.lldb"\n' "$TRACE" >&3
+}
 test -x "$APP/authorization-center-probe"
 test ! -e "$FIFO"
+test ! -e "$TRACE-continue.lldb"
+printf 'continue\n' > "$TRACE-continue.lldb"
 for MARKER in attached context-stopped configured exited ready continue-admitted; do test ! -e "$TRACE.$MARKER"; done
 printf 'diagnostic_only=true\nmaximum_events=64\nmaximum_frames=12\nattach_limit_seconds=60\ntrace_limit_seconds=90\nproduct_drain_accepted=false\n' > "$TRACE-status.txt"
 perl -e 'alarm 10; exec @ARGV; die "exec failed\n"' xcrun lldb --version > "$TRACE-version.txt" 2>&1
