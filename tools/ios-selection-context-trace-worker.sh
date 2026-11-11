@@ -181,10 +181,11 @@ grep -Eq '^[[:space:]]*(\*[[:space:]]*)?frame #0: .* swift_release(_n)?([[:space
 awk '
   /^context_trace_initial_window_complete=1[[:space:]]*$/ { if (phase != 0) exit 1; phase=1; next }
   /^context_trace_close_window_started=1[[:space:]]*$/ { if (phase != 1) exit 1; phase=2; next }
+  /^context_trace_reached_exit=1[[:space:]]*$/ { if (phase != 2) exit 1; phase=3; next }
   /^[[:space:]]*(\*[[:space:]]*)?frame #0: .* swift_(retain|release)(_n)?([[:space:]]|$)/ {
-    if (phase == 1) exit 1;
+    if (phase == 1 || phase == 3) exit 1;
     if (phase == 0) initial++; else closing++;
   }
-  END { if (phase != 2 || initial < 2 || closing < 1) exit 1 }
+  END { if (phase != 3 || initial < 2 || closing < 1) exit 1 }
 ' "$RAW"
 printf 'observed_context_events=%s\ncontext_arc_stack_capture_complete=true\ncontext_arc_observation_scope=binding_initialization_and_close_windows\nbetween_windows_binding_copy_hosting_ui_arc_not_observed=true\ninlined_arc_not_observed=true\nproduct_drain_accepted=false\n' "$EVENTS" >> "$TRACE-status.txt"
