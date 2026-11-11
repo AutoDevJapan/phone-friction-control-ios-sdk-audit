@@ -227,6 +227,9 @@ unsafe extern "C" fn finish_selection_capture_payload(payload: *mut c_void) {
     }
     let outcome = std::panic::catch_unwind(|| {
         unsafe { drop(Box::from_raw(payload.cast::<SelectionCapturePayload>())) };
+        // Identity is an opaque scalar after the owning Box has been dropped.
+        // This boundary never dereferences or reconstructs the released payload.
+        rust_selection_capture_state_drop_finished(payload.addr());
     });
     if outcome.is_err() {
         eprintln!("Selection capture state finalization failed");
@@ -268,6 +271,7 @@ unsafe extern "C" fn rust_selection_capture_destroy_c(object: *mut c_void) {
         }
         unsafe { swift_deallocObject(object, 24, 7) };
         SELECTION_CAPTURE_DEALLOC_COMPLETED.fetch_add(1, Ordering::SeqCst);
+        rust_selection_capture_context_deallocation_finished(object.addr());
     });
     if outcome.is_err() {
         eprintln!("Selection capture destroy validation failed");
@@ -378,6 +382,28 @@ extern "C" fn rust_selection_capture_close_started() {
     std::hint::black_box(0_u8);
 }
 
+// End the close-time ARC sample after a real copied Binding get has returned
+// and its Selection result has been destroyed. Later setter, UI and inlined
+// ARC operations remain unobserved; independent finalizer events and the
+// existing final counters are still necessary to establish owned graph drain.
+#[unsafe(no_mangle)]
+#[inline(never)]
+extern "C" fn rust_selection_capture_close_first_get_finished() {
+    std::hint::black_box(0_u8);
+}
+
+#[unsafe(no_mangle)]
+#[inline(never)]
+extern "C" fn rust_selection_capture_state_drop_finished(payload_identity: usize) {
+    std::hint::black_box(payload_identity);
+}
+
+#[unsafe(no_mangle)]
+#[inline(never)]
+extern "C" fn rust_selection_capture_context_deallocation_finished(context_identity: usize) {
+    std::hint::black_box(context_identity);
+}
+
 pub(super) fn selection_capture_partial_evidence() -> String {
     let measured = selection_capture_ui_counts();
     format!(
@@ -425,6 +451,7 @@ pub(super) fn selection_capture_close_probe() -> String {
     let before_count = category_measured_read(counter, state.proof, Some(&output));
     assert!(before_count > 0);
     drop(output);
+    rust_selection_capture_close_first_get_finished();
 
     // A genuinely different input: use the reviewed public empty Selection
     // initializer, never manufacture or mutate opaque token/Selection fields.

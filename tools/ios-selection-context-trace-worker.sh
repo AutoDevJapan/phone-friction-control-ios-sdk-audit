@@ -21,7 +21,7 @@ cleanup_trace() {
     wait "$LLDB_PID" 2>/dev/null || true
   fi
   if [ -f "$RAW" ]; then
-    sed -E 's/0x[0-9a-fA-F]+/[address]/g; s/(\$audit_context = )[0-9]+/\1[identity]/g' "$RAW" > "$TRACE.txt"
+    sed -E 's/0x[0-9a-fA-F]+/[address]/g; s/(\$audit_(context|payload) = )[0-9]+/\1[identity]/g' "$RAW" > "$TRACE.txt"
     rm -f "$RAW"
   fi
   if [ -p "$FIFO" ]; then rm -f "$FIFO"; fi
@@ -122,6 +122,10 @@ grep -Eq '^[[:space:]]*(\*[[:space:]]*)?frame #0: .* rust_selection_capture_bind
 CONTEXT_OPS=$((CONTEXT_OPS + 1))
 {
   printf 'expression --language c -- unsigned long $audit_context = (unsigned long)$x5\n'
+  # The owned Swift context stores exactly one Rust payload pointer at +16.
+  # Capture its identity while the fourth context is live and stopped; no
+  # post-destruction memory read or foreign runtime call is introduced.
+  printf 'expression --language c -- unsigned long $audit_payload = *(unsigned long *)($audit_context + 16)\n'
   printf 'expression --language c -- unsigned long $audit_events = 0\n'
   printf 'platform shell echo captured_context_identity_set=1\n'
   printf 'breakpoint delete 1\n'
@@ -142,6 +146,19 @@ CONTEXT_OPS=$((CONTEXT_OPS + 1))
   printf 'breakpoint enable 2\nthread backtrace --count 4\n'
   printf 'platform shell echo context_trace_close_window_started=1\n'
   printf 'platform shell touch "%s.close-window"\ncontinue\nDONE\n' "$TRACE"
+  printf 'breakpoint set --name rust_selection_capture_close_first_get_finished\n'
+  printf 'breakpoint command add --script-type command --stop-on-error true 6\n'
+  printf 'breakpoint disable 2\nthread backtrace --count 4\n'
+  printf 'platform shell echo context_trace_close_first_get_complete=1\ncontinue\nDONE\n'
+  printf 'breakpoint set --name rust_selection_capture_destroy_c --skip-prologue false --condition "(unsigned long)$x0 == $audit_context"\n'
+  printf 'breakpoint command add --script-type command --stop-on-error true 7\n'
+  printf 'thread backtrace --count 12\nplatform shell echo context_trace_destroy_entered=1\ncontinue\nDONE\n'
+  printf 'breakpoint set --name rust_selection_capture_state_drop_finished --skip-prologue false --condition "(unsigned long)$x0 == $audit_payload"\n'
+  printf 'breakpoint command add --script-type command --stop-on-error true 8\n'
+  printf 'thread backtrace --count 4\nplatform shell echo context_trace_state_drop_complete=1\ncontinue\nDONE\n'
+  printf 'breakpoint set --name rust_selection_capture_context_deallocation_finished --skip-prologue false --condition "(unsigned long)$x0 == $audit_context"\n'
+  printf 'breakpoint command add --script-type command --stop-on-error true 9\n'
+  printf 'thread backtrace --count 4\nplatform shell echo context_trace_deallocation_complete=1\ncontinue\nDONE\n'
   printf 'platform shell touch "%s.configured"\n' "$TRACE"
 } >&3
 await_marker "$TRACE.configured"
@@ -150,7 +167,7 @@ send_continue
 await_marker "$TRACE.exited"
 no_errors
 test "$(LC_ALL=C ps -p "$PID" -o lstart=)" = "$STARTED"
-printf 'breakpoint delete 2 3 4 5\nprocess detach\nquit\n' >&3
+printf 'breakpoint delete 2 3 4 5 6 7 8 9\nprocess detach\nquit\n' >&3
 while kill -0 "$LLDB_PID" 2>/dev/null; do
   test "$(( $(date +%s) - TRACE_STARTED ))" -lt 90
   sleep 0.1
@@ -166,8 +183,14 @@ test "$(grep -Ec '^captured_context_identity_set=1[[:space:]]*$' "$RAW")" = 1
 test "$(grep -Ec '^context_trace_reached_exit=1[[:space:]]*$' "$RAW")" = 1
 test "$(grep -Ec '^context_trace_initial_window_complete=1[[:space:]]*$' "$RAW")" = 1
 test "$(grep -Ec '^context_trace_close_window_started=1[[:space:]]*$' "$RAW")" = 1
+for MARKER in close_first_get_complete destroy_entered state_drop_complete deallocation_complete; do
+  test "$(grep -Ec "^context_trace_${MARKER}=1[[:space:]]*$" "$RAW")" = 1
+done
 grep -Eq '^[[:space:]]*(\*[[:space:]]*)?frame #0: .* rust_selection_capture_initialization_finished([[:space:]]|$)' "$RAW"
 grep -Eq '^[[:space:]]*(\*[[:space:]]*)?frame #0: .* rust_selection_capture_close_started([[:space:]]|$)' "$RAW"
+for FUNCTION in close_first_get_finished destroy_c state_drop_finished context_deallocation_finished; do
+  grep -Eq "^[[:space:]]*(\\*[[:space:]]*)?frame #0: .* rust_selection_capture_${FUNCTION}([[:space:]]|$)" "$RAW"
+done
 grep -Eq '^[[:space:]]*(\*[[:space:]]*)?frame #0: .* (exit|_exit|abort)([[:space:]]|$)' "$RAW"
 EVENTS=$(grep -Ec '^[[:space:]]*(\*[[:space:]]*)?frame #0: .* (swift_retain|swift_release|swift_retain_n|swift_release_n)([[:space:]]|$)' "$RAW" || true)
 [[ "$EVENTS" =~ ^[0-9]+$ ]]
@@ -181,11 +204,19 @@ grep -Eq '^[[:space:]]*(\*[[:space:]]*)?frame #0: .* swift_release(_n)?([[:space
 awk '
   /^context_trace_initial_window_complete=1[[:space:]]*$/ { if (phase != 0) exit 1; phase=1; next }
   /^context_trace_close_window_started=1[[:space:]]*$/ { if (phase != 1) exit 1; phase=2; next }
-  /^context_trace_reached_exit=1[[:space:]]*$/ { if (phase != 2) exit 1; phase=3; next }
+  /^context_trace_close_first_get_complete=1[[:space:]]*$/ { if (phase != 2) exit 1; phase=3; next }
+  /^context_trace_destroy_entered=1[[:space:]]*$/ { if (phase != 3) exit 1; phase=4; next }
+  /^context_trace_state_drop_complete=1[[:space:]]*$/ { if (phase != 4 || state++) exit 1; next }
+  /^context_trace_deallocation_complete=1[[:space:]]*$/ { if (phase != 4 || dealloc++) exit 1; next }
+  /^context_trace_reached_exit=1[[:space:]]*$/ { if (phase != 4 || state != 1 || dealloc != 1) exit 1; phase=5; next }
   /^[[:space:]]*(\*[[:space:]]*)?frame #0: .* swift_(retain|release)(_n)?([[:space:]]|$)/ {
-    if (phase == 1 || phase == 3) exit 1;
-    if (phase == 0) initial++; else closing++;
+    if (phase != 0 && phase != 2) exit 1;
+    if (phase == 0) initial++; else {
+      closing++;
+      if ($0 ~ / swift_retain(_n)?([[:space:]]|$)/) closing_retain++;
+      else closing_release++;
+    }
   }
-  END { if (phase != 3 || initial < 2 || closing < 1) exit 1 }
+  END { if (phase != 5 || initial < 2 || closing_retain < 1 || closing_release < 1) exit 1 }
 ' "$RAW"
-printf 'observed_context_events=%s\ncontext_arc_stack_capture_complete=true\ncontext_arc_observation_scope=binding_initialization_and_close_windows\nbetween_windows_binding_copy_hosting_ui_arc_not_observed=true\ninlined_arc_not_observed=true\nproduct_drain_accepted=false\n' "$EVENTS" >> "$TRACE-status.txt"
+printf 'observed_context_events=%s\ncontext_arc_stack_capture_complete=true\ncontext_arc_observation_scope=binding_initialization_and_close_first_get\nbetween_windows_binding_copy_hosting_ui_arc_not_observed=true\nafter_close_first_get_setter_ui_arc_not_observed=true\ninlined_arc_not_observed=true\nowned_finalizer_identity_events_verified=true\nproduct_drain_accepted=false\n' "$EVENTS" >> "$TRACE-status.txt"

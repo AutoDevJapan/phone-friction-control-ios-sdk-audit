@@ -31,7 +31,7 @@ cleanup_flight() {
   # A KILL of a stuck worker cannot run its EXIT trap. Export and unlink here
   # only after the owned group has been terminated and its direct child reaped.
   if [ -f "$TRACE.unsanitized" ]; then
-    sed -E 's/0x[0-9a-fA-F]+/[address]/g; s/(\$audit_context = )[0-9]+/\1[identity]/g' "$TRACE.unsanitized" > "$TRACE.txt"
+    sed -E 's/0x[0-9a-fA-F]+/[address]/g; s/(\$audit_(context|payload) = )[0-9]+/\1[identity]/g' "$TRACE.unsanitized" > "$TRACE.txt"
     rm -f "$TRACE.unsanitized"
   fi
   if [ -p "$TRACE.control.fifo" ]; then rm -f "$TRACE.control.fifo"; fi
