@@ -60,7 +60,7 @@ test -x "$APP/authorization-center-probe"
 test ! -e "$FIFO"
 test ! -e "$TRACE-continue.lldb"
 printf 'continue\n' > "$TRACE-continue.lldb"
-for MARKER in attached context-stopped configured exited ready continue-admitted; do test ! -e "$TRACE.$MARKER"; done
+for MARKER in attached context-stopped configured exited ready continue-admitted initial-window close-window; do test ! -e "$TRACE.$MARKER"; done
 printf 'diagnostic_only=true\nmaximum_events=64\nmaximum_frames=12\nattach_limit_seconds=60\ntrace_limit_seconds=90\nproduct_drain_accepted=false\n' > "$TRACE-status.txt"
 test -s "$TRACE-version.txt"
 grep -Fx 'debugger_help_prepared_before_xctest=true' "$TRACE-preparation.txt"
@@ -132,6 +132,16 @@ CONTEXT_OPS=$((CONTEXT_OPS + 1))
   printf 'expression --language c -- $audit_events\nthread backtrace --count 4\n'
   printf 'platform shell echo context_trace_reached_exit=1\n'
   printf 'platform shell touch "%s.exited"\nDONE\n' "$TRACE"
+  printf 'breakpoint set --name rust_selection_capture_initialization_finished\n'
+  printf 'breakpoint command add --script-type command --stop-on-error true 4\n'
+  printf 'breakpoint disable 2\nthread backtrace --count 4\n'
+  printf 'platform shell echo context_trace_initial_window_complete=1\n'
+  printf 'platform shell touch "%s.initial-window"\ncontinue\nDONE\n' "$TRACE"
+  printf 'breakpoint set --name rust_selection_capture_close_started\n'
+  printf 'breakpoint command add --script-type command --stop-on-error true 5\n'
+  printf 'breakpoint enable 2\nthread backtrace --count 4\n'
+  printf 'platform shell echo context_trace_close_window_started=1\n'
+  printf 'platform shell touch "%s.close-window"\ncontinue\nDONE\n' "$TRACE"
   printf 'platform shell touch "%s.configured"\n' "$TRACE"
 } >&3
 await_marker "$TRACE.configured"
@@ -140,7 +150,7 @@ send_continue
 await_marker "$TRACE.exited"
 no_errors
 test "$(LC_ALL=C ps -p "$PID" -o lstart=)" = "$STARTED"
-printf 'breakpoint delete 2 3\nprocess detach\nquit\n' >&3
+printf 'breakpoint delete 2 3 4 5\nprocess detach\nquit\n' >&3
 while kill -0 "$LLDB_PID" 2>/dev/null; do
   test "$(( $(date +%s) - TRACE_STARTED ))" -lt 90
   sleep 0.1
@@ -154,6 +164,10 @@ grep -F "$UUID" "$RAW" | sed -E 's/0x[0-9a-fA-F]+/[address]/g' > "$TRACE-attache
 test "$(grep -Fc "$INSTALLED_BIN" "$TRACE-attached-image.txt")" = 1
 test "$(grep -Ec '^captured_context_identity_set=1[[:space:]]*$' "$RAW")" = 1
 test "$(grep -Ec '^context_trace_reached_exit=1[[:space:]]*$' "$RAW")" = 1
+test "$(grep -Ec '^context_trace_initial_window_complete=1[[:space:]]*$' "$RAW")" = 1
+test "$(grep -Ec '^context_trace_close_window_started=1[[:space:]]*$' "$RAW")" = 1
+grep -Eq '^[[:space:]]*(\*[[:space:]]*)?frame #0: .* rust_selection_capture_initialization_finished([[:space:]]|$)' "$RAW"
+grep -Eq '^[[:space:]]*(\*[[:space:]]*)?frame #0: .* rust_selection_capture_close_started([[:space:]]|$)' "$RAW"
 grep -Eq '^[[:space:]]*(\*[[:space:]]*)?frame #0: .* (exit|_exit|abort)([[:space:]]|$)' "$RAW"
 EVENTS=$(grep -Ec '^[[:space:]]*(\*[[:space:]]*)?frame #0: .* (swift_retain|swift_release|swift_retain_n|swift_release_n)([[:space:]]|$)' "$RAW" || true)
 [[ "$EVENTS" =~ ^[0-9]+$ ]]
@@ -164,4 +178,13 @@ MATCHED=$(sed -nE 's/^\(unsigned long\) \$audit_events = ([0-9]+)[[:space:]]*$/\
 test "$MATCHED" = "$EVENTS"
 grep -Eq '^[[:space:]]*(\*[[:space:]]*)?frame #0: .* swift_retain(_n)?([[:space:]]|$)' "$RAW"
 grep -Eq '^[[:space:]]*(\*[[:space:]]*)?frame #0: .* swift_release(_n)?([[:space:]]|$)' "$RAW"
-printf 'observed_context_events=%s\ncontext_arc_stack_capture_complete=true\ninlined_arc_not_observed=true\nproduct_drain_accepted=false\n' "$EVENTS" >> "$TRACE-status.txt"
+awk '
+  /^context_trace_initial_window_complete=1[[:space:]]*$/ { if (phase != 0) exit 1; phase=1; next }
+  /^context_trace_close_window_started=1[[:space:]]*$/ { if (phase != 1) exit 1; phase=2; next }
+  /^[[:space:]]*(\*[[:space:]]*)?frame #0: .* swift_(retain|release)(_n)?([[:space:]]|$)/ {
+    if (phase == 1) exit 1;
+    if (phase == 0) initial++; else closing++;
+  }
+  END { if (phase != 2 || initial < 2 || closing < 1) exit 1 }
+' "$RAW"
+printf 'observed_context_events=%s\ncontext_arc_stack_capture_complete=true\ncontext_arc_observation_scope=binding_initialization_and_close_windows\nbetween_windows_binding_copy_hosting_ui_arc_not_observed=true\ninlined_arc_not_observed=true\nproduct_drain_accepted=false\n' "$EVENTS" >> "$TRACE-status.txt"

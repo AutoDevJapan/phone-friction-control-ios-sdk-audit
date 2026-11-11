@@ -362,6 +362,22 @@ fn validate_selection_capture_callback(context: *mut c_void) {
     assert!(!STATE.load(Ordering::Acquire).is_null());
 }
 
+// Own audit-only debugger boundaries. They do not retain/release any value or
+// change lifecycle state; disabling global ARC breakpoints between them avoids
+// stopping for every unrelated framework retain/release between Binding
+// initialization and close. Binding-copy/Hosting/UI ARC is not observed there.
+#[unsafe(no_mangle)]
+#[inline(never)]
+extern "C" fn rust_selection_capture_initialization_finished() {
+    std::hint::black_box(0_u8);
+}
+
+#[unsafe(no_mangle)]
+#[inline(never)]
+extern "C" fn rust_selection_capture_close_started() {
+    std::hint::black_box(0_u8);
+}
+
 pub(super) fn selection_capture_partial_evidence() -> String {
     let measured = selection_capture_ui_counts();
     format!(
@@ -385,6 +401,7 @@ pub(super) fn selection_capture_partial_evidence() -> String {
 // Swift getter destination. No public call is made after root/context release.
 pub(super) fn selection_capture_close_probe() -> String {
     assert!(unsafe { pthread_main_np() } == 1);
+    rust_selection_capture_close_started();
     begin_selection_capture_close();
     let source = STATE.load(Ordering::Acquire);
     assert!(!source.is_null());

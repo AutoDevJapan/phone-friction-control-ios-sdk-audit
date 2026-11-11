@@ -325,6 +325,7 @@ fn selection_capture_host() -> *mut c_void {
         after_gets > before_gets,
         "Captured Binding constructor did not invoke getter"
     );
+    rust_selection_capture_initialization_finished();
     SELECTION_CAPTURE_CONSTRUCTION_STAGE.store(6, Ordering::Release);
     preserve_selection_capture_binding(&binding);
     SELECTION_CAPTURE_CONSTRUCTION_STAGE.store(7, Ordering::Release);
