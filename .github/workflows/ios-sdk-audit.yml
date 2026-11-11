@@ -1056,54 +1056,19 @@ jobs:
           TRACE_PID=''
           UI_TEST_PID=''
           UI_TEST_GROUP=false
-          UI_TEST_GROUP_PID=''
-          UI_CLEANUP_ATTEMPTED=false
-          UI_CLEANUP_RESULT=1
           HOST_LOG_PID=''
-          owned_ui_group_absent() {
-            GROUP_SNAPSHOT=$(perl -e 'alarm 5; exec @ARGV; die "exec failed\n"' ps -axo pgid=) || return 1
-            test "$(printf '%s\n' "$GROUP_SNAPSHOT" | awk -v p="$UI_TEST_GROUP_PID" '$1==p{n++}END{print n+0}')" = 0
-          }
           stop_owned_ui() {
-            if [ "$UI_CLEANUP_ATTEMPTED" = true ]; then
-              test "$UI_CLEANUP_RESULT" = 0
-              return
-            fi
-            UI_CLEANUP_ATTEMPTED=true
-            UI_CLEANUP_RESULT=1
-            if [ -n "$UI_TEST_GROUP_PID" ]; then
-              kill -TERM -- "-$UI_TEST_GROUP_PID" 2>/dev/null || true
-              # The direct child may not have completed setsid yet. It is
-              # still our unreaped child, so stop it as well as its group.
-              if [ -n "$UI_TEST_PID" ]; then kill -TERM "$UI_TEST_PID" 2>/dev/null || true; fi
+            if [ -z "$UI_TEST_PID" ]; then return; fi
+            if [ "$UI_TEST_GROUP" = true ]; then
+              # The owner retains unreaped child/group identity. Bash submits
+              # a request only; it never signals a recyclable numeric ID.
+              printf 'stop=true\n' > "$OUT/captured-selection-context-xctest-stop.txt"
               GRACE=$SECONDS
-              while kill -0 -- "-$UI_TEST_GROUP_PID" 2>/dev/null && [ "$((SECONDS-GRACE))" -lt 1 ]; do sleep 0.1; done
-              kill -KILL -- "-$UI_TEST_GROUP_PID" 2>/dev/null || true
-              if [ -n "$UI_TEST_PID" ]; then kill -KILL "$UI_TEST_PID" 2>/dev/null || true; fi
-            elif [ -n "$UI_TEST_PID" ]; then kill "$UI_TEST_PID" 2>/dev/null || true; fi
-            if [ -n "$UI_TEST_PID" ]; then
-              GRACE=$SECONDS
-              while kill -0 "$UI_TEST_PID" 2>/dev/null && [ "$((SECONDS-GRACE))" -lt 2 ]; do sleep 0.1; done
+              while kill -0 "$UI_TEST_PID" 2>/dev/null && [ "$((SECONDS-GRACE))" -lt 10 ]; do sleep 0.1; done
               if kill -0 "$UI_TEST_PID" 2>/dev/null; then return 1; fi
-              CHILD_SNAPSHOT=''
-              CHILD_QUERY_STATUS=0
-              CHILD_SNAPSHOT=$(perl -e 'alarm 5; exec @ARGV; die "exec failed\n"' ps -p "$UI_TEST_PID" -o pid=) || CHILD_QUERY_STATUS=$?
-              # kill -0 failure alone may be a permission error. Require the
-              # normal ps no-such-process result before reaping/retiring.
-              if [ "$CHILD_QUERY_STATUS" != 1 ] || [ -n "$CHILD_SNAPSHOT" ]; then return 1; fi
-              wait "$UI_TEST_PID" 2>/dev/null || true
-              UI_TEST_PID=''
             fi
-            if [ -n "$UI_TEST_GROUP_PID" ]; then
-              GRACE=$SECONDS
-              while kill -0 -- "-$UI_TEST_GROUP_PID" 2>/dev/null && [ "$((SECONDS-GRACE))" -lt 2 ]; do sleep 0.1; done
-              if kill -0 -- "-$UI_TEST_GROUP_PID" 2>/dev/null; then return 1; fi
-              owned_ui_group_absent || return 1
-              # This ownership has been drained; a later EXIT trap must not
-              # signal a numeric process-group ID that the OS may reuse.
-              UI_TEST_GROUP_PID=''
-            fi
-            UI_CLEANUP_RESULT=0
+            wait "$UI_TEST_PID" 2>/dev/null || true
+            UI_TEST_PID=''
           }
           cleanup_observers() {
             STATUS=$?
@@ -1188,13 +1153,12 @@ jobs:
           HOST_LOG_PID=$!
           UI_COMMAND=(xcodebuild -project "$XCODE_ROOT/Probe.xcodeproj" -scheme Probe -configuration Debug -sdk iphonesimulator -destination "id=$SIM_ID" -parallel-testing-enabled NO -test-timeouts-enabled YES -default-test-execution-time-allowance "$TEST_SECONDS" -maximum-test-execution-time-allowance "$TEST_SECONDS" -resultBundlePath "$OUT/consent-ui.xcresult" SYMROOT="$OUT/xcode-products" OBJROOT="$RUNNER_TEMP/xcode-objects" test-without-building)
           if [ '${{ inputs.selection_context_arc_trace }}' = true ]; then
-            UI_COMMAND=(perl -MPOSIX -e 'POSIX::setsid() >= 0 or die "setsid failed\n"; exec @ARGV; die "exec failed\n"' "${UI_COMMAND[@]}")
+            UI_COMMAND=(perl tools/ios-xctest-process-owner.pl "$OUT" "${UI_COMMAND[@]}")
             UI_TEST_GROUP=true
           fi
           UI_PROCESS_STARTED=$SECONDS
           "${UI_COMMAND[@]}" > "$OUT/xcode-ui-test.txt" 2>&1 &
           UI_TEST_PID=$!
-          if [ "$UI_TEST_GROUP" = true ]; then UI_TEST_GROUP_PID=$UI_TEST_PID; fi
           if [ '${{ inputs.selection_context_arc_trace }}' = true ]; then
             printf '%s\n' "$UI_TEST_PID" > "$OUT/captured-selection-context-xctest-process.txt"
             # Only an executing test method can publish the fresh runner
@@ -1229,8 +1193,9 @@ jobs:
             UI_TEST_PID=''
           fi
           if [ "$UI_TEST_GROUP" = true ]; then
-            if stop_owned_ui; then printf 'xctest_process_group_remaining=0\n' >> "$OUT/captured-selection-context-admission-status.txt";
-            else UI_TEST_STATUS=1; printf 'xctest_process_group_remaining=1\n' >> "$OUT/captured-selection-context-admission-status.txt"; fi
+            if ! stop_owned_ui; then UI_TEST_STATUS=1; fi
+            if ! grep -Fxq 'leader_reaped=1' "$OUT/captured-selection-context-xctest-owner-status.txt" ||
+               ! grep -Fxq 'xctest_process_group_remaining=0' "$OUT/captured-selection-context-xctest-owner-status.txt"; then UI_TEST_STATUS=1; fi
           fi
           printf 'xctest_exit=%s\n' "$UI_TEST_STATUS" > "$OUT/captured-selection-xctest-exit.txt"
           kill "$HOST_LOG_PID" 2>/dev/null || true
