@@ -4716,7 +4716,12 @@ mod ui_authorization_test {
                     return;
                 }
                 let started = std::time::Instant::now();
+                let wait_wall_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH).expect("runner clock").as_millis();
+                println!("XCTest context-trace: admission_wait_start_wall_ms={wait_wall_ms}; limit_seconds=60");
+                let _ = std::io::Write::flush(&mut std::io::stdout());
                 let mut observed = None;
+                let mut read_result = "not_found";
                 while started.elapsed() < std::time::Duration::from_secs(60) {
                     match std::fs::read_to_string(&admission) {
                         Ok(text) => {
@@ -4725,14 +4730,30 @@ mod ui_authorization_test {
                                 .and_then(|tail| tail.strip_suffix('\n'))
                                 .and_then(|digits| digits.parse::<u32>().ok())
                                 .filter(|pid| *pid > 0 && text == format!("{prefix}{pid}\n"));
+                            read_result = if observed.is_some() { "matched" } else { "invalid_bytes" };
                             break;
                         }
                         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                             std::thread::sleep(std::time::Duration::from_millis(50));
                         }
-                        Err(_) => break,
+                        Err(error) => {
+                            read_result = match error.kind() {
+                                std::io::ErrorKind::PermissionDenied => "permission_denied",
+                                _ => "read_error",
+                            };
+                            break;
+                        }
                     }
                 }
+                let elapsed_ms = started.elapsed().as_millis();
+                if elapsed_ms >= 60_000 {
+                    observed = None;
+                    read_result = "deadline";
+                }
+                let end_wall_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH).expect("runner clock").as_millis();
+                println!("XCTest context-trace: admission_wait_end_wall_ms={end_wall_ms}; elapsed_ms={elapsed_ms}; read_result={read_result}");
+                let _ = std::io::Write::flush(&mut std::io::stdout());
                 let Some(pid) = observed else {
                     fail(test, c"ARC debugger admission missing or invalid");
                     return;
@@ -4740,6 +4761,14 @@ mod ui_authorization_test {
                 println!("XCTest context-trace: admitted_runner_pid={runner_pid}; nonce={nonce}; host_pid={pid}");
                 if std::io::Write::flush(&mut std::io::stdout()).is_err() {
                     fail(test, c"ARC admission output failed");
+                    return;
+                }
+                let receipt = documents.join("captured-selection-trace-received.txt");
+                let received = format!("runner_pid={runner_pid}\nnonce={nonce}\nhost_pid={pid}\n");
+                if std::fs::OpenOptions::new().write(true).create_new(true).open(receipt)
+                    .and_then(|mut file| std::io::Write::write_all(&mut file, received.as_bytes())).is_err()
+                {
+                    fail(test, c"ARC admission receipt is not fresh");
                     return;
                 }
                 pid

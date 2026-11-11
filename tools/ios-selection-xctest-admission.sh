@@ -7,6 +7,9 @@ TRACE="$OUT/captured-selection-context"
 RUNNER_BID=com.autodevjapan.phonecontrol1614consenttests.xctrunner
 TRACE_PID=''
 bounded_ps() { perl -e 'alarm 5; exec @ARGV; die "exec failed\n"' ps "$@"; }
+event_time() {
+  perl -MTime::HiRes=time -e 'printf "%s_wall_ms=%.0f\n", $ARGV[0], time()*1000' "$1" >> "$TRACE-admission-status.txt"
+}
 cleanup_admission() {
   STATUS=$?
   trap - EXIT
@@ -41,6 +44,7 @@ done
 RUNNER_PID=$(sed -nE 's/^XCTest context-trace: runner_ready_pid=([1-9][0-9]*); nonce=[1-9][0-9]*-[0-9]+; host_pid=[1-9][0-9]*$/\1/p' "$OUT/xcode-ui-test.txt")
 NONCE=$(sed -nE 's/^XCTest context-trace: runner_ready_pid=[1-9][0-9]*; nonce=([1-9][0-9]*-[0-9]+); host_pid=[1-9][0-9]*$/\1/p' "$OUT/xcode-ui-test.txt")
 HOST_READY_PID=$(sed -nE 's/^XCTest context-trace: runner_ready_pid=[1-9][0-9]*; nonce=[1-9][0-9]*-[0-9]+; host_pid=([1-9][0-9]*)$/\1/p' "$OUT/xcode-ui-test.txt")
+event_time runner_ready_observed
 [[ "$HOST_READY_PID" =~ ^[1-9][0-9]*$ ]]
 [[ "$RUNNER_PID" =~ ^[1-9][0-9]*$ ]]
 [[ "$NONCE" =~ ^$RUNNER_PID-[0-9]+$ ]]
@@ -58,9 +62,12 @@ perl -e 'alarm 5; exec @ARGV; die "exec failed\n"' xcrun simctl spawn "$SIM_ID" 
 test "$(awk -v p="$RUNNER_PID" -v b="$RUNNER_BID" '$1==p&&index($0,b)>0{n++}END{print n+0}' "$TRACE-runner-processes.txt")" = 1
 printf 'runner_pid=%s\nnonce=%s\nsimulator=%s\nrunner_bundle_id=%s\nrunner_started=%s\nrunner_binary=%s\n' "$RUNNER_PID" "$NONCE" "$SIM_ID" "$RUNNER_BID" "$STARTED" "$RUNNER_BIN" > "$TRACE-runner-binding.txt"
 ADMISSION="$DATA/Documents/captured-selection-trace-admission.txt"
+RECEIVED="$DATA/Documents/captured-selection-trace-received.txt"
 test ! -e "$ADMISSION"
+test ! -e "$RECEIVED"
 bash tools/ios-selection-context-trace.sh "$OUT" "$APP" "$SIM_ID" &
 TRACE_PID=$!
+event_time trace_worker_started
 START=$SECONDS
 while [ ! -f "$TRACE.ready" ]; do
   kill -0 "$TRACE_PID" 2>/dev/null
@@ -68,6 +75,7 @@ while [ ! -f "$TRACE.ready" ]; do
   test "$(LC_ALL=C bounded_ps -p "$RUNNER_PID" -o lstart=)" = "$STARTED"
   sleep 0.1
 done
+event_time debugger_ready_observed
 test "$(LC_ALL=C bounded_ps -p "$RUNNER_PID" -o lstart=)" = "$STARTED"
 test "$(bounded_ps -p "$RUNNER_PID" -o comm=)" = "$RUNNER_BIN"
 cmp "$READY" "$TRACE-runner-expected.txt"
@@ -81,7 +89,19 @@ printf 'runner_pid=%s\nnonce=%s\nhost_pid=%s\n' "$RUNNER_PID" "$NONCE" "$HOST_PI
 # Linking the completed sibling never exposes a partially written admission.
 (set -o noclobber; cat "$TRACE-runner-admission.txt" > "$ADMISSION.pending")
 ln "$ADMISSION.pending" "$ADMISSION"
+event_time runner_admission_published
 rm "$ADMISSION.pending"
+# A published file alone does not prove the runner consumed it before its
+# independent 60-second wait ended. Reuse this flight's existing ready budget.
+while :; do
+  test "$((SECONDS-START))" -lt 60
+  kill -0 "$TRACE_PID" 2>/dev/null
+  test "$(LC_ALL=C bounded_ps -p "$RUNNER_PID" -o lstart=)" = "$STARTED"
+  if [ -f "$RECEIVED" ] && cmp -s "$RECEIVED" "$TRACE-runner-admission.txt"; then break; fi
+  sleep 0.1
+done
+cp "$RECEIVED" "$TRACE-runner-received.txt"
+event_time runner_admission_received
 printf 'host_pid=%s\n' "$HOST_PID" > "$TRACE.continue-admitted.pending"
 ln "$TRACE.continue-admitted.pending" "$TRACE.continue-admitted"
 rm "$TRACE.continue-admitted.pending"

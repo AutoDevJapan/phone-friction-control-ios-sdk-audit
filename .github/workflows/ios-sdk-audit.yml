@@ -1065,7 +1065,18 @@ jobs:
           VERSION=$(xcrun --sdk iphonesimulator --show-sdk-version)
           RUNTIME=$(xcrun simctl list runtimes -j | jq -er --arg version "$VERSION" '[.runtimes[] | select(.isAvailable and .version == $version and (.identifier | contains("iOS"))) | .identifier] | if length == 1 then .[0] else error("SDK-matching Simulator runtime missing or ambiguous") end')
           SIM_ID=$(xcrun simctl create phone-control1614-abi com.apple.CoreSimulator.SimDeviceType.iPhone-15 "$RUNTIME")
-          trap 'xcrun simctl shutdown "$SIM_ID" || true; xcrun simctl delete "$SIM_ID" || true' EXIT
+          cleanup_inspection_simulator() {
+            STATUS=$?
+            trap - EXIT
+            printf 'step_exit_status=%s\n' "$STATUS" >> "$OUT/consent-selection-simulator-cleanup.txt"
+            for ACTION in shutdown delete; do
+              ACTION_STATUS=0
+              perl -e 'alarm 20; exec @ARGV; die "exec failed\n"' xcrun simctl "$ACTION" "$SIM_ID" >> "$OUT/consent-selection-simulator-cleanup.txt" 2>&1 || ACTION_STATUS=$?
+              printf '%s_status=%s\n' "$ACTION" "$ACTION_STATUS" >> "$OUT/consent-selection-simulator-cleanup.txt"
+            done
+            exit "$STATUS"
+          }
+          trap cleanup_inspection_simulator EXIT
           xcrun simctl boot "$SIM_ID"
           xcrun simctl bootstatus "$SIM_ID" -b
           xcrun simctl install "$SIM_ID" "$PROBE_APP"

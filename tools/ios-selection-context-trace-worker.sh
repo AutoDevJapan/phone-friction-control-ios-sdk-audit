@@ -62,11 +62,10 @@ test ! -e "$TRACE-continue.lldb"
 printf 'continue\n' > "$TRACE-continue.lldb"
 for MARKER in attached context-stopped configured exited ready continue-admitted; do test ! -e "$TRACE.$MARKER"; done
 printf 'diagnostic_only=true\nmaximum_events=64\nmaximum_frames=12\nattach_limit_seconds=60\ntrace_limit_seconds=90\nproduct_drain_accepted=false\n' > "$TRACE-status.txt"
-perl -e 'alarm 10; exec @ARGV; die "exec failed\n"' xcrun lldb --version > "$TRACE-version.txt" 2>&1
-perl -e 'alarm 10; exec @ARGV; die "exec failed\n"' xcrun lldb --no-lldbinit --batch -o 'help process attach' -o 'help breakpoint set' > "$TRACE-help.txt" 2>&1
+test -s "$TRACE-version.txt"
+grep -Fx 'debugger_help_prepared_before_xctest=true' "$TRACE-preparation.txt"
 grep -F -- '--pid' "$TRACE-help.txt"
 grep -F -- '--ignore-count' "$TRACE-help.txt"
-perl -e 'alarm 10; exec @ARGV; die "exec failed\n"' xcrun simctl help launch > "$TRACE-launch-help.txt" 2>&1
 grep -F -- '--wait-for-debugger' "$TRACE-launch-help.txt"
 shasum -a 256 "$APP/authorization-center-probe" > "$TRACE-binary-hash.txt"
 INSTALLED=$(xcrun simctl get_app_container "$SIM_ID" "$BID" app)

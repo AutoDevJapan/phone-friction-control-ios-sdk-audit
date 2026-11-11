@@ -90,6 +90,16 @@ printf 'xctest_started_at=%s\ntest_limit_seconds=%s\n' "$(date -u +%FT%TZ)" "$TE
 if [ "$INPUT_SELECTION_CONTEXT_ARC_TRACE" = true ]; then
   test ! -e "$OUT/xcode-ui-test.txt"
   test ! -e "$OUT/captured-selection-xctest-exit.txt"
+  # Inspect target-independent debugger capabilities before the runner starts
+  # its admission wait. Keep the same finite command and flight limits.
+  TRACE="$OUT/captured-selection-context"
+  perl -e 'alarm 10; exec @ARGV; die "exec failed\n"' xcrun lldb --version > "$TRACE-version.txt" 2>&1
+  perl -e 'alarm 10; exec @ARGV; die "exec failed\n"' xcrun lldb --no-lldbinit --batch -o 'help process attach' -o 'help breakpoint set' > "$TRACE-help.txt" 2>&1
+  grep -F -- '--pid' "$TRACE-help.txt"
+  grep -F -- '--ignore-count' "$TRACE-help.txt"
+  perl -e 'alarm 10; exec @ARGV; die "exec failed\n"' xcrun simctl help launch > "$TRACE-launch-help.txt" 2>&1
+  grep -F -- '--wait-for-debugger' "$TRACE-launch-help.txt"
+  printf 'debugger_help_prepared_before_xctest=true\n' > "$TRACE-preparation.txt"
   tar -czf "$OUT/captured-selection-probe.app.tar.gz" -C "$(dirname "$PROBE_APP")" "$(basename "$PROBE_APP")"
   shasum -a 256 "$OUT/captured-selection-probe.app.tar.gz" > "$OUT/captured-selection-probe-archive-hash.txt"
 fi
