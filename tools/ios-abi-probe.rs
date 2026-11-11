@@ -4744,11 +4744,28 @@ mod ui_authorization_test {
                 }
                 pid
             };
-                if pid != admitted_pid {
+                // Admission can wait while XCTest resolves a different app
+                // process. Observe the current target again before any tap.
+                let description = retained_object(app.0, c"debugDescription");
+                let bytes = utf8_string(description.0);
+                let current_pid = if bytes.is_null() {
+                    None
+                } else {
+                    std::ffi::CStr::from_ptr(bytes).to_str().ok().and_then(|text| {
+                        let (_, tail) = text.split_once("pid: ")?;
+                        let digits = tail.split(|c: char| !c.is_ascii_digit()).next()?;
+                        digits.parse::<u32>().ok().filter(|pid| *pid > 0)
+                    })
+                };
+                let Some(current_pid) = current_pid else {
+                    fail(test, c"ARC diagnostic current target PID unavailable after admission");
+                    return;
+                };
+                if pid != admitted_pid || current_pid != admitted_pid {
                     fail(test, c"ARC diagnostic target generation changed after admission");
                     return;
                 }
-                println!("XCTest context-trace: target_pid_before={pid}");
+                println!("XCTest context-trace: target_pid_before={current_pid}");
             }
             action(request_button.0, c"tap");
             // Family Controls presents a system remote alert. The inspected
