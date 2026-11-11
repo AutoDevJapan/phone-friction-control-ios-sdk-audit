@@ -7,6 +7,8 @@ use Time::HiRes qw(time sleep);
 use IO::Handle;
 
 my $out = shift @ARGV // die "missing output directory\n";
+my $mode = shift @ARGV // die "missing test mode\n";
+die "invalid test mode\n" unless $mode eq 'arc' || $mode eq 'ordinary';
 @ARGV or die "missing XCTest command\n";
 my $status_path = "$out/captured-selection-context-xctest-owner-status.txt";
 my $stop_path = "$out/captured-selection-context-xctest-stop.txt";
@@ -74,7 +76,7 @@ while (!defined $code) {
     }
     if ($requested || -e $stop_path) {
         $code = $requested || 143; $reason = 'stop-request';
-    } elsif (time - $started >= 180) {
+    } elsif ($mode eq 'arc' && time - $started >= 180) {
         $code = 124; $reason = 'process-deadline';
     }
     sleep 0.02 unless defined $code;

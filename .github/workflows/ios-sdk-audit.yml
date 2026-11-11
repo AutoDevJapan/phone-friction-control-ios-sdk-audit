@@ -1155,7 +1155,9 @@ jobs:
           # Both normal XCTest and ARC diagnostics use the same child owner.
           # Cleanup submits a stop request rather than waiting on an unowned
           # live xcodebuild or signalling a recyclable Bash child PID.
-          UI_COMMAND=(perl tools/ios-xctest-process-owner.pl "$OUT" "${UI_COMMAND[@]}")
+          OWNER_MODE=ordinary
+          if [ '${{ inputs.selection_context_arc_trace }}' = true ]; then OWNER_MODE=arc; fi
+          UI_COMMAND=(perl tools/ios-xctest-process-owner.pl "$OUT" "$OWNER_MODE" "${UI_COMMAND[@]}")
           UI_TEST_GROUP=true
           UI_PROCESS_STARTED=$SECONDS
           "${UI_COMMAND[@]}" > "$OUT/xcode-ui-test.txt" 2>&1 &
