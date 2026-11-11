@@ -1057,13 +1057,25 @@ jobs:
           UI_TEST_PID=''
           UI_TEST_GROUP=false
           UI_TEST_GROUP_PID=''
+          UI_CLEANUP_ATTEMPTED=false
+          UI_CLEANUP_RESULT=1
           HOST_LOG_PID=''
           stop_owned_ui() {
+            if [ "$UI_CLEANUP_ATTEMPTED" = true ]; then
+              test "$UI_CLEANUP_RESULT" = 0
+              return
+            fi
+            UI_CLEANUP_ATTEMPTED=true
+            UI_CLEANUP_RESULT=1
             if [ -n "$UI_TEST_GROUP_PID" ]; then
               kill -TERM -- "-$UI_TEST_GROUP_PID" 2>/dev/null || true
+              # The direct child may not have completed setsid yet. It is
+              # still our unreaped child, so stop it as well as its group.
+              if [ -n "$UI_TEST_PID" ]; then kill -TERM "$UI_TEST_PID" 2>/dev/null || true; fi
               GRACE=$SECONDS
               while kill -0 -- "-$UI_TEST_GROUP_PID" 2>/dev/null && [ "$((SECONDS-GRACE))" -lt 1 ]; do sleep 0.1; done
               kill -KILL -- "-$UI_TEST_GROUP_PID" 2>/dev/null || true
+              if [ -n "$UI_TEST_PID" ]; then kill -KILL "$UI_TEST_PID" 2>/dev/null || true; fi
             elif [ -n "$UI_TEST_PID" ]; then kill "$UI_TEST_PID" 2>/dev/null || true; fi
             if [ -n "$UI_TEST_PID" ]; then
               GRACE=$SECONDS
@@ -1080,6 +1092,7 @@ jobs:
               # signal a numeric process-group ID that the OS may reuse.
               UI_TEST_GROUP_PID=''
             fi
+            UI_CLEANUP_RESULT=0
           }
           cleanup_observers() {
             STATUS=$?
