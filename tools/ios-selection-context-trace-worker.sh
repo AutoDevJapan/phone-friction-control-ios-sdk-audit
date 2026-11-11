@@ -91,6 +91,10 @@ LLDB_PID=$!
   printf 'process attach --pid %s\nprocess status\n' "$PID"
   printf 'target modules list --uuid --fullpath authorization-center-probe\n'
   printf 'breakpoint set --name rust_selection_capture_binding_init --ignore-count 3\n'
+  # FIFO commands run asynchronously: only the real breakpoint stop may emit
+  # its stack and completion marker. Never queue a backtrace after continue.
+  printf 'breakpoint command add --script-type command --stop-on-error true 1\n'
+  printf 'thread backtrace --count 4\nplatform shell touch "%s.context-stopped"\nDONE\n' "$TRACE"
   printf 'platform shell touch "%s.attached"\n' "$TRACE"
 } >&3
 await_marker "$TRACE.attached"
@@ -99,10 +103,9 @@ no_errors
 # Real Bash admission: a failed identity check sends no continue/context command.
 bash tools/check-selection-context-identity.sh "$OUT" --attached
 send_continue
-printf 'process status\nthread backtrace --count 4\nplatform shell touch "%s.context-stopped"\n' "$TRACE" >&3
 await_marker "$TRACE.context-stopped"
 no_errors
-grep -Eq '^ *frame #0: .* rust_selection_capture_binding_init( |$)' "$RAW"
+grep -Eq '^[[:space:]]*(\*[[:space:]]*)?frame #0: .* rust_selection_capture_binding_init([[:space:]]|$)' "$RAW"
 CONTEXT_OPS=$((CONTEXT_OPS + 1))
 {
   printf 'expression --language c -- unsigned long $audit_context = (unsigned long)$x5\n'
@@ -112,16 +115,15 @@ CONTEXT_OPS=$((CONTEXT_OPS + 1))
   printf 'breakpoint set --name swift_retain --name swift_release --name swift_retain_n --name swift_release_n --condition "(unsigned long)$x0 == $audit_context && ++$audit_events <= 64"\n'
   printf 'breakpoint command add --script-type command 2\nthread backtrace --count 12\ncontinue\nDONE\n'
   printf 'breakpoint set --name exit --name _exit --name abort\n'
+  printf 'breakpoint command add --script-type command --stop-on-error true 3\n'
+  printf 'expression --language c -- $audit_events\nthread backtrace --count 4\n'
+  printf 'platform shell echo context_trace_reached_exit=1\n'
+  printf 'platform shell touch "%s.exited"\nDONE\n' "$TRACE"
   printf 'platform shell touch "%s.configured"\n' "$TRACE"
 } >&3
 await_marker "$TRACE.configured"
 no_errors
 send_continue
-{
-  printf 'expression --language c -- $audit_events\nthread backtrace --count 4\n'
-  printf 'platform shell echo context_trace_reached_exit=1\n'
-  printf 'platform shell touch "%s.exited"\n' "$TRACE"
-} >&3
 await_marker "$TRACE.exited"
 no_errors
 test "$(LC_ALL=C ps -p "$PID" -o lstart=)" = "$STARTED"
@@ -139,14 +141,14 @@ grep -F "$UUID" "$RAW" | sed -E 's/0x[0-9a-fA-F]+/[address]/g' > "$TRACE-attache
 test "$(grep -Fc "$INSTALLED_BIN" "$TRACE-attached-image.txt")" = 1
 test "$(grep -Ec '^captured_context_identity_set=1[[:space:]]*$' "$RAW")" = 1
 test "$(grep -Ec '^context_trace_reached_exit=1[[:space:]]*$' "$RAW")" = 1
-grep -Eq '^ *frame #0: .* (exit|_exit|abort)( |$)' "$RAW"
-EVENTS=$(grep -Ec '^ *frame #0: .* (swift_retain|swift_release|swift_retain_n|swift_release_n)( |$)' "$RAW" || true)
+grep -Eq '^[[:space:]]*(\*[[:space:]]*)?frame #0: .* (exit|_exit|abort)([[:space:]]|$)' "$RAW"
+EVENTS=$(grep -Ec '^[[:space:]]*(\*[[:space:]]*)?frame #0: .* (swift_retain|swift_release|swift_retain_n|swift_release_n)([[:space:]]|$)' "$RAW" || true)
 [[ "$EVENTS" =~ ^[0-9]+$ ]]
 test "$EVENTS" -ge 2
 test "$EVENTS" -le 64
 test "$(grep -Ec '^\(unsigned long\) \$audit_events = [0-9]+[[:space:]]*$' "$RAW")" = 1
 MATCHED=$(sed -nE 's/^\(unsigned long\) \$audit_events = ([0-9]+)[[:space:]]*$/\1/p' "$RAW")
 test "$MATCHED" = "$EVENTS"
-grep -Eq '^ *frame #0: .* swift_retain(_n)?( |$)' "$RAW"
-grep -Eq '^ *frame #0: .* swift_release(_n)?( |$)' "$RAW"
+grep -Eq '^[[:space:]]*(\*[[:space:]]*)?frame #0: .* swift_retain(_n)?([[:space:]]|$)' "$RAW"
+grep -Eq '^[[:space:]]*(\*[[:space:]]*)?frame #0: .* swift_release(_n)?([[:space:]]|$)' "$RAW"
 printf 'observed_context_events=%s\ncontext_arc_stack_capture_complete=true\ninlined_arc_not_observed=true\nproduct_drain_accepted=false\n' "$EVENTS" >> "$TRACE-status.txt"
