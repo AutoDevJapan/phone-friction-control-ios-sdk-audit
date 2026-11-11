@@ -1,47 +1,68 @@
 #!/usr/bin/env bash
-# Diagnostic only. Observe public Swift ARC entry calls in our own Simulator app.
+# Diagnostic only. Bash admits each LLDB stage after validating the last one.
 set -euo pipefail
 test "$#" = 3
-OUT=$1
-APP=$2
-SIM_ID=$3
+OUT=$1 APP=$2 SIM_ID=$3
 BID=com.autodevjapan.phonecontrol1614abiprobe
-test -x "$APP/authorization-center-probe"
 TRACE="$OUT/captured-selection-context"
-COMMANDS="$TRACE.lldb"
 RAW="$TRACE.unsanitized"
-ATTACHED="$TRACE.attached"
-READY="$TRACE.ready"
+FIFO="$TRACE.control.fifo"
 LLDB_PID=''
-WATCH_PID=''
+CONTROL_OPEN=false
+TRACE_STARTED=''
+CONTINUES=0
+CONTEXT_OPS=0
 cleanup_trace() {
   STATUS=$?
   trap - EXIT
+  if [ "$CONTROL_OPEN" = true ]; then exec 3>&-; exec 3<&-; fi
   if [ -n "$LLDB_PID" ]; then
     kill -TERM -- "-$LLDB_PID" 2>/dev/null || true
     sleep 1
     kill -KILL -- "-$LLDB_PID" 2>/dev/null || true
     wait "$LLDB_PID" 2>/dev/null || true
-  fi
-  if [ -n "$WATCH_PID" ]; then
-    kill "$WATCH_PID" 2>/dev/null || true
-    wait "$WATCH_PID" 2>/dev/null || true
+    REMAINING=0
+    if kill -0 -- "-$LLDB_PID" 2>/dev/null; then REMAINING=1; fi
+    printf 'debugger_group_remaining=%s\n' "$REMAINING" >> "$TRACE-status.txt"
+    if [ "$REMAINING" != 0 ]; then STATUS=1; fi
   fi
   if [ -f "$RAW" ]; then
-    # Frame formatting omits addresses and arguments. Redact remaining LLDB
-    # diagnostics too; never export the context identity or register contents.
     sed -E 's/0x[0-9a-fA-F]+/[address]/g; s/(\$audit_context = )[0-9]+/\1[identity]/g' "$RAW" > "$TRACE.txt"
     rm -f "$RAW"
   fi
-  printf 'trace_driver_exit=%s\n' "$STATUS" >> "$TRACE-status.txt"
+  if [ -p "$FIFO" ]; then rm -f "$FIFO"; fi
+  printf 'continue_commands_sent=%s\ncontext_operation_stages_sent=%s\ntrace_driver_exit=%s\n' "$CONTINUES" "$CONTEXT_OPS" "$STATUS" >> "$TRACE-status.txt"
   exit "$STATUS"
 }
 trap cleanup_trace EXIT
 trap 'exit 143' TERM
 trap 'exit 130' INT
 trap 'exit 129' HUP
+no_errors() {
+  local CODE=0
+  grep -Eq '(^|[[:space:]])error:|failed to evaluate' "$RAW" || CODE=$?
+  test "$CODE" = 1
+}
+await_marker() {
+  local MARKER=$1 START=$ATTACH_STARTED LIMIT=60
+  if [ -n "$TRACE_STARTED" ]; then START=$TRACE_STARTED; LIMIT=90; fi
+  while [ ! -f "$MARKER" ]; do
+    if ! kill -0 "$LLDB_PID" 2>/dev/null; then return 1; fi
+    if [ "$(( $(date +%s) - START ))" -ge "$LIMIT" ]; then
+      printf 'trace_deadline=%s\n' "$MARKER" >> "$TRACE-status.txt"
+      return 1
+    fi
+    sleep 0.1
+  done
+  test "$(( $(date +%s) - START ))" -lt "$LIMIT"
+}
+send_continue() { CONTINUES=$((CONTINUES + 1)); printf 'continue\n' >&3; }
+test -x "$APP/authorization-center-probe"
+test ! -e "$FIFO"
+for MARKER in attached context-stopped configured exited ready; do test ! -e "$TRACE.$MARKER"; done
+printf 'diagnostic_only=true\nmaximum_events=64\nmaximum_frames=12\nattach_limit_seconds=60\ntrace_limit_seconds=90\nproduct_drain_accepted=false\n' > "$TRACE-status.txt"
 perl -e 'alarm 10; exec @ARGV; die "exec failed\n"' xcrun lldb --version > "$TRACE-version.txt" 2>&1
-perl -e 'alarm 10; exec @ARGV; die "exec failed\n"' xcrun lldb --no-lldbinit --batch -o 'help process attach' -o 'help breakpoint set' -o 'help breakpoint command add' > "$TRACE-help.txt" 2>&1
+perl -e 'alarm 10; exec @ARGV; die "exec failed\n"' xcrun lldb --no-lldbinit --batch -o 'help process attach' -o 'help breakpoint set' > "$TRACE-help.txt" 2>&1
 grep -F -- '--pid' "$TRACE-help.txt"
 grep -F -- '--ignore-count' "$TRACE-help.txt"
 shasum -a 256 "$APP/authorization-center-probe" > "$TRACE-binary-hash.txt"
@@ -53,117 +74,81 @@ printf 'simulator=%s\nbundle_id=%s\ninstalled_binary=%s\n' "$SIM_ID" "$BID" "$IN
 xcrun dwarfdump --uuid "$INSTALLED_BIN" > "$TRACE-image-uuid.txt"
 UUID=$(awk '/^UUID: / {print $2}' "$TRACE-image-uuid.txt")
 [[ "$UUID" =~ ^[A-Fa-f0-9-]{36}$ ]]
-LAUNCH_STATUS=0
-perl -e 'alarm 30; exec @ARGV; die "exec failed\n"' xcrun simctl launch "$SIM_ID" "$BID" > "$TRACE-launch.txt" 2>&1 || LAUNCH_STATUS=$?
-test "$LAUNCH_STATUS" = 0
+perl -e 'alarm 30; exec @ARGV; die "exec failed\n"' xcrun simctl launch "$SIM_ID" "$BID" > "$TRACE-launch.txt" 2>&1
 PID=$(awk -v b="$BID" 'index($0,b ": ")==1 {p=substr($0,length(b)+3);if(p~/^[1-9][0-9]*$/)print p}' "$TRACE-launch.txt")
 [[ "$PID" =~ ^[1-9][0-9]*$ ]]
 xcrun simctl spawn "$SIM_ID" launchctl list > "$TRACE-owned-processes.txt"
 test "$(awk -v p="$PID" -v b="$BID" '$1==p&&index($0,b)>0{n++}END{print n+0}' "$TRACE-owned-processes.txt")" = 1
 STARTED=$(LC_ALL=C ps -p "$PID" -o lstart=)
 test -n "$STARTED"
-COMMAND=$(ps -p "$PID" -o comm=)
-test "$COMMAND" = "$INSTALLED_BIN"
+test "$(ps -p "$PID" -o comm=)" = "$INSTALLED_BIN"
 printf 'pid=%s\nstarted=%s\nsimulator=%s\nbundle_id=%s\n' "$PID" "$STARTED" "$SIM_ID" "$BID" > "$TRACE-process-identity.txt"
+mkfifo "$FIFO"
+exec 3<> "$FIFO"
+CONTROL_OPEN=true
+ATTACH_STARTED=$(date +%s)
+perl -MPOSIX -e 'POSIX::setsid() >= 0 or die "setsid failed\n"; exec @ARGV; die "exec failed\n"' xcrun lldb --no-lldbinit < "$FIFO" > "$RAW" 2>&1 &
+LLDB_PID=$!
 {
-  printf 'settings set stop-disassembly-count 0\n'
-  printf 'settings set stop-line-count-before 0\n'
-  printf 'settings set stop-line-count-after 0\n'
+  printf 'settings set stop-disassembly-count 0\nsettings set stop-line-count-before 0\nsettings set stop-line-count-after 0\n'
   printf 'settings set frame-format "frame #${frame.index}: ${module.file.basename} ${function.name}\\n"\n'
   printf 'settings set thread-format "thread #${thread.index}: ${thread.stop-reason}\\n"\n'
-  printf 'process attach --pid %s\n' "$PID"
-  printf 'process status\n'
+  printf 'process attach --pid %s\nprocess status\n' "$PID"
   printf 'target modules list --uuid --fullpath authorization-center-probe\n'
-  printf 'platform shell touch "%s"\n' "$ATTACHED"
-  # Three independently measured preflights precede the genuine UI context.
-  # The bridge's sixth C argument x5 is that exact context; no heap scan occurs.
   printf 'breakpoint set --name rust_selection_capture_binding_init --ignore-count 3\n'
-  printf 'platform shell bash "%s/tools/check-selection-context-identity.sh" "%s" --attached\n' "$PWD" "$OUT"
-  printf 'continue\n'
-  printf 'thread backtrace --count 4\n'
+  printf 'platform shell touch "%s.attached"\n' "$TRACE"
+} >&3
+await_marker "$TRACE.attached"
+TRACE_STARTED=$(date +%s)
+no_errors
+# Real Bash admission: a failed identity check sends no continue/context command.
+bash tools/check-selection-context-identity.sh "$OUT" --attached
+send_continue
+printf 'process status\nthread backtrace --count 4\nplatform shell touch "%s.context-stopped"\n' "$TRACE" >&3
+await_marker "$TRACE.context-stopped"
+no_errors
+grep -Eq '^ *frame #0: .* rust_selection_capture_binding_init( |$)' "$RAW"
+CONTEXT_OPS=$((CONTEXT_OPS + 1))
+{
   printf 'expression --language c -- unsigned long $audit_context = (unsigned long)$x5\n'
   printf 'expression --language c -- unsigned long $audit_events = 0\n'
   printf 'platform shell echo captured_context_identity_set=1\n'
   printf 'breakpoint delete 1\n'
   printf 'breakpoint set --name swift_retain --name swift_release --name swift_retain_n --name swift_release_n --condition "(unsigned long)$x0 == $audit_context && ++$audit_events <= 64"\n'
-  # At most 64 matching stops, twelve symbol-only frames per stop. Calls that
-  # use inlined refcount operations are outside this observation's coverage.
-  printf 'breakpoint command add --script-type command 2\n'
-  printf 'thread backtrace --count 12\ncontinue\nDONE\n'
+  printf 'breakpoint command add --script-type command 2\nthread backtrace --count 12\ncontinue\nDONE\n'
   printf 'breakpoint set --name exit --name _exit --name abort\n'
-  printf 'continue\n'
-  printf 'expression --language c -- $audit_events\n'
-  printf 'thread backtrace --count 4\n'
+  printf 'platform shell touch "%s.configured"\n' "$TRACE"
+} >&3
+await_marker "$TRACE.configured"
+no_errors
+send_continue
+{
+  printf 'expression --language c -- $audit_events\nthread backtrace --count 4\n'
   printf 'platform shell echo context_trace_reached_exit=1\n'
-  printf 'breakpoint delete 2 3\nprocess detach\nquit\n'
-} > "$COMMANDS"
-printf 'diagnostic_only=true\nmaximum_events=64\nmaximum_frames=12\nattach_limit_seconds=60\ntrace_limit_seconds=90\nproduct_drain_accepted=false\n' > "$TRACE-status.txt"
-# A separate process group bounds LLDB and any debugserver it creates. All
-# processes in this group belong to this exact diagnostic invocation.
-perl -MPOSIX -e 'POSIX::setsid() >= 0 or die "setsid failed\n"; exec @ARGV; die "exec failed\n"' \
-  xcrun lldb --no-lldbinit --batch -o "command source --stop-on-error true --stop-on-continue false \"$COMMANDS\"" > "$RAW" 2>&1 &
-LLDB_PID=$!
-(
-  for ((WAIT=0; WAIT<60; WAIT++)); do
-    if [ -f "$ATTACHED" ]; then break; fi
-    if ! kill -0 "$LLDB_PID" 2>/dev/null; then exit 0; fi
-    sleep 1
-  done
-  if [ ! -f "$ATTACHED" ]; then
-    printf 'trace_deadline=attach\n' >> "$TRACE-status.txt"
-  else
-    for ((WAIT=0; WAIT<90; WAIT++)); do
-      if ! kill -0 "$LLDB_PID" 2>/dev/null; then exit 0; fi
-      CURRENT_START=$(LC_ALL=C ps -p "$PID" -o lstart= 2>/dev/null || true)
-      if [ -n "$CURRENT_START" ] && [ "$CURRENT_START" != "$STARTED" ]; then
-        printf 'trace_identity_changed=true\n' >> "$TRACE-status.txt"
-        break
-      fi
-      sleep 1
-    done
-    printf 'trace_deadline=events\n' >> "$TRACE-status.txt"
-  fi
-  kill -TERM -- "-$LLDB_PID" 2>/dev/null || true
-  sleep 1
-  kill -KILL -- "-$LLDB_PID" 2>/dev/null || true
-) &
-WATCH_PID=$!
+  printf 'platform shell touch "%s.exited"\n' "$TRACE"
+} >&3
+await_marker "$TRACE.exited"
+no_errors
+test "$(LC_ALL=C ps -p "$PID" -o lstart=)" = "$STARTED"
+printf 'breakpoint delete 2 3\nprocess detach\nquit\n' >&3
+while kill -0 "$LLDB_PID" 2>/dev/null; do
+  test "$(( $(date +%s) - TRACE_STARTED ))" -lt 90
+  sleep 0.1
+done
 LLDB_STATUS=0
 wait "$LLDB_PID" || LLDB_STATUS=$?
-kill -TERM -- "-$LLDB_PID" 2>/dev/null || true
-sleep 1
-kill -KILL -- "-$LLDB_PID" 2>/dev/null || true
-GROUP_REMAINING=0
-if kill -0 -- "-$LLDB_PID" 2>/dev/null; then GROUP_REMAINING=1; fi
-printf 'debugger_group_remaining=%s\n' "$GROUP_REMAINING" >> "$TRACE-status.txt"
-LLDB_PID=''
-kill "$WATCH_PID" 2>/dev/null || true
-wait "$WATCH_PID" 2>/dev/null || true
-WATCH_PID=''
 printf 'lldb_exit=%s\n' "$LLDB_STATUS" >> "$TRACE-status.txt"
-test -f "$ATTACHED"
 test "$LLDB_STATUS" = 0
-test "$GROUP_REMAINING" = 0
-if grep -q '^trace_deadline=' "$TRACE-status.txt"; then exit 1; fi
-if grep -q '^trace_identity_changed=' "$TRACE-status.txt"; then exit 1; fi
-if grep -Eq '(^|\n)error:|error: evaluating condition|failed to evaluate' "$RAW"; then exit 1; fi
-grep -Fq "$UUID" "$RAW"
-grep -Eq "^Process $PID (stopped|is stopped)" "$RAW"
-grep -Fq "$INSTALLED_BIN" "$RAW"
+no_errors
 grep -F "$UUID" "$RAW" | sed -E 's/0x[0-9a-fA-F]+/[address]/g' > "$TRACE-attached-image.txt"
 test "$(grep -Fc "$INSTALLED_BIN" "$TRACE-attached-image.txt")" = 1
-test "$(cat "$TRACE-attached-start.txt")" = "$STARTED"
-test "$(cat "$TRACE-attached-command.txt")" = "$INSTALLED_BIN"
 test "$(grep -Ec '^captured_context_identity_set=1$' "$RAW")" = 1
 test "$(grep -Ec '^context_trace_reached_exit=1$' "$RAW")" = 1
-grep -Eq '^ *frame #0: .* rust_selection_capture_binding_init( |$)' "$RAW"
 grep -Eq '^ *frame #0: .* (exit|_exit|abort)( |$)' "$RAW"
 EVENTS=$(grep -Ec '^ *frame #0: .* (swift_retain|swift_release|swift_retain_n|swift_release_n)( |$)' "$RAW" || true)
 [[ "$EVENTS" =~ ^[0-9]+$ ]]
 test "$EVENTS" -ge 2
 test "$EVENTS" -le 64
-# The persistent debugger counter increments on every matching call, including
-# calls beyond the output cap. A capped/incomplete trace must not pass.
 MATCHED=$(sed -nE 's/^\(unsigned long\) \$audit_events = ([0-9]+)$/\1/p' "$RAW" | tail -n 1)
 test "$MATCHED" = "$EVENTS"
 grep -Eq '^ *frame #0: .* swift_retain(_n)?( |$)' "$RAW"
