@@ -1060,6 +1060,10 @@ jobs:
           UI_CLEANUP_ATTEMPTED=false
           UI_CLEANUP_RESULT=1
           HOST_LOG_PID=''
+          owned_ui_group_absent() {
+            GROUP_SNAPSHOT=$(perl -e 'alarm 5; exec @ARGV; die "exec failed\n"' ps -axo pgid=) || return 1
+            test "$(printf '%s\n' "$GROUP_SNAPSHOT" | awk -v p="$UI_TEST_GROUP_PID" '$1==p{n++}END{print n+0}')" = 0
+          }
           stop_owned_ui() {
             if [ "$UI_CLEANUP_ATTEMPTED" = true ]; then
               test "$UI_CLEANUP_RESULT" = 0
@@ -1081,6 +1085,12 @@ jobs:
               GRACE=$SECONDS
               while kill -0 "$UI_TEST_PID" 2>/dev/null && [ "$((SECONDS-GRACE))" -lt 2 ]; do sleep 0.1; done
               if kill -0 "$UI_TEST_PID" 2>/dev/null; then return 1; fi
+              CHILD_SNAPSHOT=''
+              CHILD_QUERY_STATUS=0
+              CHILD_SNAPSHOT=$(perl -e 'alarm 5; exec @ARGV; die "exec failed\n"' ps -p "$UI_TEST_PID" -o pid=) || CHILD_QUERY_STATUS=$?
+              # kill -0 failure alone may be a permission error. Require the
+              # normal ps no-such-process result before reaping/retiring.
+              if [ "$CHILD_QUERY_STATUS" != 1 ] || [ -n "$CHILD_SNAPSHOT" ]; then return 1; fi
               wait "$UI_TEST_PID" 2>/dev/null || true
               UI_TEST_PID=''
             fi
@@ -1088,6 +1098,7 @@ jobs:
               GRACE=$SECONDS
               while kill -0 -- "-$UI_TEST_GROUP_PID" 2>/dev/null && [ "$((SECONDS-GRACE))" -lt 2 ]; do sleep 0.1; done
               if kill -0 -- "-$UI_TEST_GROUP_PID" 2>/dev/null; then return 1; fi
+              owned_ui_group_absent || return 1
               # This ownership has been drained; a later EXIT trap must not
               # signal a numeric process-group ID that the OS may reuse.
               UI_TEST_GROUP_PID=''
@@ -1221,7 +1232,6 @@ jobs:
             if stop_owned_ui; then printf 'xctest_process_group_remaining=0\n' >> "$OUT/captured-selection-context-admission-status.txt";
             else UI_TEST_STATUS=1; printf 'xctest_process_group_remaining=1\n' >> "$OUT/captured-selection-context-admission-status.txt"; fi
           fi
-          UI_TEST_PID=''
           printf 'xctest_exit=%s\n' "$UI_TEST_STATUS" > "$OUT/captured-selection-xctest-exit.txt"
           kill "$HOST_LOG_PID" 2>/dev/null || true
           wait "$HOST_LOG_PID" 2>/dev/null || true
