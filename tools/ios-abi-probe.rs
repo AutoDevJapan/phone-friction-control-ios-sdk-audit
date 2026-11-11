@@ -4656,6 +4656,9 @@ mod ui_authorization_test {
                 fail(test, c"Cannot construct test application");
                 return;
             }
+            // ARC diagnostics prelaunch the owned bundle and attach to its
+            // exact PID. Do not replace it with a fresh XCTest launch.
+            #[cfg(not(ui_test_context_arc_trace))]
             action(app.0, c"launch");
             let request_label = string(c"Request Screen Time access");
             let request_buttons = retained_object(app.0, c"buttons");
@@ -4665,6 +4668,25 @@ mod ui_authorization_test {
             if !wait_for(request_button.0, 15.0) {
                 fail(test, c"Test host request button not observed");
                 return;
+            }
+            #[cfg(ui_test_context_arc_trace)]
+            {
+                let description = retained_object(app.0, c"debugDescription");
+                let bytes = utf8_string(description.0);
+                let pid = if bytes.is_null() {
+                    None
+                } else {
+                    std::ffi::CStr::from_ptr(bytes).to_str().ok().and_then(|text| {
+                        let (_, tail) = text.split_once("pid: ")?;
+                        let digits = tail.split(|c: char| !c.is_ascii_digit()).next()?;
+                        digits.parse::<u32>().ok().filter(|pid| *pid > 0)
+                    })
+                };
+                let Some(pid) = pid else {
+                    fail(test, c"ARC diagnostic target PID unavailable");
+                    return;
+                };
+                println!("XCTest context-trace: target_pid_before={pid}");
             }
             action(request_button.0, c"tap");
             // Family Controls presents a system remote alert. The inspected

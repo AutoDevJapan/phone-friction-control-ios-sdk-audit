@@ -98,6 +98,15 @@ uint8_t observe_picker_category(XCTestCase *test, XCUIApplication *app) {
 #if CAPTURED_SELECTION_TEARDOWN
     if (verified) {
         keepImage(test, app, @"owned-selection-before-close");
+#if CONTEXT_ARC_TRACE
+        NSString *description = app.debugDescription;
+        NSRegularExpression *pattern = [NSRegularExpression regularExpressionWithPattern:@"pid: ([0-9]+)" options:0 error:nil];
+        NSTextCheckingResult *match = [pattern firstMatchInString:description options:0 range:NSMakeRange(0, description.length)];
+        if (!match) return 0;
+        NSString *pid = [description substringWithRange:[match rangeAtIndex:1]];
+        printf("XCTest context-trace: target_pid_before_close=%s\n", pid.UTF8String);
+        fflush(stdout);
+#endif
         if (!badge.hittable) return 0;
         [badge tap];
         BOOL exited = [app waitForState:XCUIApplicationStateNotRunning timeout:25];

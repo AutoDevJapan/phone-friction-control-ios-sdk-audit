@@ -905,6 +905,7 @@ jobs:
               if [ '${{ inputs.selection_inspection_mode }}' = consent-selection-acceptance ]; then UI_TEST_ARGS+=(--cfg ui_test_selection_acceptance); fi
               if [ '${{ inputs.category_selection_observation }}' = true ]; then UI_TEST_ARGS+=(--cfg category_selection_observation); fi
               if [ '${{ inputs.category_token_count_acceptance }}' = true ]; then UI_TEST_ARGS+=(--cfg category_token_count_acceptance); fi
+              if [ '${{ inputs.selection_context_arc_trace }}' = true ]; then UI_TEST_ARGS+=(--cfg ui_test_context_arc_trace); fi
               rustc tools/ios-abi-probe.rs --crate-name ios_consent_ui_test --crate-type staticlib --edition 2024 --cfg ui_test_bundle ${UI_TEST_ARGS[@]+"${UI_TEST_ARGS[@]}"} --target aarch64-apple-ios-sim --emit="obj=$XCODE_ROOT/ui-test.o,link" --print native-static-libs -o "$XCODE_ROOT/libui-test.a" 2> "$OUT/rust-ui-test-link.txt"
               test "$(grep -c '^note: native-static-libs: ' "$OUT/rust-ui-test-link.txt")" = 1
               UI_NATIVE_LIBS=$(sed -n 's/^note: native-static-libs: //p' "$OUT/rust-ui-test-link.txt")
@@ -914,6 +915,7 @@ jobs:
                 CATEGORY_TEST_FLAGS=()
                 if [ '${{ inputs.category_token_count_acceptance }}' = true ]; then CATEGORY_TEST_FLAGS=(-DCATEGORY_TOKEN_COUNTS=1); fi
                 if [ '${{ inputs.selection_capture_owner_acceptance }}' = true ]; then CATEGORY_TEST_FLAGS+=(-DCAPTURED_SELECTION_TEARDOWN=1); fi
+                if [ '${{ inputs.selection_context_arc_trace }}' = true ]; then CATEGORY_TEST_FLAGS+=(-DCONTEXT_ARC_TRACE=1); fi
                 xcrun clang -target arm64-apple-ios18.5-simulator -isysroot "$SDK" -fobjc-arc -fmodules ${CATEGORY_TEST_FLAGS[@]+"${CATEGORY_TEST_FLAGS[@]}"} -F"$DEVELOPER_DIR/Platforms/iPhoneSimulator.platform/Developer/Library/Frameworks" -c tools/PickerCategoryObservation.m -o "$XCODE_ROOT/category-observation.o"
                 printf 'OTHER_LDFLAGS = $(inherited) -F$(PLATFORM_DIR)/Developer/Library/Frameworks %s %s\n' "$UI_NATIVE_LIBS" "$XCODE_ROOT/category-observation.o" > "$XCODE_ROOT/UITest.xcconfig"
               fi
@@ -1124,8 +1126,20 @@ jobs:
           if [ '${{ inputs.selection_context_arc_trace }}' = true ]; then
             tar -czf "$OUT/captured-selection-probe.app.tar.gz" -C "$(dirname "$PROBE_APP")" "$(basename "$PROBE_APP")"
             shasum -a 256 "$OUT/captured-selection-probe.app.tar.gz" > "$OUT/captured-selection-probe-archive-hash.txt"
-            bash tools/ios-selection-context-trace.sh "$OUT" "$PROBE_APP" &
+            bash tools/ios-selection-context-trace.sh "$OUT" "$PROBE_APP" "$SIM_ID" &
             TRACE_PID=$!
+            TRACE_READY=false
+            for ((WAIT=0; WAIT<60; WAIT++)); do
+              if [ -f "$OUT/captured-selection-context.ready" ]; then TRACE_READY=true; break; fi
+              if ! kill -0 "$TRACE_PID" 2>/dev/null; then break; fi
+              sleep 1
+            done
+            if [ "$TRACE_READY" != true ]; then
+              wait "$TRACE_PID" || true
+              TRACE_PID=''
+              printf 'trace_prelaunch_ready=false\n' >> "$OUT/captured-selection-context-status.txt"
+              exit 1
+            fi
           fi
           # Capture host errors (including a pre-UI ABI guard panic) independently
           # of whether XCTest reaches its first application control.
@@ -1204,6 +1218,7 @@ jobs:
                     test "$TRACE_STATUS" = 0
                     grep -Fx 'context_arc_stack_capture_complete=true' "$OUT/captured-selection-context-status.txt"
                     grep -Fx 'product_drain_accepted=false' "$OUT/captured-selection-context-status.txt"
+                    bash tools/check-selection-context-identity.sh "$OUT"
                     printf 'diagnostic_only=true\ncontext_arc_stack_capture_complete=true\nproduct_drain_accepted=false\n' > "$OUT/captured-selection-context-result.txt"
                     exit 0
                   fi
