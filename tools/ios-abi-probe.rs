@@ -5335,10 +5335,10 @@ mod native_host {
             send_id(window, c"setRootViewController:", controller);
             #[cfg(selection_capture_owner_acceptance)]
             {
-                let original = CAPTURE_INITIAL_CONTROLLER.swap(0, Ordering::AcqRel) as Id;
+                // Preserve our initial controller's allocation reference. Close
+                // restores it while the window is visible before final detach.
+                let original = CAPTURE_INITIAL_CONTROLLER.load(Ordering::Acquire) as Id;
                 assert!(!original.is_null());
-                objc_release(original);
-                CAPTURE_INITIAL_RELEASES.fetch_add(1, Ordering::SeqCst);
             }
             send_void(window, c"makeKeyAndVisible");
             send_void(send0(controller, c"view"), c"layoutIfNeeded");

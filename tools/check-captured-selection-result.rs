@@ -58,6 +58,7 @@ fn validate(teardown: &str, prior_selection: &str) -> Result<(), String> {
         "window_pointer_cleared",
         "controller_pointer_cleared",
         "button_pointer_cleared",
+        "restored_root_view_window_identity_verified",
         "named_ui_and_state_graph_release_verified",
         "full_framework_teardown_not_established",
         "state_cleanup_does_not_cover_framework_caches",
@@ -78,6 +79,7 @@ fn validate(teardown: &str, prior_selection: &str) -> Result<(), String> {
         "captured_context_deallocation_completed",
         "captured_context_root_releases",
         "initial_controller_reference_releases",
+        "initial_root_restorations",
         "button_temporary_retains",
         "button_temporary_releases",
         "hosting_reference_releases",
@@ -313,6 +315,7 @@ mod tests {
             "individual_app_selection_verified=false\nmonitoring_verified=false\nshielding_verified=false\n",
             "captured_context_allocations=1\ncaptured_selection_state_drop_completed=1\ncaptured_context_destroy_entered=1\ncaptured_context_deallocation_completed=1\n",
             "captured_context_root_releases=1\ninitial_controller_reference_releases=1\nbutton_temporary_retains=1\nbutton_temporary_releases=1\n",
+            "initial_root_restorations=1\nrestored_root_view_window_identity_verified=true\n",
             "hosting_reference_releases=1\nwindow_reference_releases=1\ndelegate_owned_reference_releases=1\nbootstrap_watchdog_joins=1\nproof_owners_before_final_drop=1\n",
             "close_probe_rejected_set_callbacks=1\nclose_probe_binding_copy_destroy_calls=1\ncaptured_context_input_retains=2\ncaptured_context_deferred_main_drops=0\n",
             "captured_validated_context_callbacks=8\nclose_probe_readonly_get_callbacks=2\nclose_probe_initial_category_count=1\nclose_probe_final_category_count=1\nclose_probe_empty_input_count=0\n",
@@ -382,6 +385,13 @@ mod tests {
             ),
             ("preflight_phase=complete", "preflight_phase=not_drained"),
             ("weak_hosting_view_nil=true", "weak_hosting_view_nil=false"),
+            ("initial_root_restorations=1", "initial_root_restorations=0"),
+            ("initial_root_restorations=1\n", ""),
+            (
+                "restored_root_view_window_identity_verified=true",
+                "restored_root_view_window_identity_verified=false",
+            ),
+            ("restored_root_view_window_identity_verified=true\n", ""),
         ] {
             assert!(result.contains(from));
             assert!(validate(&result.replace(from, to), &prior).is_err());

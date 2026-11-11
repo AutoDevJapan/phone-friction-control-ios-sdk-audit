@@ -11,6 +11,8 @@ static CAPTURE_BUTTON_TEMP_RELEASES: AtomicUsize = AtomicUsize::new(0);
 static CAPTURE_HOSTING_RELEASES: AtomicUsize = AtomicUsize::new(0);
 static CAPTURE_WINDOW_RELEASES: AtomicUsize = AtomicUsize::new(0);
 static CAPTURE_DELEGATE_RELEASES: AtomicUsize = AtomicUsize::new(0);
+static CAPTURE_ROOT_RESTORATIONS: AtomicUsize = AtomicUsize::new(0);
+static CAPTURE_RESTORED_VIEW_ATTACHED: AtomicBool = AtomicBool::new(false);
 static CAPTURE_WEAK_TABLES: [AtomicUsize; 5] = [const { AtomicUsize::new(0) }; 5];
 static CAPTURE_CLOSE_EVIDENCE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
 static CAPTURE_UI_STARTED: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
@@ -141,6 +143,11 @@ fn capture_write_ui_evidence(
         HOSTING_CONTROLLER.load(Ordering::Acquire) == 0,
         REQUEST_BUTTON.load(Ordering::Acquire) == 0,
     );
+    let evidence = format!(
+        "{evidence}initial_root_restorations={}\nrestored_root_view_window_identity_verified={}\n",
+        CAPTURE_ROOT_RESTORATIONS.load(Ordering::Acquire),
+        CAPTURE_RESTORED_VIEW_ATTACHED.load(Ordering::Acquire),
+    );
     std::fs::write(documents.join("captured-selection-teardown.txt"), evidence)
         .expect("write owned audit teardown evidence");
 }
@@ -183,22 +190,65 @@ unsafe extern "C" fn capture_ui_detach(context: *mut c_void) {
 
 unsafe fn capture_ui_detach_body(_: *mut c_void) {
     let outcome = std::panic::catch_unwind(|| unsafe {
+        let window = WINDOW.load(Ordering::Acquire) as Id;
+        let original = CAPTURE_INITIAL_CONTROLLER.load(Ordering::Acquire) as Id;
+        let controller = HOSTING_CONTROLLER.swap(0, Ordering::AcqRel) as Id;
+        assert!(!window.is_null() && !original.is_null() && !controller.is_null());
+        assert!(CAPTURE_ROOT_RESTORATIONS.load(Ordering::Acquire) == 0);
+        // Perform a normal root-controller replacement while the window is
+        // still visible. Existing public UIKit calls drive the transition; do
+        // not call appearance callbacks or private SwiftUI cleanup functions.
+        send_id(window, c"setRootViewController:", original);
+        assert!(send0(window, c"rootViewController") == original);
+        let view = send0(original, c"view");
+        assert!(!view.is_null());
+        send_void(view, c"layoutIfNeeded");
+        assert!(send0(view, c"window") == window);
+        CAPTURE_RESTORED_VIEW_ATTACHED.store(true, Ordering::Release);
+        CAPTURE_ROOT_RESTORATIONS.fetch_add(1, Ordering::SeqCst);
+        swift_unknownObjectRelease(controller); // only the original returned +1
+        CAPTURE_HOSTING_RELEASES.fetch_add(1, Ordering::SeqCst);
+        capture_write_ui_evidence("initial_root_restored", None, "", false);
+        // Leave a finite main-runloop interval before hiding/releasing the
+        // window. This is a candidate transition, not proof of graph drain.
+        let when = dispatch_time(0, 200_000_000);
+        dispatch_after_f(
+            when,
+            (&raw const _dispatch_main_q).cast_mut().cast(),
+            std::ptr::null_mut(),
+            capture_ui_finish_detach,
+        );
+    });
+    if outcome.is_err() {
+        std::process::exit(1);
+    }
+}
+
+unsafe extern "C" fn capture_ui_finish_detach(context: *mut c_void) {
+    capture_autorelease_scope(|| unsafe { capture_ui_finish_detach_body(context) });
+}
+
+unsafe fn capture_ui_finish_detach_body(_: *mut c_void) {
+    let outcome = std::panic::catch_unwind(|| unsafe {
         // Clear raw entry points before detaching any owning hierarchy.
         let window = WINDOW.swap(0, Ordering::AcqRel) as Id;
-        let controller = HOSTING_CONTROLLER.swap(0, Ordering::AcqRel) as Id;
+        let original = CAPTURE_INITIAL_CONTROLLER.swap(0, Ordering::AcqRel) as Id;
         let button = REQUEST_BUTTON.swap(0, Ordering::AcqRel) as Id;
         let delegate = DELEGATE.swap(0, Ordering::AcqRel) as Id;
         assert!(
-            !window.is_null() && !controller.is_null() && !button.is_null() && !delegate.is_null()
+            !window.is_null() && !original.is_null() && !button.is_null() && !delegate.is_null()
         );
-        assert!(CAPTURE_INITIAL_CONTROLLER.load(Ordering::Acquire) == 0);
+        assert!(HOSTING_CONTROLLER.load(Ordering::Acquire) == 0);
+        assert!(CAPTURE_ROOT_RESTORATIONS.load(Ordering::Acquire) == 1);
+        assert!(CAPTURE_RESTORED_VIEW_ATTACHED.load(Ordering::Acquire));
+        assert!(CAPTURE_HOSTING_RELEASES.load(Ordering::Acquire) == 1);
         send_id(window, c"setRootViewController:", std::ptr::null_mut());
         let hide: unsafe extern "C" fn(Id, Sel, bool) =
             std::mem::transmute(objc_msgSend as unsafe extern "C" fn(Id, Sel) -> usize);
         hide(window, sel_registerName(c"setHidden:".as_ptr()), true);
         send_void(button, c"removeFromSuperview");
-        swift_unknownObjectRelease(controller);
-        CAPTURE_HOSTING_RELEASES.fetch_add(1, Ordering::SeqCst);
+        objc_release(original); // initial alloc/init +1, after window releases it
+        CAPTURE_INITIAL_RELEASES.fetch_add(1, Ordering::SeqCst);
         swift_unknownObjectRelease(window);
         CAPTURE_WINDOW_RELEASES.fetch_add(1, Ordering::SeqCst);
         objc_release(delegate); // only our explicit launched() retain, not UIKit's owner
