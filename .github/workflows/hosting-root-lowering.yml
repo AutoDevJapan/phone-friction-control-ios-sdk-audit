@@ -1,0 +1,66 @@
+name: Manual Hosting root ownership inspection
+on:
+  workflow_dispatch:
+  push:
+    branches: [codex/ios-unpresented-hosting-lifetime]
+    paths:
+      - tools/CapturedRootReplacementLowering.swift
+      - .github/workflows/hosting-root-lowering.yml
+permissions:
+  contents: read
+jobs:
+  compiler:
+    runs-on: macos-15
+    timeout-minutes: 5
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v4
+      - name: Inspect the public root replacement ownership
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="$RUNNER_TEMP/hosting-root-lowering"
+          mkdir -p "$OUT"
+          finish() {
+            STATUS=$?
+            trap - EXIT
+            printf 'compiler_exit_status=%s\ncompile_only=true\nlinked=false\nruntime_calls=0\n' "$STATUS" > "$OUT/status.txt"
+            exit "$STATUS"
+          }
+          trap finish EXIT
+          xcodebuild -version > "$OUT/versions.txt"
+          xcrun swiftc --version >> "$OUT/versions.txt"
+          test "$(uname -m)" = arm64
+          grep -F 'Xcode 16.4' "$OUT/versions.txt"
+          grep -F 'Swift version 6.1.2' "$OUT/versions.txt"
+          SDK=$(xcrun --sdk iphonesimulator --show-sdk-path)
+          test "$(xcrun --sdk iphonesimulator --show-sdk-version)" = 18.5
+          printf 'sdk=18.5\ntarget=arm64-apple-ios18.5-simulator\nsource=%s\n' "$(git rev-parse HEAD)" > "$OUT/scope.txt"
+          cp tools/CapturedRootReplacementLowering.swift "$OUT/input.swift"
+          shasum -a 256 "$OUT/input.swift" > "$OUT/input-sha256.txt"
+          for PASS in silgen ir asm; do
+            case "$PASS" in
+              silgen) MODE=-emit-silgen; SUFFIX=sil ;;
+              ir) MODE=-emit-ir; SUFFIX=ll ;;
+              asm) MODE=-S; SUFFIX=s ;;
+            esac
+            perl -e 'alarm 60; exec @ARGV; die "exec failed\n"' xcrun swiftc \
+              -target arm64-apple-ios18.5-simulator -sdk "$SDK" -swift-version 6 \
+              -parse-as-library -module-name CapturedRootOwnership "$MODE" \
+              tools/CapturedRootReplacementLowering.swift -o "$OUT/root-replacement.$SUFFIX" \
+              > "$OUT/$PASS.stdout.txt" 2> "$OUT/$PASS.stderr.txt"
+            test -s "$OUT/root-replacement.$SUFFIX"
+          done
+          grep -F 'BindingV8constant' "$OUT/root-replacement.sil" > "$OUT/constant-declaration.txt"
+          grep -F 'UIHostingControllerC8rootViewxvs' "$OUT/root-replacement.sil" > "$OUT/root-setter-declaration.txt"
+          test -s "$OUT/constant-declaration.txt"
+          test -s "$OUT/root-setter-declaration.txt"
+          shasum -a 256 "$OUT/root-replacement.sil" "$OUT/root-replacement.ll" "$OUT/root-replacement.s" > "$OUT/output-sha256.txt"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hosting-root-ownership-lowering
+          path: ${{ runner.temp }}/hosting-root-lowering/
+          if-no-files-found: error
+          retention-days: 1
