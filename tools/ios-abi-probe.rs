@@ -4641,6 +4641,67 @@ mod ui_authorization_test {
 
     unsafe extern "C" fn choose_consent(test: Id, _: Sel) {
         unsafe {
+            #[cfg(ui_test_context_arc_trace)]
+            let admitted_pid = {
+                // The runner must be executing the test before the bounded
+                // debugger flight starts. Only this fresh runner's container
+                // receives the independently verified host PID.
+                let Some(home) = std::env::var_os("HOME") else {
+                    fail(test, c"ARC runner HOME unavailable");
+                    return;
+                };
+                let documents = std::path::PathBuf::from(home).join("Documents");
+                let admission = documents.join("captured-selection-trace-admission.txt");
+                let runner_pid = std::process::id();
+                let generation = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH).expect("runner clock").as_nanos();
+                let nonce = format!("{runner_pid}-{generation}");
+                if std::fs::create_dir_all(&documents).is_err() || admission.exists() {
+                    fail(test, c"ARC runner admission is not fresh");
+                    return;
+                }
+                let ready = documents.join("captured-selection-trace-runner-ready.txt");
+                let ready_text = format!("runner_pid={runner_pid}\nnonce={nonce}\n");
+                let created = std::fs::OpenOptions::new().write(true).create_new(true).open(ready)
+                    .and_then(|mut file| std::io::Write::write_all(&mut file, ready_text.as_bytes()));
+                if created.is_err() {
+                    fail(test, c"ARC runner readiness file is not fresh");
+                    return;
+                }
+                println!("XCTest context-trace: runner_ready_pid={runner_pid}; nonce={nonce}");
+                if std::io::Write::flush(&mut std::io::stdout()).is_err() {
+                    fail(test, c"ARC runner readiness output failed");
+                    return;
+                }
+                let started = std::time::Instant::now();
+                let mut observed = None;
+                while started.elapsed() < std::time::Duration::from_secs(60) {
+                    match std::fs::read_to_string(&admission) {
+                        Ok(text) => {
+                            let prefix = format!("runner_pid={runner_pid}\nnonce={nonce}\nhost_pid=");
+                            observed = text.strip_prefix(&prefix)
+                                .and_then(|tail| tail.strip_suffix('\n'))
+                                .and_then(|digits| digits.parse::<u32>().ok())
+                                .filter(|pid| *pid > 0 && text == format!("{prefix}{pid}\n"));
+                            break;
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                            std::thread::sleep(std::time::Duration::from_millis(50));
+                        }
+                        Err(_) => break,
+                    }
+                }
+                let Some(pid) = observed else {
+                    fail(test, c"ARC debugger admission missing or invalid");
+                    return;
+                };
+                println!("XCTest context-trace: admitted_runner_pid={runner_pid}; nonce={nonce}; host_pid={pid}");
+                if std::io::Write::flush(&mut std::io::stdout()).is_err() {
+                    fail(test, c"ARC admission output failed");
+                    return;
+                }
+                pid
+            };
             let application_class = objc_getClass(c"XCUIApplication".as_ptr());
             if application_class.is_null() {
                 fail(test, c"Public XCUIApplication class missing");
@@ -4686,6 +4747,10 @@ mod ui_authorization_test {
                     fail(test, c"ARC diagnostic target PID unavailable");
                     return;
                 };
+                if pid != admitted_pid {
+                    fail(test, c"ARC diagnostic target generation changed after admission");
+                    return;
+                }
                 println!("XCTest context-trace: target_pid_before={pid}");
             }
             action(request_button.0, c"tap");
