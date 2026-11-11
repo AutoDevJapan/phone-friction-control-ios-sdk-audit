@@ -5187,8 +5187,13 @@ mod native_host {
                     let safe = if message.len() <= 160
                         && message.bytes().all(|b| b.is_ascii_alphanumeric() || b" ._:-".contains(&b))
                     { message } else { "construction guard failed" };
+                    #[cfg(selection_capture_owner_acceptance)]
+                    let construction_evidence =
+                        super::mutable_binding::selection_capture_construction_evidence();
+                    #[cfg(not(selection_capture_owner_acceptance))]
+                    let construction_evidence = String::new();
                     std::fs::write(documents.join("consent-selection-construction-error.txt"),
-                        format!("picker_constructed=false\nguard_error={safe}\n"))
+                        format!("picker_constructed=false\nguard_error={safe}\n{construction_evidence}"))
                         .expect("write bounded construction failure");
                     eprintln!(
                         "Consent Picker construction failed; pinned state retained until exit"

@@ -12,6 +12,29 @@ struct SelectionCaptureResources {
 }
 static SELECTION_CAPTURE_RESOURCES: AtomicPtr<SelectionCaptureResources> =
     AtomicPtr::new(std::ptr::null_mut());
+static SELECTION_CAPTURE_CONSTRUCTION_STAGE: AtomicUsize = AtomicUsize::new(0);
+static SELECTION_CAPTURE_CTOR_GETS_BEFORE: AtomicUsize = AtomicUsize::new(0);
+static SELECTION_CAPTURE_CTOR_GETS_AFTER: AtomicUsize = AtomicUsize::new(0);
+
+pub(super) fn selection_capture_construction_evidence() -> String {
+    let stage = match SELECTION_CAPTURE_CONSTRUCTION_STAGE.load(Ordering::Acquire) {
+        1 => "preflights",
+        2 => "context_installation",
+        3 => "semantic_reader_plans",
+        4 => "binding_constructor",
+        5 => "binding_constructor_returned",
+        6 => "binding_copy",
+        7 => "hosting_constructor",
+        8 => "hosting_returned",
+        _ => "not_started",
+    };
+    format!(
+        "captured_construction_stage={stage}\ncaptured_ctor_getter_calls_before={}\ncaptured_ctor_getter_calls_after={}\n{}",
+        SELECTION_CAPTURE_CTOR_GETS_BEFORE.load(Ordering::Acquire),
+        SELECTION_CAPTURE_CTOR_GETS_AFTER.load(Ordering::Acquire),
+        selection_capture_partial_evidence()
+    )
+}
 
 // Separate fresh Binding, Picker-value and unpresented-Hosting lifetimes.
 // The Hosting phase never attaches its controller or explicitly requests its
@@ -268,17 +291,22 @@ fn selection_capture_host() -> *mut c_void {
     // and stopping/joining the watchdog before freeing any referenced field.
     let resources: &'static SelectionCaptureResources = unsafe { &*resources };
     let proof: &'static Arc<Proof> = &resources.proof;
+    SELECTION_CAPTURE_CONSTRUCTION_STAGE.store(1, Ordering::Release);
     selection_lifetime_preflights(resources, category, init, page);
+    SELECTION_CAPTURE_CONSTRUCTION_STAGE.store(2, Ordering::Release);
     let mut stable = Value::allocate(&resources.selection, proof, false);
     stable.category(false, category);
     let installed = Box::new(Installed::install(stable, proof));
     let context = create_selection_capture(installed);
+    SELECTION_CAPTURE_CONSTRUCTION_STAGE.store(3, Ordering::Release);
     collect_selection_abi(page);
     initialize_category_token_counts(page);
     let mut binding = Value::allocate(&resources.binding, proof, true);
     let before_gets = proof.n(Count::ClosureGet);
+    SELECTION_CAPTURE_CTOR_GETS_BEFORE.store(before_gets, Ordering::Release);
     retain_selection_capture_inputs(context);
     proof.inc(Count::BindingInit);
+    SELECTION_CAPTURE_CONSTRUCTION_STAGE.store(4, Ordering::Release);
     unsafe {
         rust_selection_capture_binding_init(
             binding.ptr(),
@@ -290,9 +318,18 @@ fn selection_capture_host() -> *mut c_void {
         )
     };
     binding.initialized = true;
-    assert!(proof.n(Count::ClosureGet) > before_gets);
+    let after_gets = proof.n(Count::ClosureGet);
+    SELECTION_CAPTURE_CTOR_GETS_AFTER.store(after_gets, Ordering::Release);
+    SELECTION_CAPTURE_CONSTRUCTION_STAGE.store(5, Ordering::Release);
+    assert!(
+        after_gets > before_gets,
+        "Captured Binding constructor did not invoke getter"
+    );
+    SELECTION_CAPTURE_CONSTRUCTION_STAGE.store(6, Ordering::Release);
     preserve_selection_capture_binding(&binding);
+    SELECTION_CAPTURE_CONSTRUCTION_STAGE.store(7, Ordering::Release);
     let controller = resources.plan.host(&binding, proof, page);
+    SELECTION_CAPTURE_CONSTRUCTION_STAGE.store(8, Ordering::Release);
     drop(binding);
     assert!(proof.n(Count::Active) == 0);
     controller
