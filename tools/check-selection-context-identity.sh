@@ -18,13 +18,17 @@ test "$(one "$TRACE-owned-target.txt" simulator)" = "$SIM"
 test "$(one "$TRACE-owned-target.txt" bundle_id)" = "$BID"
 START=$(one "$TRACE-process-identity.txt" started)
 test -n "$START"
-test "$(cat "$TRACE-attached-start.txt")" = "$START"
 BIN=$(one "$TRACE-owned-target.txt" installed_binary)
 test -n "$BIN"
-test "$(cat "$TRACE-attached-command.txt")" = "$BIN"
 UUID=$(awk '/^UUID: / {print $2}' "$TRACE-image-uuid.txt")
 [[ "$UUID" =~ ^[A-Fa-f0-9-]{36}$ ]]
 if [ "${2:-}" = --attached ]; then
+  # LLDB's platform shell forwards arguments; redirection belongs inside this
+  # actual Bash process, never in the LLDB command line passed to ps.
+  LC_ALL=C ps -p "$PID" -o lstart= > "$TRACE-attached-start.txt"
+  ps -p "$PID" -o comm= > "$TRACE-attached-command.txt"
+  test "$(cat "$TRACE-attached-start.txt")" = "$START"
+  test "$(cat "$TRACE-attached-command.txt")" = "$BIN"
   grep -Eq "^Process $PID (stopped|is stopped)" "$TRACE.unsanitized"
   test "$(grep -F "$UUID" "$TRACE.unsanitized" | grep -Fc "$BIN")" = 1
   test "$(LC_ALL=C ps -p "$PID" -o lstart=)" = "$START"
@@ -34,6 +38,8 @@ if [ "${2:-}" = --attached ]; then
   touch "$TRACE.ready"
   exit 0
 fi
+test "$(cat "$TRACE-attached-start.txt")" = "$START"
+test "$(cat "$TRACE-attached-command.txt")" = "$BIN"
 test "$(grep -Ec '^XCTest context-trace: target_pid_before=[1-9][0-9]*$' "$OUT/xcode-ui-test.txt")" = 1
 test "$(grep -Ec '^XCTest context-trace: target_pid_before_close=[1-9][0-9]*$' "$OUT/xcode-ui-test.txt")" = 1
 test "$(sed -n 's/^XCTest context-trace: target_pid_before=//p' "$OUT/xcode-ui-test.txt")" = "$PID"

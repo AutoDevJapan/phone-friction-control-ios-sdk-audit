@@ -74,8 +74,6 @@ printf 'pid=%s\nstarted=%s\nsimulator=%s\nbundle_id=%s\n' "$PID" "$STARTED" "$SI
   printf 'process attach --pid %s\n' "$PID"
   printf 'process status\n'
   printf 'target modules list --uuid --fullpath authorization-center-probe\n'
-  printf 'platform shell LC_ALL=C ps -p %s -o lstart= > "%s"\n' "$PID" "$TRACE-attached-start.txt"
-  printf 'platform shell ps -p %s -o comm= > "%s"\n' "$PID" "$TRACE-attached-command.txt"
   printf 'platform shell touch "%s"\n' "$ATTACHED"
   # Three independently measured preflights precede the genuine UI context.
   # The bridge's sixth C argument x5 is that exact context; no heap scan occurs.
@@ -103,7 +101,7 @@ printf 'diagnostic_only=true\nmaximum_events=64\nmaximum_frames=12\nattach_limit
 # A separate process group bounds LLDB and any debugserver it creates. All
 # processes in this group belong to this exact diagnostic invocation.
 perl -MPOSIX -e 'POSIX::setsid() >= 0 or die "setsid failed\n"; exec @ARGV; die "exec failed\n"' \
-  xcrun lldb --no-lldbinit --batch -s "$COMMANDS" > "$RAW" 2>&1 &
+  xcrun lldb --no-lldbinit --batch -o "command source --stop-on-error true --stop-on-continue false \"$COMMANDS\"" > "$RAW" 2>&1 &
 LLDB_PID=$!
 (
   for ((WAIT=0; WAIT<60; WAIT++)); do
@@ -135,6 +133,9 @@ wait "$LLDB_PID" || LLDB_STATUS=$?
 kill -TERM -- "-$LLDB_PID" 2>/dev/null || true
 sleep 1
 kill -KILL -- "-$LLDB_PID" 2>/dev/null || true
+GROUP_REMAINING=0
+if kill -0 -- "-$LLDB_PID" 2>/dev/null; then GROUP_REMAINING=1; fi
+printf 'debugger_group_remaining=%s\n' "$GROUP_REMAINING" >> "$TRACE-status.txt"
 LLDB_PID=''
 kill "$WATCH_PID" 2>/dev/null || true
 wait "$WATCH_PID" 2>/dev/null || true
@@ -142,6 +143,7 @@ WATCH_PID=''
 printf 'lldb_exit=%s\n' "$LLDB_STATUS" >> "$TRACE-status.txt"
 test -f "$ATTACHED"
 test "$LLDB_STATUS" = 0
+test "$GROUP_REMAINING" = 0
 if grep -q '^trace_deadline=' "$TRACE-status.txt"; then exit 1; fi
 if grep -q '^trace_identity_changed=' "$TRACE-status.txt"; then exit 1; fi
 if grep -Eq '(^|\n)error:|error: evaluating condition|failed to evaluate' "$RAW"; then exit 1; fi
