@@ -59,6 +59,8 @@ perl -e 'alarm 10; exec @ARGV; die "exec failed\n"' xcrun lldb --version > "$TRA
 perl -e 'alarm 10; exec @ARGV; die "exec failed\n"' xcrun lldb --no-lldbinit --batch -o 'help process attach' -o 'help breakpoint set' > "$TRACE-help.txt" 2>&1
 grep -F -- '--pid' "$TRACE-help.txt"
 grep -F -- '--ignore-count' "$TRACE-help.txt"
+perl -e 'alarm 10; exec @ARGV; die "exec failed\n"' xcrun simctl help launch > "$TRACE-launch-help.txt" 2>&1
+grep -F -- '--wait-for-debugger' "$TRACE-launch-help.txt"
 shasum -a 256 "$APP/authorization-center-probe" > "$TRACE-binary-hash.txt"
 INSTALLED=$(xcrun simctl get_app_container "$SIM_ID" "$BID" app)
 INSTALLED_BIN="$INSTALLED/authorization-center-probe"
@@ -68,7 +70,12 @@ printf 'simulator=%s\nbundle_id=%s\ninstalled_binary=%s\n' "$SIM_ID" "$BID" "$IN
 xcrun dwarfdump --uuid "$INSTALLED_BIN" > "$TRACE-image-uuid.txt"
 UUID=$(awk '/^UUID: / {print $2}' "$TRACE-image-uuid.txt")
 [[ "$UUID" =~ ^[A-Fa-f0-9-]{36}$ ]]
-perl -e 'alarm 30; exec @ARGV; die "exec failed\n"' xcrun simctl launch "$SIM_ID" "$BID" > "$TRACE-launch.txt" 2>&1
+# Start this same owned generation suspended, before UIKit runs. The debugger
+# sets the fourth-init breakpoint before its first admitted continue.
+LAUNCH_STATUS=0
+perl -e 'alarm 30; exec @ARGV; die "exec failed\n"' xcrun simctl launch --wait-for-debugger "$SIM_ID" "$BID" > "$TRACE-launch.txt" 2>&1 || LAUNCH_STATUS=$?
+printf 'launch_wait_for_debugger=true\nlaunch_status=%s\n' "$LAUNCH_STATUS" >> "$TRACE-status.txt"
+test "$LAUNCH_STATUS" = 0
 PID=$(awk -v b="$BID" 'index($0,b ": ")==1 {p=substr($0,length(b)+3);if(p~/^[1-9][0-9]*$/)print p}' "$TRACE-launch.txt")
 [[ "$PID" =~ ^[1-9][0-9]*$ ]]
 xcrun simctl spawn "$SIM_ID" launchctl list > "$TRACE-owned-processes.txt"
