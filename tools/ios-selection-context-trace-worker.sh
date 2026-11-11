@@ -137,14 +137,15 @@ test "$LLDB_STATUS" = 0
 no_errors
 grep -F "$UUID" "$RAW" | sed -E 's/0x[0-9a-fA-F]+/[address]/g' > "$TRACE-attached-image.txt"
 test "$(grep -Fc "$INSTALLED_BIN" "$TRACE-attached-image.txt")" = 1
-test "$(grep -Ec '^captured_context_identity_set=1$' "$RAW")" = 1
-test "$(grep -Ec '^context_trace_reached_exit=1$' "$RAW")" = 1
+test "$(grep -Ec '^captured_context_identity_set=1[[:space:]]*$' "$RAW")" = 1
+test "$(grep -Ec '^context_trace_reached_exit=1[[:space:]]*$' "$RAW")" = 1
 grep -Eq '^ *frame #0: .* (exit|_exit|abort)( |$)' "$RAW"
 EVENTS=$(grep -Ec '^ *frame #0: .* (swift_retain|swift_release|swift_retain_n|swift_release_n)( |$)' "$RAW" || true)
 [[ "$EVENTS" =~ ^[0-9]+$ ]]
 test "$EVENTS" -ge 2
 test "$EVENTS" -le 64
-MATCHED=$(sed -nE 's/^\(unsigned long\) \$audit_events = ([0-9]+)$/\1/p' "$RAW" | tail -n 1)
+test "$(grep -Ec '^\(unsigned long\) \$audit_events = [0-9]+[[:space:]]*$' "$RAW")" = 1
+MATCHED=$(sed -nE 's/^\(unsigned long\) \$audit_events = ([0-9]+)[[:space:]]*$/\1/p' "$RAW")
 test "$MATCHED" = "$EVENTS"
 grep -Eq '^ *frame #0: .* swift_retain(_n)?( |$)' "$RAW"
 grep -Eq '^ *frame #0: .* swift_release(_n)?( |$)' "$RAW"
