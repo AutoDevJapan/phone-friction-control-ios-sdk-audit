@@ -1441,6 +1441,8 @@ jobs:
             ${{ runner.temp }}/ios-sdk-audit/consent-ui.xcresult
             ${{ runner.temp }}/ios-sdk-audit/consent-selection-*.txt
             ${{ runner.temp }}/ios-sdk-audit/captured-selection-*.txt
+            ${{ runner.temp }}/ios-sdk-audit/captured-hosting-ownership-sil.txt
+            ${{ runner.temp }}/ios-sdk-audit/captured-hosting-allocator-convention.txt
             ${{ runner.temp }}/ios-sdk-audit/fixture-*.txt
             ${{ runner.temp }}/ios-sdk-audit/fixture-signed-entitlements.*
             ${{ runner.temp }}/ios-sdk-audit/consent-selection-*.png
