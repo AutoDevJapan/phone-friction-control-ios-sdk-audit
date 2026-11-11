@@ -53,7 +53,7 @@ await_marker() {
 send_continue() { CONTINUES=$((CONTINUES + 1)); printf 'continue\n' >&3; }
 test -x "$APP/authorization-center-probe"
 test ! -e "$FIFO"
-for MARKER in attached context-stopped configured exited ready; do test ! -e "$TRACE.$MARKER"; done
+for MARKER in attached context-stopped configured exited ready continue-admitted; do test ! -e "$TRACE.$MARKER"; done
 printf 'diagnostic_only=true\nmaximum_events=64\nmaximum_frames=12\nattach_limit_seconds=60\ntrace_limit_seconds=90\nproduct_drain_accepted=false\n' > "$TRACE-status.txt"
 perl -e 'alarm 10; exec @ARGV; die "exec failed\n"' xcrun lldb --version > "$TRACE-version.txt" 2>&1
 perl -e 'alarm 10; exec @ARGV; die "exec failed\n"' xcrun lldb --no-lldbinit --batch -o 'help process attach' -o 'help breakpoint set' > "$TRACE-help.txt" 2>&1
@@ -108,6 +108,9 @@ await_marker "$TRACE.attached"
 TRACE_STARTED=$(date +%s)
 no_errors
 # Real Bash admission: a failed identity check sends no continue/context command.
+bash tools/check-selection-context-identity.sh "$OUT" --attached
+await_marker "$TRACE.continue-admitted"
+test "$(cat "$TRACE.continue-admitted")" = "host_pid=$PID"
 bash tools/check-selection-context-identity.sh "$OUT" --attached
 send_continue
 await_marker "$TRACE.context-stopped"

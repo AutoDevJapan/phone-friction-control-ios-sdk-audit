@@ -79,6 +79,9 @@ printf 'runner_pid=%s\nnonce=%s\nhost_pid=%s\n' "$RUNNER_PID" "$NONCE" "$HOST_PI
 (set -o noclobber; cat "$TRACE-runner-admission.txt" > "$ADMISSION.pending")
 ln "$ADMISSION.pending" "$ADMISSION"
 rm "$ADMISSION.pending"
+printf 'host_pid=%s\n' "$HOST_PID" > "$TRACE.continue-admitted.pending"
+ln "$TRACE.continue-admitted.pending" "$TRACE.continue-admitted"
+rm "$TRACE.continue-admitted.pending"
 printf 'runner_identity_verified=true\nrunner_admission_published=true\n' >> "$TRACE-admission-status.txt"
 TRACE_STATUS=0
 wait "$TRACE_PID" || TRACE_STATUS=$?

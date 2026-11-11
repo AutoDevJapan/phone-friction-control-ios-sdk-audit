@@ -1055,7 +1055,29 @@ jobs:
           OUT="$RUNNER_TEMP/ios-sdk-audit"
           TRACE_PID=''
           UI_TEST_PID=''
+          UI_TEST_GROUP=false
+          UI_TEST_GROUP_PID=''
           HOST_LOG_PID=''
+          stop_owned_ui() {
+            if [ -n "$UI_TEST_GROUP_PID" ]; then
+              kill -TERM -- "-$UI_TEST_GROUP_PID" 2>/dev/null || true
+              GRACE=$SECONDS
+              while kill -0 -- "-$UI_TEST_GROUP_PID" 2>/dev/null && [ "$((SECONDS-GRACE))" -lt 1 ]; do sleep 0.1; done
+              kill -KILL -- "-$UI_TEST_GROUP_PID" 2>/dev/null || true
+            elif [ -n "$UI_TEST_PID" ]; then kill "$UI_TEST_PID" 2>/dev/null || true; fi
+            if [ -n "$UI_TEST_PID" ]; then
+              GRACE=$SECONDS
+              while kill -0 "$UI_TEST_PID" 2>/dev/null && [ "$((SECONDS-GRACE))" -lt 2 ]; do sleep 0.1; done
+              if kill -0 "$UI_TEST_PID" 2>/dev/null; then return 1; fi
+              wait "$UI_TEST_PID" 2>/dev/null || true
+              UI_TEST_PID=''
+            fi
+            if [ -n "$UI_TEST_GROUP_PID" ]; then
+              GRACE=$SECONDS
+              while kill -0 -- "-$UI_TEST_GROUP_PID" 2>/dev/null && [ "$((SECONDS-GRACE))" -lt 2 ]; do sleep 0.1; done
+              if kill -0 -- "-$UI_TEST_GROUP_PID" 2>/dev/null; then return 1; fi
+            fi
+          }
           cleanup_observers() {
             STATUS=$?
             trap - EXIT
@@ -1064,10 +1086,7 @@ jobs:
               kill "$TRACE_PID" 2>/dev/null || true
               wait "$TRACE_PID" 2>/dev/null || true
             fi
-            if [ -n "$UI_TEST_PID" ]; then
-              kill "$UI_TEST_PID" 2>/dev/null || true
-              wait "$UI_TEST_PID" 2>/dev/null || true
-            fi
+            if ! stop_owned_ui; then STATUS=1; fi
             exit "$STATUS"
           }
           trap cleanup_observers EXIT
@@ -1140,8 +1159,15 @@ jobs:
           # never retain framework debug messages or selected application names.
           xcrun simctl spawn "$SIM_ID" log stream --style compact --predicate 'process == "authorization-center-probe" AND (eventMessage CONTAINS "panicked at" OR eventMessage CONTAINS "prefix changed" OR eventMessage CONTAINS "Selection snapshot setters=" OR eventMessage CONTAINS "timed out")' > "$OUT/consent-selection-host-runtime.txt" 2>&1 &
           HOST_LOG_PID=$!
-          xcodebuild -project "$XCODE_ROOT/Probe.xcodeproj" -scheme Probe -configuration Debug -sdk iphonesimulator -destination "id=$SIM_ID" -parallel-testing-enabled NO -test-timeouts-enabled YES -default-test-execution-time-allowance "$TEST_SECONDS" -maximum-test-execution-time-allowance "$TEST_SECONDS" -resultBundlePath "$OUT/consent-ui.xcresult" SYMROOT="$OUT/xcode-products" OBJROOT="$RUNNER_TEMP/xcode-objects" test-without-building > "$OUT/xcode-ui-test.txt" 2>&1 &
+          UI_COMMAND=(xcodebuild -project "$XCODE_ROOT/Probe.xcodeproj" -scheme Probe -configuration Debug -sdk iphonesimulator -destination "id=$SIM_ID" -parallel-testing-enabled NO -test-timeouts-enabled YES -default-test-execution-time-allowance "$TEST_SECONDS" -maximum-test-execution-time-allowance "$TEST_SECONDS" -resultBundlePath "$OUT/consent-ui.xcresult" SYMROOT="$OUT/xcode-products" OBJROOT="$RUNNER_TEMP/xcode-objects" test-without-building)
+          if [ '${{ inputs.selection_context_arc_trace }}' = true ]; then
+            UI_COMMAND=(perl -MPOSIX -e 'POSIX::setsid() >= 0 or die "setsid failed\n"; exec @ARGV; die "exec failed\n"' "${UI_COMMAND[@]}")
+            UI_TEST_GROUP=true
+          fi
+          UI_PROCESS_STARTED=$SECONDS
+          "${UI_COMMAND[@]}" > "$OUT/xcode-ui-test.txt" 2>&1 &
           UI_TEST_PID=$!
+          if [ "$UI_TEST_GROUP" = true ]; then UI_TEST_GROUP_PID=$UI_TEST_PID; fi
           if [ '${{ inputs.selection_context_arc_trace }}' = true ]; then
             printf '%s\n' "$UI_TEST_PID" > "$OUT/captured-selection-context-xctest-process.txt"
             # Only an executing test method can publish the fresh runner
@@ -1150,13 +1176,42 @@ jobs:
             TRACE_PID=$!
           fi
           UI_TEST_STATUS=0
-          wait "$UI_TEST_PID" || UI_TEST_STATUS=$?
+          if [ '${{ inputs.selection_context_arc_trace }}' = true ]; then
+            while kill -0 "$UI_TEST_PID" 2>/dev/null; do
+              if [ "$((SECONDS-UI_PROCESS_STARTED))" -ge 180 ]; then
+                UI_TEST_STATUS=124
+                printf 'xctest_process_deadline=true\n' >> "$OUT/captured-selection-context-admission-status.txt"
+                stop_owned_ui || true
+                break
+              fi
+              if [ -n "$TRACE_PID" ] && ! kill -0 "$TRACE_PID" 2>/dev/null; then
+                TRACE_EARLY_STATUS=0
+                wait "$TRACE_PID" || TRACE_EARLY_STATUS=$?
+                TRACE_PID=''
+                if [ "$TRACE_EARLY_STATUS" != 0 ]; then
+                  UI_TEST_STATUS=1
+                  stop_owned_ui || true
+                  break
+                fi
+              fi
+              sleep 0.1
+            done
+          fi
+          if [ -n "$UI_TEST_PID" ] && [ "$UI_TEST_STATUS" = 0 ]; then
+            wait "$UI_TEST_PID" || UI_TEST_STATUS=$?
+            UI_TEST_PID=''
+          fi
+          if [ "$UI_TEST_GROUP" = true ]; then
+            if stop_owned_ui; then printf 'xctest_process_group_remaining=0\n' >> "$OUT/captured-selection-context-admission-status.txt";
+            else UI_TEST_STATUS=1; printf 'xctest_process_group_remaining=1\n' >> "$OUT/captured-selection-context-admission-status.txt"; fi
+          fi
           UI_TEST_PID=''
           printf 'xctest_exit=%s\n' "$UI_TEST_STATUS" > "$OUT/captured-selection-xctest-exit.txt"
           kill "$HOST_LOG_PID" 2>/dev/null || true
           wait "$HOST_LOG_PID" 2>/dev/null || true
           HOST_LOG_PID=''
           TRACE_STATUS=0
+          if [ "${TRACE_EARLY_STATUS:-0}" != 0 ]; then TRACE_STATUS=$TRACE_EARLY_STATUS; fi
           if [ -n "$TRACE_PID" ]; then
             wait "$TRACE_PID" || TRACE_STATUS=$?
             TRACE_PID=''
