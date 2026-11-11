@@ -1595,96 +1595,32 @@ jobs:
   app-simulator:
     if: ${{ inputs.app_simulator_launch && !inputs.selection_capture_owner_acceptance }}
     runs-on: macos-15
-    timeout-minutes: 30
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
         with:
           repository: AutoDevJapan/phone-friction-control
-          ref: 6dcc3e95880a7d2baac5bee018dd31f266acd16d
+          ref: e594c97ed49246991e08c0704904a756ea1c3c4e
           path: app
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.97.1
           targets: aarch64-apple-ios-sim
-      - name: Build, install and launch the product on the iOS Simulator
+      - name: Accept the fixed Runtime entry and app-created state across restart
         shell: bash
-        run: |
-          set -euo pipefail
-          export DEVELOPER_DIR=/Applications/Xcode_16.4.app/Contents/Developer
-          OUT="$RUNNER_TEMP/app-simulator"
-          mkdir -p "$OUT/Product.app"
-          xcodebuild -version > "$OUT/versions.txt"
-          rustc --version >> "$OUT/versions.txt"
-          git -C app rev-parse HEAD > "$OUT/product-source.txt"
-          printf 'patches_applied=false\ndiagnostic_logger=false\n' > "$OUT/product-scope.txt"
-          (cd app && cargo build --locked --release --bin phone-friction-control-preview --features desktop-preview --target aarch64-apple-ios-sim) > "$OUT/build-full.txt" 2>&1
-          tail -n 40 "$OUT/build-full.txt" > "$OUT/build.txt"
-          cp app/target/aarch64-apple-ios-sim/release/phone-friction-control-preview "$OUT/Product.app/product"
-          printf '<?xml version="1.0"?><plist version="1.0"><dict><key>CFBundleIdentifier</key><string>com.autodevjapan.phonefrictioncontrol.simulator</string><key>CFBundleName</key><string>PhoneFrictionControl</string><key>CFBundleExecutable</key><string>product</string><key>CFBundlePackageType</key><string>APPL</string><key>CFBundleVersion</key><string>1</string><key>CFBundleShortVersionString</key><string>0.1.0</string><key>MinimumOSVersion</key><string>18.5</string><key>UIDeviceFamily</key><array><integer>1</integer></array><key>UILaunchScreen</key><dict/><key>CFBundleSupportedPlatforms</key><array><string>iPhoneSimulator</string></array></dict></plist>\n' > "$OUT/Product.app/Info.plist"
-          codesign --sign - "$OUT/Product.app"
-          shasum -a 256 "$OUT/Product.app/product" app/Cargo.lock > "$OUT/build-hashes.txt"
-          tar -czf "$OUT/Product.app.tar.gz" -C "$OUT" Product.app
-          cp app/Cargo.lock "$OUT/effective-Cargo.lock"
-          shasum -a 256 "$OUT/Product.app.tar.gz" > "$OUT/archive-hash.txt"
-          RUNTIME=$(xcrun simctl list runtimes -j | jq -er '[.runtimes[] | select(.isAvailable and .version == "18.5" and (.identifier | contains("iOS"))) | .identifier] | if length == 1 then .[0] else error("runtime unavailable") end')
-          SIM_ID=$(xcrun simctl create product-audit com.apple.CoreSimulator.SimDeviceType.iPhone-15 "$RUNTIME")
-          trap 'xcrun simctl shutdown "$SIM_ID" || true; xcrun simctl delete "$SIM_ID" || true' EXIT
-          xcrun simctl boot "$SIM_ID"
-          xcrun simctl bootstatus "$SIM_ID" -b
-          xcrun simctl install "$SIM_ID" "$OUT/Product.app"
-          BID=com.autodevjapan.phonefrictioncontrol.simulator
-          export SIMCTL_CHILD_RUST_BACKTRACE=full
-          export SIMCTL_CHILD_RUST_LOG=warn,wgpu_core=debug,wgpu_hal=debug,eframe=debug,egui_wgpu=debug,winit=debug
-          LAUNCH_STATUS=0
-          perl -e 'alarm 45; exec @ARGV; die "exec failed\n"' xcrun simctl launch --stdout="$OUT/app-stdout.txt" --stderr="$OUT/app-stderr.txt" "$SIM_ID" "$BID" > "$OUT/launch.txt" 2>&1 || LAUNCH_STATUS=$?
-          printf 'launch_status=%s\n' "$LAUNCH_STATUS" > "$OUT/launch_status.txt"
-          PID=$(awk -v b="$BID" 'index($0,b ": ")==1 {p=substr($0,length(b)+3); if(p ~ /^[0-9]+$/) print p}' "$OUT/launch.txt")
-          printf 'pid=%s\n' "$PID" > "$OUT/pid.txt"
-          sleep 3
-          xcrun simctl io "$SIM_ID" screenshot "$OUT/early.png" || true
-          sleep 17
-          xcrun simctl spawn "$SIM_ID" launchctl list > "$OUT/launchctl.txt" 2>&1 || true
-          awk -v p="$PID" '$1 == p' "$OUT/launchctl.txt" > "$OUT/same_pid_alive.txt" || true
-          xcrun simctl io "$SIM_ID" screenshot "$OUT/first.png" || true
-          xcrun simctl spawn "$SIM_ID" log show --last 3m --style compact --info --debug --predicate 'process == "product" OR eventMessage CONTAINS "phonefrictioncontrol" OR process == "ReportCrash"' > "$OUT/log-full.txt" 2>&1 || true
-          tail -n 80 "$OUT/log-full.txt" > "$OUT/log.txt"
-          grep -iE 'exit|terminat|abort|crash|panic|signal|wgpu|adapter|jetsam' "$OUT/log-full.txt" | tail -n 60 > "$OUT/log-exit.txt" || true
-          find ~/Library/Logs/DiagnosticReports -name 'product*' -maxdepth 1 2>/dev/null | head -n 3 > "$OUT/crash.txt" || true
-          test "$LAUNCH_STATUS" = 0
-          [[ "$PID" =~ ^[0-9]+$ ]]
-          test "$(wc -l < "$OUT/same_pid_alive.txt" | tr -d ' ')" = 1
-          test -s "$OUT/first.png"
-          printf 'launch_succeeded=true\nsame_pid_after_20_seconds=true\nproduct_ui_visual_review=pending\n' > "$OUT/launch-result.txt"
-          (cd app && cargo test --locked --release --no-run --lib --features desktop-preview --target aarch64-apple-ios-sim --message-format=json) > "$OUT/constructor-build.json" 2> "$OUT/constructor-build.txt"
-          TEST_EXE=$(jq -ser '[.[] | select(.reason == "compiler-artifact" and .profile.test == true and .target.name == "phone_friction_control") | .executable | select(. != null)] | unique | if length == 1 then .[0] else error("test executable unavailable") end' "$OUT/constructor-build.json")
-          mkdir -p "$OUT/ConstructorTests.app"
-          cp "$TEST_EXE" "$OUT/ConstructorTests.app/constructor-tests"
-          cp "$OUT/Product.app/Info.plist" "$OUT/ConstructorTests.app/Info.plist"
-          plutil -replace CFBundleIdentifier -string com.autodevjapan.phonefrictioncontrol.constructor-tests "$OUT/ConstructorTests.app/Info.plist"
-          plutil -replace CFBundleExecutable -string constructor-tests "$OUT/ConstructorTests.app/Info.plist"
-          codesign --sign - "$OUT/ConstructorTests.app"
-          shasum -a 256 "$OUT/ConstructorTests.app/constructor-tests" > "$OUT/constructor-binary-hash.txt"
-          xcrun simctl install "$SIM_ID" "$OUT/ConstructorTests.app"
-          CONSTRUCTOR_STATUS=0
-          perl -e 'alarm 60; exec @ARGV; die "exec failed\n"' xcrun simctl launch --console "$SIM_ID" com.autodevjapan.phonefrictioncontrol.constructor-tests runtime_constructor --nocapture --test-threads=1 > "$OUT/constructor-result.txt" 2>&1 || CONSTRUCTOR_STATUS=$?
-          printf 'constructor_status=%s\n' "$CONSTRUCTOR_STATUS" > "$OUT/constructor-status.txt"
-          test "$CONSTRUCTOR_STATUS" = 0
-          grep -F 'test result: ok. 2 passed; 0 failed;' "$OUT/constructor-result.txt"
-          RELOAD_STATUS=0
-          perl -e 'alarm 60; exec @ARGV; die "exec failed\n"' xcrun simctl launch --console "$SIM_ID" com.autodevjapan.phonefrictioncontrol.constructor-tests reload_after_read_error --nocapture --test-threads=1 > "$OUT/reload-result.txt" 2>&1 || RELOAD_STATUS=$?
-          printf 'reload_status=%s\n' "$RELOAD_STATUS" > "$OUT/reload-status.txt"
-          test "$RELOAD_STATUS" = 0
-          grep -F 'test result: ok. 3 passed; 0 failed;' "$OUT/reload-result.txt"
+        run: bash tools/ios-product-runtime-acceptance.sh
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: product-simulator-launch
+          name: product-runtime-entry-acceptance
           path: |
             ${{ runner.temp }}/app-simulator/*.txt
             ${{ runner.temp }}/app-simulator/*.png
             ${{ runner.temp }}/app-simulator/*.tar.gz
             ${{ runner.temp }}/app-simulator/*.lock
+            ${{ runner.temp }}/app-simulator/ui-attachments/**
+            ${{ runner.temp }}/app-simulator/ui.xcresult
           retention-days: 3
           if-no-files-found: error
 
