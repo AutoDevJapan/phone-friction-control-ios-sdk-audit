@@ -1076,6 +1076,9 @@ jobs:
               GRACE=$SECONDS
               while kill -0 -- "-$UI_TEST_GROUP_PID" 2>/dev/null && [ "$((SECONDS-GRACE))" -lt 2 ]; do sleep 0.1; done
               if kill -0 -- "-$UI_TEST_GROUP_PID" 2>/dev/null; then return 1; fi
+              # This ownership has been drained; a later EXIT trap must not
+              # signal a numeric process-group ID that the OS may reuse.
+              UI_TEST_GROUP_PID=''
             fi
           }
           cleanup_observers() {
