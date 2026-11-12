@@ -1,0 +1,47 @@
+// Extract actual producer expressions; no SDK memory or synthetic token access.
+const fs = require('fs'), cp = require('child_process'), path = require('path'), os = require('os');
+const source = fs.readFileSync('tools/ios-abi-probe.rs', 'utf8');
+const bound = source.match(/let bound = ([\s\S]*?);\s*let count = bound/)[1];
+const condition = source.match(/if ([^\n]+) \{\n\s*\/\/ The public allocator/)[1];
+const cutoff = source.match(/if next < ([^\n]+) \{/)[1];
+const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ios-prefix-contract-'));
+try {
+const generated = `fn main(){
+for label in ["FamilyActivityPicker.init(selection:)","UIHostingController.init(rootView:) allocating","other","public hosting page continuation offset=24"] {
+ let bound=${bound};
+ for next in [0usize,24,127,128,512,4096] {
+  let first=bound.min(next);
+  let has_tail=(${condition}) && next < (${cutoff});
+  let tail=if has_tail {128usize}else{0};
+  if cfg!(picker_entry_probe){assert_eq!(bound,128);assert!(!has_tail);assert_eq!(first+tail,128usize.min(next));}
+  else {let ctor=label=="FamilyActivityPicker.init(selection:)"||label=="UIHostingController.init(rootView:) allocating";assert_eq!(bound,if ctor{512}else{128});assert!(first+tail<=512);}
+ }
+}}
+`;
+fs.writeFileSync(path.join(dir,'prefix-contract-extracted.rs'),generated);
+for(const mode of ['legacy','new']) {
+ const exe=path.join(dir,`prefix-contract-${mode}.exe`);
+ const args=['--edition','2024',path.join(dir,'prefix-contract-extracted.rs'),'-o',exe];
+ if(mode==='legacy')args.push('--cfg','picker_entry_probe');
+ const build=cp.spawnSync('rustc',args,{encoding:'utf8'});
+ if(build.status!==0)throw Error(build.stderr);
+ const run=cp.spawnSync(exe,[],{encoding:'utf8'});
+ if(run.status!==0)throw Error(run.stderr);
+ console.log(`${mode}: actual-source expressions/4 labels/6 page boundaries PASS`);
+}
+const mainWorkflow=cp.execFileSync('git',['show','origin/main:.github/workflows/ios-sdk-audit.yml'],{encoding:'utf8'});
+function legacyConsumer(w) {
+ const start=w.indexOf('RESULTS="$OUT/picker-hosting-results.txt"');
+ if(start<0)return false;
+ const tail=w.slice(start);
+ const expected=tail.match(/for EXPECTED in ([^\n]+); do/);
+ return !!expected && expected[1].split(/\s+/).includes('entry_prefix_max_bytes=128');
+}
+if(!legacyConsumer(mainWorkflow))throw Error('legacy Picker consumer contract missing');
+const consumerStart=mainWorkflow.indexOf('RESULTS="$OUT/picker-hosting-results.txt"');
+const mutated=mainWorkflow.slice(0,consumerStart)+mainWorkflow.slice(consumerStart).replace('entry_prefix_max_bytes=128','entry_prefix_max_bytes=512');
+if(legacyConsumer(mutated))throw Error('wrong Picker consumer accepted unrelated layout128');
+if(!source.includes('"entry_prefix_max_bytes=128"'))throw Error('legacy declaration mismatch');
+console.log('main consumer128 / producer128 / legacy no continuation verified; no Apple runtime');
+
+} finally { fs.rmSync(dir, {recursive:true}); }
