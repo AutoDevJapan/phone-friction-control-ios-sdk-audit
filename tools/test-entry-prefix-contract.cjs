@@ -1,10 +1,11 @@
 // Extract actual producer expressions; no SDK memory or synthetic token access.
-const fs = require('fs'), cp = require('child_process'), path = require('path');
+const fs = require('fs'), cp = require('child_process'), path = require('path'), os = require('os');
 const source = fs.readFileSync('tools/ios-abi-probe.rs', 'utf8');
 const bound = source.match(/let bound = ([\s\S]*?);\s*let count = bound/)[1];
 const condition = source.match(/if ([^\n]+) \{\n\s*\/\/ The public allocator/)[1];
 const cutoff = source.match(/if next < ([^\n]+) \{/)[1];
-const dir = '.godd/reviews/context-arc-trace';
+const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ios-prefix-contract-'));
+try {
 const generated = `fn main(){
 for label in ["FamilyActivityPicker.init(selection:)","UIHostingController.init(rootView:) allocating","other","public hosting page continuation offset=24"] {
  let bound=${bound};
@@ -32,3 +33,5 @@ const mainWorkflow=cp.execFileSync('git',['show','origin/main:.github/workflows/
 if(!mainWorkflow.includes('entry_prefix_max_bytes=128'))throw Error('legacy consumer contract missing');
 if(!source.includes('"entry_prefix_max_bytes=128"'))throw Error('legacy declaration mismatch');
 console.log('main consumer128 / producer128 / legacy no continuation verified; no Apple runtime');
+
+} finally { fs.rmSync(dir, {recursive:true}); }
