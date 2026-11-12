@@ -30,7 +30,17 @@ for(const mode of ['legacy','new']) {
  console.log(`${mode}: actual-source expressions/4 labels/6 page boundaries PASS`);
 }
 const mainWorkflow=cp.execFileSync('git',['show','origin/main:.github/workflows/ios-sdk-audit.yml'],{encoding:'utf8'});
-if(!mainWorkflow.includes('entry_prefix_max_bytes=128'))throw Error('legacy consumer contract missing');
+function legacyConsumer(w) {
+ const start=w.indexOf('RESULTS="$OUT/picker-hosting-results.txt"');
+ if(start<0)return false;
+ const tail=w.slice(start);
+ const expected=tail.match(/for EXPECTED in ([^\n]+); do/);
+ return !!expected && expected[1].split(/\s+/).includes('entry_prefix_max_bytes=128');
+}
+if(!legacyConsumer(mainWorkflow))throw Error('legacy Picker consumer contract missing');
+const consumerStart=mainWorkflow.indexOf('RESULTS="$OUT/picker-hosting-results.txt"');
+const mutated=mainWorkflow.slice(0,consumerStart)+mainWorkflow.slice(consumerStart).replace('entry_prefix_max_bytes=128','entry_prefix_max_bytes=512');
+if(legacyConsumer(mutated))throw Error('wrong Picker consumer accepted unrelated layout128');
 if(!source.includes('"entry_prefix_max_bytes=128"'))throw Error('legacy declaration mismatch');
 console.log('main consumer128 / producer128 / legacy no continuation verified; no Apple runtime');
 
