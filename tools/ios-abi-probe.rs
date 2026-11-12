@@ -754,8 +754,8 @@ mod selection_layout {
         // SDK 18.5 delays the Picker's owned Binding copy past its first
         // 128 bytes. Capture a bounded, page-local public constructor body
         // for review; other entries retain the original 128-byte bound.
-        let bound = if label == "FamilyActivityPicker.init(selection:)"
-            || label == "UIHostingController.init(rootView:) allocating" { 512 } else { 128 };
+        let bound = if !cfg!(picker_entry_probe) && (label == "FamilyActivityPicker.init(selection:)"
+            || label == "UIHostingController.init(rootView:) allocating") { 512 } else { 128 };
         let count = bound.min(page_remaining(pointer, page));
         let bytes = unsafe { std::slice::from_raw_parts(pointer.cast::<u8>(), count) };
         print!("{scope} entry bytes: {label}; length={count}; hex=");
@@ -1165,7 +1165,7 @@ mod picker_entry {
                 // on SDK18.5. Inspect the next page separately, retaining the
                 // original per-read page bound and the public-symbol origin.
                 let next = page - entry.addr() % page;
-                if next < 512 {
+                if next < if cfg!(picker_entry_probe) { 128 } else { 512 } {
                     let tail = entry.cast::<u8>().wrapping_add(next).cast::<c_void>();
                     let mut head_info = DlInfo { filename: std::ptr::null(), base: std::ptr::null(), symbol_name: std::ptr::null(), symbol_address: std::ptr::null() };
                     let mut tail_info = DlInfo { filename: std::ptr::null(), base: std::ptr::null(), symbol_name: std::ptr::null(), symbol_address: std::ptr::null() };
@@ -1203,7 +1203,7 @@ mod picker_entry {
             "status_getter_calls=0",
             "private_api_calls=0",
             "private_api_reads=0",
-            "entry_prefix_max_bytes=512",
+            "entry_prefix_max_bytes=128",
             "entry_reads_page_bounded=true",
             "direct_helper_max_depth=1",
             "metadata_inspection_verified=true",
