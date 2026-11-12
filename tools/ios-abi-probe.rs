@@ -1160,7 +1160,7 @@ mod picker_entry {
         ] {
             let entry = resolve(symbol);
             prefix_bytes("Picker/hosting", label, entry, page);
-            if label == "UIHostingController.init(rootView:) allocating" {
+            if !cfg!(picker_entry_probe) && label == "UIHostingController.init(rootView:) allocating" {
                 // The public allocator starts 24 bytes before a page boundary
                 // on SDK18.5. Inspect the next page separately, retaining the
                 // original per-read page bound and the public-symbol origin.
