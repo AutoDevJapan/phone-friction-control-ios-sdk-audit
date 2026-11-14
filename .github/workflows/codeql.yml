@@ -1,0 +1,97 @@
+name: CodeQL
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '38 3 * * 5'
+permissions:
+  contents: read
+jobs:
+  interpreted:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [javascript-typescript, actions]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+      - uses: github/codeql-action/analyze@v4
+        with:
+          category: /language:${{ matrix.language }}
+  swift:
+    name: Analyze (swift)
+    runs-on: macos-15
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify the pinned compiler and SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="$RUNNER_TEMP/codeql-swift-build"
+          mkdir -p "$OUT"
+          git rev-parse HEAD > "$OUT/source.txt"
+          xcodebuild -version > "$OUT/versions.txt"
+          xcrun swiftc --version >> "$OUT/versions.txt"
+          grep -F 'Swift version 6.1.2' "$OUT/versions.txt"
+          xcrun --sdk iphonesimulator --show-sdk-version > "$OUT/sdk-version.txt"
+          test "$(cat "$OUT/sdk-version.txt")" = 18.5
+          printf 'linked=false\nruntime_executed=false\n' > "$OUT/scope.txt"
+      - uses: github/codeql-action/init@v4
+        with:
+          languages: swift
+          build-mode: manual
+      - name: Compile the tracked SDK inspection sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="$RUNNER_TEMP/codeql-swift-build"
+          SDK=$(xcrun --sdk iphonesimulator --show-sdk-path)
+          SOURCES=()
+          while IFS= read -r -d '' source; do SOURCES+=("$source"); done < <(git ls-files -z -- '*.swift')
+          test "${#SOURCES[@]}" -gt 0
+          shasum -a 256 "${SOURCES[@]}" > "$OUT/inputs-sha256.txt"
+          COMMAND=(xcrun swiftc -target arm64-apple-ios18.5-simulator -sdk "$SDK"
+            -swift-version 6 -parse-as-library -module-name CodeQLSDKInputs
+            -whole-module-optimization -emit-object "${SOURCES[@]}" -o "$OUT/inspection.o")
+          printf '%s\0' "${COMMAND[@]}" > "$OUT/compile-argv.nul"
+          printf '%q ' "${COMMAND[@]}" > "$OUT/compile-command.txt"
+          printf '\n' >> "$OUT/compile-command.txt"
+          status=0
+          perl -e 'alarm 60; exec @ARGV; die "exec failed\n"' "${COMMAND[@]}" \
+            > "$OUT/compile.stdout.txt" 2> "$OUT/compile.stderr.txt" || status=$?
+          printf 'status=%s\nlimit_seconds=60\n' "$status" > "$OUT/compile-status.txt"
+          test "$status" = 0
+          test -s "$OUT/inspection.o"
+      - uses: github/codeql-action/analyze@v4
+        with:
+          category: /language:swift
+      - name: Preserve compiler evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: codeql-swift-build-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/codeql-swift-build/
+          if-no-files-found: warn
+          retention-days: 3
