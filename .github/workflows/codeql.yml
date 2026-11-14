@@ -53,10 +53,19 @@ jobs:
           mkdir -p "$OUT"
           git rev-parse HEAD > "$OUT/source.txt"
           xcodebuild -version > "$OUT/versions.txt"
-          xcrun swiftc --version >> "$OUT/versions.txt"
+          SWIFTC=$(xcrun --find swiftc)
+          test -x "$SWIFTC"
+          case "$SWIFTC" in
+            "$DEVELOPER_DIR"/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc) ;;
+            *) exit 1 ;;
+          esac
+          printf '%s\n' "$SWIFTC" > "$OUT/compiler-path.txt"
+          shasum -a 256 "$SWIFTC" > "$OUT/compiler-sha256.txt"
+          "$SWIFTC" --version >> "$OUT/versions.txt"
           grep -F 'Swift version 6.1.2' "$OUT/versions.txt"
           xcrun --sdk iphonesimulator --show-sdk-version > "$OUT/sdk-version.txt"
           test "$(cat "$OUT/sdk-version.txt")" = 18.5
+          xcrun --sdk iphonesimulator --show-sdk-path > "$OUT/sdk-path.txt"
           printf 'linked=false\nruntime_executed=false\n' > "$OUT/scope.txt"
       - uses: github/codeql-action/init@v4
         with:
@@ -67,21 +76,26 @@ jobs:
         run: |
           set -euo pipefail
           OUT="$RUNNER_TEMP/codeql-swift-build"
-          SDK=$(xcrun --sdk iphonesimulator --show-sdk-path)
+          SWIFTC=$(cat "$OUT/compiler-path.txt")
+          SDK=$(cat "$OUT/sdk-path.txt")
+          shasum -a 256 -c "$OUT/compiler-sha256.txt"
           SOURCES=()
           while IFS= read -r -d '' source; do SOURCES+=("$source"); done < <(git ls-files -z -- '*.swift')
           test "${#SOURCES[@]}" -gt 0
           shasum -a 256 "${SOURCES[@]}" > "$OUT/inputs-sha256.txt"
-          COMMAND=(xcrun swiftc -target arm64-apple-ios18.5-simulator -sdk "$SDK"
+          COMMAND=("$SWIFTC" -v -target arm64-apple-ios18.5-simulator -sdk "$SDK"
             -swift-version 6 -parse-as-library -module-name CodeQLSDKInputs
             -whole-module-optimization -emit-object "${SOURCES[@]}" -o "$OUT/inspection.o")
           printf '%s\0' "${COMMAND[@]}" > "$OUT/compile-argv.nul"
           printf '%q ' "${COMMAND[@]}" > "$OUT/compile-command.txt"
           printf '\n' >> "$OUT/compile-command.txt"
+          date -u '+started_utc=%Y-%m-%dT%H:%M:%SZ' > "$OUT/compile-timing.txt"
           status=0
           perl -e 'alarm 60; exec @ARGV; die "exec failed\n"' "${COMMAND[@]}" \
             > "$OUT/compile.stdout.txt" 2> "$OUT/compile.stderr.txt" || status=$?
+          date -u '+finished_utc=%Y-%m-%dT%H:%M:%SZ' >> "$OUT/compile-timing.txt"
           printf 'status=%s\nlimit_seconds=60\n' "$status" > "$OUT/compile-status.txt"
+          cat "$OUT/compile-status.txt" "$OUT/compile.stderr.txt"
           test "$status" = 0
           test -s "$OUT/inspection.o"
       - uses: github/codeql-action/analyze@v4
@@ -92,6 +106,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: codeql-swift-build-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/codeql-swift-build/
+          path: |
+            ${{ runner.temp }}/codeql-swift-build/
+            ${{ runner.temp }}/codeql_databases/log/build-tracer.log
+            ${{ runner.temp }}/codeql_databases/swift/log/
+            ${{ runner.temp }}/codeql_databases/swift/diagnostic/extractors/swift/
           if-no-files-found: warn
           retention-days: 3
