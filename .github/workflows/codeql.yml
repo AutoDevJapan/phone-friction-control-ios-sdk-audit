@@ -68,10 +68,12 @@ jobs:
           xcrun --sdk iphonesimulator --show-sdk-path > "$OUT/sdk-path.txt"
           printf 'linked=false\nruntime_executed=false\n' > "$OUT/scope.txt"
       - uses: github/codeql-action/init@v4
+        id: codeql_init
         with:
           languages: swift
           build-mode: manual
       - name: Compile the tracked SDK inspection sources
+        id: compile
         shell: bash
         run: |
           set -euo pipefail
@@ -93,23 +95,166 @@ jobs:
           status=0
           perl -e 'alarm 60; exec @ARGV; die "exec failed\n"' "${COMMAND[@]}" \
             > "$OUT/compile.stdout.txt" 2> "$OUT/compile.stderr.txt" || status=$?
-          date -u '+finished_utc=%Y-%m-%dT%H:%M:%SZ' >> "$OUT/compile-timing.txt"
-          printf 'status=%s\nlimit_seconds=60\n' "$status" > "$OUT/compile-status.txt"
-          cat "$OUT/compile-status.txt" "$OUT/compile.stderr.txt"
+          date -u '+command_returned_utc=%Y-%m-%dT%H:%M:%SZ' >> "$OUT/compile-timing.txt"
+          collection=command-returned
+          if test "$status" != 0; then collection=unknown; fi
+          printf 'status=%s\nlimit_seconds=60\ncollection_state=%s\ndescendant_drain=unconfirmed\n' \
+            "$status" "$collection" > "$OUT/compile-status.txt"
+          cat "$OUT/compile-status.txt"
           test "$status" = 0
           test -s "$OUT/inspection.o"
       - uses: github/codeql-action/analyze@v4
+        id: codeql_analyze
         with:
           category: /language:swift
-      - name: Preserve compiler evidence
+      - name: Record bounded diagnostic metadata
+        id: evidence
         if: always()
+        timeout-minutes: 1
+        shell: pwsh
+        env:
+          EVIDENCE_INIT_OUTCOME: ${{ steps.codeql_init.outcome }}
+          EVIDENCE_COMPILE_OUTCOME: ${{ steps.compile.outcome }}
+          EVIDENCE_ANALYZE_OUTCOME: ${{ steps.codeql_analyze.outcome }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Evidence functions begin. Host controls use these exact functions.
+          function Get-EvidenceProbe {
+            param([string]$SourcePath, [string]$Role, [ref]$SampleText)
+            $row = [ordered]@{ role=$Role; presence='unknown'; kind='unknown'; observed_bytes=$null;
+              sampled_bytes=0; sample_sha256=$null; sample_limit=65536; read_state='not_read';
+              markers=@{ swift_version=$false; frontend_token=$false; error_token=$false } }
+            try { $item = Get-Item -LiteralPath $SourcePath -Force -ErrorAction Stop }
+            catch {
+              if ($_.Exception -is [System.Management.Automation.ItemNotFoundException]) { $row.presence='missing' }
+              return [pscustomobject]$row
+            }
+            $row.presence='present'
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { $row.kind='link_not_read'; return [pscustomobject]$row }
+            if ($item.PSIsContainer) { $row.kind='directory'; return [pscustomobject]$row }
+            $row.kind='file'; $row.observed_bytes=$item.Length
+            $stream=$null
+            try {
+              $stream=[IO.File]::Open($SourcePath,[IO.FileMode]::Open,[IO.FileAccess]::Read,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+              $buffer=[byte[]]::new(65536); $count=0
+              while ($count -lt $buffer.Length) {
+                $n=$stream.Read($buffer,$count,$buffer.Length-$count)
+                if ($n -eq 0) { break }; $count+=$n
+              }
+              $sample=[byte[]]::new($count); [Array]::Copy($buffer,$sample,$count)
+              $sha=[Security.Cryptography.SHA256]::Create()
+              try { $row.sample_sha256=[Convert]::ToHexString($sha.ComputeHash($sample)).ToLowerInvariant() }
+              finally { $sha.Dispose() }
+              $text=[Text.Encoding]::UTF8.GetString($sample)
+              $row.sampled_bytes=$count; $row.read_state='bounded_prefix_observed'
+              $row.markers.swift_version=$text.Contains('Swift version')
+              $row.markers.frontend_token=$text.Contains('-frontend')
+              $row.markers.error_token=$text.ToLowerInvariant().Contains('error:')
+              if ($PSBoundParameters.ContainsKey('SampleText')) { $SampleText.Value=$text }
+              [Array]::Clear($buffer,0,$buffer.Length); [Array]::Clear($sample,0,$sample.Length)
+            } catch { $row.read_state='read_unavailable' }
+            finally { if ($null -ne $stream) { $stream.Dispose() } }
+            return [pscustomobject]$row
+          }
+          function Export-CodeQLSwiftEvidence {
+            param([string]$BuildRoot,[string]$DatabaseRoot,[string]$OutFile,
+              [string]$InitOutcome,[string]$CompileOutcome,[string]$AnalyzeOutcome)
+            $outFull=[IO.Path]::GetFullPath($OutFile)
+            if ([IO.Path]::GetFileName($outFull) -ne 'evidence-manifest.json') { throw 'evidence_output_name' }
+            foreach ($sourceRoot in @($BuildRoot,$DatabaseRoot)) {
+              $prefix=[IO.Path]::GetFullPath($sourceRoot).TrimEnd([IO.Path]::DirectorySeparatorChar)+[IO.Path]::DirectorySeparatorChar
+              if ($outFull.StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase)) { throw 'evidence_output_inside_source' }
+            }
+            $statusText=$null
+            $statusProbe=Get-EvidenceProbe (Join-Path $BuildRoot 'compile-status.txt') 'compiler_status' ([ref]$statusText)
+            $status=$null
+            if ($null -ne $statusText -and $statusProbe.read_state -eq 'bounded_prefix_observed') {
+              $statusMatches=[regex]::Matches($statusText,'(?m)^status=(\d+)\r?$')
+              if ($statusMatches.Count -eq 1) {
+                $value=0
+                if ([int]::TryParse($statusMatches[0].Groups[1].Value,[ref]$value) -and $value -le 255) { $status=$value }
+              }
+            }
+            $statusText=$null
+            $validOutcomes=@('success','failure','skipped','cancelled')
+            if ($InitOutcome -notin $validOutcomes) { $InitOutcome='unknown' }
+            if ($CompileOutcome -notin $validOutcomes) { $CompileOutcome='unknown' }
+            if ($AnalyzeOutcome -notin $validOutcomes) { $AnalyzeOutcome='unknown' }
+            $definitions=@(
+              @{ id='compiler_build'; path=$BuildRoot; template='$BUILD_ROOT'; directory=$true },
+              @{ id='build_tracer'; path=(Join-Path $DatabaseRoot 'log/build-tracer.log'); template='$DATABASE_ROOT/log/build-tracer.log'; directory=$false },
+              @{ id='swift_logs'; path=(Join-Path $DatabaseRoot 'swift/log'); template='$DATABASE_ROOT/swift/log'; directory=$true },
+              @{ id='swift_diagnostics'; path=(Join-Path $DatabaseRoot 'swift/diagnostic/extractors/swift'); template='$DATABASE_ROOT/swift/diagnostic/extractors/swift'; directory=$true })
+            $groups=[Collections.Generic.List[object]]::new()
+            foreach ($definition in $definitions) {
+              $rootProbe=Get-EvidenceProbe $definition.path $definition.id
+              $files=[Collections.Generic.List[object]]::new(); $truncated=$false; $enumeration='not_attempted'
+              $expectedKind=if ($definition.directory) { 'directory' } else { 'file' }
+              if ($rootProbe.presence -eq 'present' -and $rootProbe.kind -ne $expectedKind) { $enumeration='wrong_kind' }
+              elseif ($rootProbe.presence -eq 'present') {
+                if (-not $definition.directory) { $files.Add($rootProbe); $enumeration='single_file' }
+                elseif ($definition.id -eq 'compiler_build') {
+                  foreach ($name in @('source.txt','versions.txt','compiler-path.txt','compiler-sha256.txt','sdk-version.txt','sdk-path.txt','scope.txt','inputs-sha256.txt','compile-argv.nul','compile-command.txt','compile-timing.txt','compile-status.txt','compile.stdout.txt','compile.stderr.txt','inspection.o')) {
+                    $files.Add((Get-EvidenceProbe (Join-Path $BuildRoot $name) ($definition.id+'/'+$name)))
+                  }
+                  $enumeration='fixed_file_allowlist'
+                } elseif ($rootProbe.kind -eq 'directory') {
+                  try {
+                    $found=@(Get-ChildItem -LiteralPath $definition.path -File -Force -Recurse -Depth 2 -ErrorAction Stop | Select-Object -First 33)
+                    $truncated=$found.Count -gt 32
+                    foreach ($file in ($found | Select-Object -First 32)) {
+                      $probe=Get-EvidenceProbe $file.FullName ($definition.id+'/'+$files.Count)
+                      $pathBytes=[Text.Encoding]::UTF8.GetBytes([IO.Path]::GetRelativePath($definition.path,$file.FullName))
+                      $sha=[Security.Cryptography.SHA256]::Create()
+                      try { $pathHash=[Convert]::ToHexString($sha.ComputeHash($pathBytes)).ToLowerInvariant() } finally { $sha.Dispose() }
+                      $probe | Add-Member -NotePropertyName relative_path_sha256 -NotePropertyValue $pathHash
+                      $files.Add($probe)
+                    }
+                    $enumeration='depth_2_bounded_files'
+                  } catch { $enumeration='enumeration_unavailable' }
+                }
+              }
+              $missingReason=$null
+              if ($rootProbe.presence -eq 'missing') {
+                $missingReason=if ($InitOutcome -eq 'success') { 'not_observed_after_init' } else { 'not_observed_init_not_successful' }
+              }
+              $groups.Add([pscustomobject]@{ id=$definition.id; source_path_template=$definition.template;
+                source=$rootProbe; expected_kind=$expectedKind; missing_reason=$missingReason; enumeration=$enumeration;
+                files=$files.ToArray(); file_limit=32; traversal_depth_limit=2; enumeration_truncated=$truncated;
+                artifact_location=('evidence-manifest.json#/groups/'+$groups.Count) })
+            }
+            $kind=if ($status -eq 0 -and $CompileOutcome -eq 'success') { 'command_completion_observation' } else { 'partial_observation' }
+            $report=[ordered]@{ schemaVersion=1; domain='codeql-swift-evidence-metadata-v1';
+              recorded_at_utc=[DateTime]::UtcNow.ToString('o'); observer_version=$PSVersionTable.PSVersion.ToString();
+              evidence_class=$kind; compiler_command_status=$status; compiler_status_probe=$statusProbe;
+              stages=@{ init=$InitOutcome; compile=$CompileOutcome; analyze=$AnalyzeOutcome };
+              observation_boundary='before_action_post_hooks'; source_quiescence_proved=$false;
+              descendant_collection='not_verified'; diagnostic_bodies_exported=$false; prefix_samples_are_not_final_files=$true;
+              all_requested_group_paths_present=(@($groups.ToArray() | Where-Object { $_.source.presence -ne 'present' }).Count -eq 0);
+              all_requested_group_kinds_match=(@($groups.ToArray() | Where-Object { $_.source.kind -ne $_.expected_kind }).Count -eq 0);
+              export_completed=$true; artifact_members=@('evidence-manifest.json'); groups=$groups.ToArray() }
+            $directory=[IO.Path]::GetDirectoryName($outFull); [void][IO.Directory]::CreateDirectory($directory)
+            $temporary=Join-Path $directory ('.evidence-'+[guid]::NewGuid().ToString('N')+'.tmp')
+            try {
+              $bytes=[Text.UTF8Encoding]::new($false).GetBytes(($report | ConvertTo-Json -Depth 16))
+              $writer=[IO.FileStream]::new($temporary,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+              try { $writer.Write($bytes,0,$bytes.Length); $writer.Flush() } finally { $writer.Dispose() }
+              [IO.File]::Move($temporary,$outFull,$false)
+            } finally { if ([IO.File]::Exists($temporary)) { [IO.File]::Delete($temporary) } }
+            return [pscustomobject]$report
+          }
+          # Evidence functions end.
+          try {
+            $out=Join-Path $env:RUNNER_TEMP ('codeql-swift-export-'+$env:GITHUB_RUN_ID+'-'+$env:GITHUB_RUN_ATTEMPT+'/evidence-manifest.json')
+            $report=Export-CodeQLSwiftEvidence -BuildRoot (Join-Path $env:RUNNER_TEMP 'codeql-swift-build') -DatabaseRoot (Join-Path $env:RUNNER_TEMP 'codeql_databases') -OutFile $out -InitOutcome $env:EVIDENCE_INIT_OUTCOME -CompileOutcome $env:EVIDENCE_COMPILE_OUTCOME -AnalyzeOutcome $env:EVIDENCE_ANALYZE_OUTCOME
+            Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value 'ready=true' -Encoding utf8
+            Write-Output ('evidence_export=metadata-ready kind='+$report.evidence_class+' raw_bodies=false')
+          } catch { Write-Output 'evidence_export=failed'; exit 1 }
+      - name: Preserve diagnostic metadata
+        if: ${{ always() && steps.evidence.outputs.ready == 'true' }}
         uses: actions/upload-artifact@v4
         with:
           name: codeql-swift-build-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            ${{ runner.temp }}/codeql-swift-build/
-            ${{ runner.temp }}/codeql_databases/log/build-tracer.log
-            ${{ runner.temp }}/codeql_databases/swift/log/
-            ${{ runner.temp }}/codeql_databases/swift/diagnostic/extractors/swift/
-          if-no-files-found: warn
+          path: ${{ runner.temp }}/codeql-swift-export-${{ github.run_id }}-${{ github.run_attempt }}/evidence-manifest.json
+          if-no-files-found: error
           retention-days: 3
