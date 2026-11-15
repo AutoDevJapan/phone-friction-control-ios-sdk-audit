@@ -1,0 +1,98 @@
+{
+  "crates": [
+    {
+      "display_name": "sdk_abi_compile",
+      "root_module": "tools/ios-abi-probe.rs",
+      "edition": "2024",
+      "deps": [],
+      "is_workspace_member": true,
+      "target": "aarch64-apple-ios-sim",
+      "cfg": [],
+      "source": {
+        "include_dirs": [
+          "tools"
+        ],
+        "exclude_dirs": []
+      }
+    },
+    {
+      "display_name": "sdk_consent_owners",
+      "root_module": "tools/ios-abi-probe.rs",
+      "edition": "2024",
+      "deps": [],
+      "is_workspace_member": true,
+      "target": "aarch64-apple-ios-sim",
+      "cfg": [
+        "runtime_probe",
+        "uikit_host",
+        "xcode_host",
+        "ui_test_host",
+        "auth_request",
+        "authorization_status_consent_probe",
+        "selection_layout_probe",
+        "picker_value_probe",
+        "picker_hosting_probe",
+        "consent_selection_acceptance",
+        "category_token_count_acceptance",
+        "selection_capture_owner_acceptance"
+      ],
+      "source": {
+        "include_dirs": [
+          "tools"
+        ],
+        "exclude_dirs": []
+      }
+    },
+    {
+      "display_name": "sdk_selection_xctest",
+      "root_module": "tools/ios-abi-probe.rs",
+      "edition": "2024",
+      "deps": [],
+      "is_workspace_member": true,
+      "target": "aarch64-apple-ios-sim",
+      "cfg": [
+        "ui_test_bundle",
+        "ui_test_continue",
+        "ui_test_selection_acceptance"
+      ],
+      "source": {
+        "include_dirs": [
+          "tools"
+        ],
+        "exclude_dirs": []
+      }
+    },
+    {
+      "display_name": "selection_result_checker",
+      "root_module": "tools/check-captured-selection-result.rs",
+      "edition": "2024",
+      "deps": [],
+      "is_workspace_member": true,
+      "target": "x86_64-unknown-linux-gnu",
+      "cfg": [],
+      "source": {
+        "include_dirs": [
+          "tools"
+        ],
+        "exclude_dirs": []
+      }
+    },
+    {
+      "display_name": "selection_result_checker_tests",
+      "root_module": "tools/check-captured-selection-result.rs",
+      "edition": "2024",
+      "deps": [],
+      "is_workspace_member": true,
+      "target": "x86_64-unknown-linux-gnu",
+      "cfg": [
+        "test"
+      ],
+      "source": {
+        "include_dirs": [
+          "tools"
+        ],
+        "exclude_dirs": []
+      }
+    }
+  ]
+}
