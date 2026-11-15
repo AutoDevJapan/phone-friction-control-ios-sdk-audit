@@ -25,6 +25,11 @@ jobs:
         shell: pwsh
         env:
           CODEQL_UPLOAD_REQUEST: ${{ vars.CODEQL_ADVANCED_ACTIVE }}
+          POLICY_SERVER: ${{ github.server_url }}
+          POLICY_REPOSITORY: ${{ github.repository }}
+          POLICY_REPOSITORY_ID: ${{ github.repository_id }}
+          POLICY_REF: ${{ github.ref }}
+          POLICY_EVENT: ${{ github.event_name }}
         run: |
           $ErrorActionPreference='Stop'
           $enabled=[string]::Equals($env:CODEQL_UPLOAD_REQUEST,'true',[StringComparison]::Ordinal)
@@ -95,41 +100,71 @@ jobs:
           toolchain: nightly-2026-07-18
           components: rust-src
           targets: aarch64-apple-ios-sim
-      - name: Describe all tracked Rust inputs
+      - name: Identify the Rust sysroot
+        id: sysroot
         shell: bash
         run: |
           set -euo pipefail
-          git ls-files -z -- '*.rs' > "$RUNNER_TEMP/codeql-rust-files.nul"
-          SYSROOT=$(rustc --print sysroot)
-          CODEQL_RUST_SYSROOT="$SYSROOT" node <<'RUST_PROJECT'
-          const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');
-          const root=process.cwd(),spec=JSON.parse(fs.readFileSync('rust-project.json','utf8'));
-          const tracked=fs.readFileSync(path.join(process.env.RUNNER_TEMP,'codeql-rust-files.nul'),'utf8').split('\0').filter(Boolean).sort();
-          if(!tracked.length||new Set(tracked).size!==tracked.length)throw Error('rust_input_inventory');
-          const selected=new Set(tracked),seen=new Set(),queue=spec.crates.map(c=>c.root_module);
-          for(const name of queue){
-            if(seen.has(name))continue;
-            if(!selected.has(name)||path.isAbsolute(name)||name.split('/').some(p=>p==='..'||p==='.'||!p))throw Error('rust_project_outside_inventory');
-            const file=path.join(root,name),stat=fs.lstatSync(file);
-            if(!stat.isFile()||stat.isSymbolicLink())throw Error('rust_source_kind');
-            seen.add(name);
-            const source=fs.readFileSync(file,'utf8');
-            for(const match of source.matchAll(/include!\s*\(\s*"([^"]+\.rs)"\s*\)/g))queue.push(path.posix.normalize(path.posix.join(path.posix.dirname(name),match[1])));
-          }
-          if(seen.size!==selected.size||tracked.some(p=>!seen.has(p)))throw Error('rust_project_missing_tracked_source');
-          const sysroot=process.env.CODEQL_RUST_SYSROOT;
-          if(!sysroot||!path.isAbsolute(sysroot))throw Error('rust_sysroot_unknown');
-          spec.sysroot=sysroot;spec.sysroot_src=path.join(sysroot,'lib/rustlib/src/rust/library');
-          if(!fs.statSync(spec.sysroot_src).isDirectory())throw Error('rust_src_missing');
-          for(const crate of spec.crates){
-            crate.root_module=path.join(root,crate.root_module);
-            crate.source.include_dirs=crate.source.include_dirs.map(p=>path.join(root,p));
-          }
-          const inventory=tracked.map(p=>{const data=fs.readFileSync(path.join(root,p));return {path:p,bytes:data.length,sha256:crypto.createHash('sha256').update(data).digest('hex')};});
-          fs.writeFileSync(path.join(process.env.RUNNER_TEMP,'codeql-rust-inputs.json'),JSON.stringify(inventory));
-          fs.writeFileSync('rust-project.json',JSON.stringify(spec));
-          console.log('rust_project_crate_views='+spec.crates.length+' tracked_sources='+tracked.length+' full_build=false');
-          RUST_PROJECT
+          printf 'path=%s\n' "$(rustc --print sysroot)" >> "$GITHUB_OUTPUT"
+      - name: Describe all tracked Rust inputs using the official Node24 runtime
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          CODEQL_RUST_SYSROOT: ${{ steps.sysroot.outputs.path }}
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');
+            const credential=core.getInput('github-token',{required:true});
+            const withheld=new Map();
+            for(const [key,value] of Object.entries(process.env)){
+              if(/(TOKEN|SECRET|PASSWORD|CREDENTIAL)/i.test(key)||value===credential){withheld.set(key,value);delete process.env[key];}
+            }
+            let api,prepared;
+            const digest=bytes=>crypto.createHash('sha256').update(bytes).digest('hex');
+            function readPinned(file,bytes,sha){
+              let fd;
+              try{
+                fd=fs.openSync(file,fs.constants.O_RDONLY|fs.constants.O_NOFOLLOW);
+                const before=fs.fstatSync(fd);if(!before.isFile()||before.size!==bytes)throw Error('bootstrap_source_size');
+                const result=Buffer.alloc(bytes);let at=0;
+                while(at<bytes){const n=fs.readSync(fd,result,at,bytes-at,at);if(!n)throw Error('bootstrap_source_truncated');at+=n;}
+                const tail=Buffer.alloc(1);if(fs.readSync(fd,tail,0,1,at)!==0)throw Error('bootstrap_source_grew');
+                const after=fs.fstatSync(fd);
+                if(before.dev!==after.dev||before.ino!==after.ino||before.size!==after.size||before.mtimeMs!==after.mtimeMs||before.ctimeMs!==after.ctimeMs||digest(result)!==sha)throw Error('bootstrap_source_identity');
+                return result;
+              }finally{if(fd!==undefined)fs.closeSync(fd);}
+            }
+            try{
+              if(process.versions.node.split('.')[0]!=='24')throw Error('official_runtime_major');
+              const pins=[{"name":"codeql-rust-publication.mjs","bytes":37637,"sha256":"53366c06ee70d6dc2a2b3c3e19c1c230410bcf74a0891fac220b2a7ea1bfbc80"},{"name":"codeql-official-owned.mjs","bytes":13096,"sha256":"0c160875ea01772409dd70fdc5d761dc83a2e361c9c02d539d2d1a9b47ec1be4"},{"name":"codeql-bundle-owned.mjs","bytes":3935,"sha256":"35aac6023fb20e1eedaf3d7fb80bb6119ff28eca559f22facd67d0c0989adf32"}];
+              const held=new Map(pins.map(pin=>[pin.name,readPinned(path.join(process.env.GITHUB_WORKSPACE,'tools',pin.name),pin.bytes,pin.sha256)]));
+              const data=bytes=>'data:text/javascript;base64,'+bytes.toString('base64');
+              let main=held.get('codeql-rust-publication.mjs').toString('utf8');
+              for(const name of ['codeql-official-owned.mjs','codeql-bundle-owned.mjs']){
+                const spec="'./"+name+"'";
+                if(main.split(spec).length!==2)throw Error('bootstrap_module_graph');
+                main=main.replace(spec,JSON.stringify(data(held.get(name))));
+              }
+              api=await import(data(Buffer.from(main)));
+              if(true){
+                await api.runMode('inventory',{...process.env});
+                return {inventory:true,runtimeVersion:process.versions.node,runtimeExecutable:process.execPath,credentialsWithheld:true};
+              }
+              const official=readPinned(path.join(process.env.RUNNER_WORKSPACE,'..','_actions','github','codeql-action','33d7b85da1a04171e211befe2c739303b9a4c066','lib','entry-points.js'),7450655,'73d629849c79c82ffb9a3c2c9748f4f8639e1ac384e499f1d6678e47b011cd88');
+              const location=path.join(process.env.RUNNER_TEMP,'codeql-official-action','lib');fs.mkdirSync(location,{recursive:true});
+              fs.writeFileSync(path.join(location,'entry-points.js'),official,{flag:'wx',mode:0o400});
+              prepared=await api.prepareFlight({...process.env});
+              core.info('owned_flight_prepared_before_credentials=true database_files='+prepared.databaseFiles+' bundle_bytes='+prepared.bundleBytes);
+              const result=await api.publishPrepared(prepared,{token:credential});
+              return {verified:true,publication:result.publication,runtimeVersion:process.versions.node,runtimeExecutable:process.execPath,credentialsWithheldUntilPrepared:true};
+            }catch(error){
+              const message=String(error?.message||''),reason=/^[a-z][a-z0-9_]{0,100}$/.test(message)?message:'owned_publication_error';
+              core.setFailed(reason);return {verified:false,reason};
+            }finally{
+              if(prepared&&api)api.closePrepared(prepared);
+              for(const [name,value] of withheld)process.env[name]=value;
+            }
+            
       - uses: github/codeql-action/init@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
         id: codeql_init
         with:
@@ -139,183 +174,97 @@ jobs:
       - uses: github/codeql-action/analyze@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
         id: codeql_analyze
         with:
-          # Normal results stay local; the official post action may publish genuine failed-run diagnostics.
+          # All normal Rust publication follows owned verification below.
+          # The official post action still handles genuine failed-run diagnostics.
           upload: ${{ matrix.upload }}
           upload-database: false
           output: ${{ runner.temp }}/codeql-query-results
           category: /language:rust
-      - name: Verify the analyzed Rust source archive and SARIF
-        id: rust_results_verified
-        shell: bash
-        run: |
-          set -euo pipefail
-          ARCHIVE="$RUNNER_TEMP/codeql_databases/rust/src.zip"
-          test -s "$ARCHIVE"
-          unzip -Z1 "$ARCHIVE" > "$RUNNER_TEMP/codeql-rust-archive-members.txt"
-          node <<'RUST_COVERAGE'
-          const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto'),cp=require('node:child_process');
-          const archive=path.join(process.env.RUNNER_TEMP,'codeql_databases/rust/src.zip');
-          const inputs=JSON.parse(fs.readFileSync(path.join(process.env.RUNNER_TEMP,'codeql-rust-inputs.json'),'utf8'));
-          const members=fs.readFileSync(path.join(process.env.RUNNER_TEMP,'codeql-rust-archive-members.txt'),'utf8').split(/\r?\n/).filter(Boolean);
-          for(const input of inputs){
-            if(!Number.isSafeInteger(input.bytes)||input.bytes<0||input.bytes>8*1024*1024||typeof input.path!=='string')throw Error('rust_archive_inventory_invalid');
-            const matches=members.filter(p=>p===input.path||p.endsWith('/'+input.path));
-            if(matches.length!==1)throw Error('rust_source_archive_missing_or_duplicate');
-            const body=cp.execFileSync('unzip',['-p',archive,matches[0]],{maxBuffer:Math.max(input.bytes+1,1),timeout:5000});
-            if(body.length!==input.bytes||crypto.createHash('sha256').update(body).digest('hex')!==input.sha256)throw Error('rust_source_archive_byte_mismatch');
-          }
-          console.log('rust_source_archive_inputs_verified='+inputs.length+' cfg_path_completeness=not_proved');
-          const resultDir=path.join(process.env.RUNNER_TEMP,'codeql-query-results');
-          const names=fs.readdirSync(resultDir).filter(n=>path.extname(n)==='.sarif').sort();
-          if(names.length!==1||names[0]!=='rust.sarif')throw Error('rust_sarif_set');
-          const sarifFile=path.join(resultDir,'rust.sarif'),sarifStat=fs.lstatSync(sarifFile);
-          if(!sarifStat.isFile()||sarifStat.isSymbolicLink()||sarifStat.size<1||sarifStat.size>64*1024*1024)throw Error('rust_sarif_kind');
-          const sarifRaw=fs.readFileSync(sarifFile);
-          if(sarifRaw.length!==sarifStat.size)throw Error('rust_sarif_read');
-          let sarifValue;try{sarifValue=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(sarifRaw));}catch{throw Error('rust_sarif_parse');}
-          if(sarifValue.version!=='2.1.0'||!Array.isArray(sarifValue.runs)||sarifValue.runs.length<1||sarifValue.runs.some(r=>!r||!r.tool||!r.tool.driver||r.tool.driver.name!=='CodeQL'))throw Error('rust_sarif_structure');
-          const verifiedDir=path.join(process.env.RUNNER_TEMP,'codeql-verified-rust');
-          fs.mkdirSync(verifiedDir,{mode:0o700});
-          const stagedSarif=path.join(verifiedDir,'rust.sarif');
-          fs.writeFileSync(stagedSarif,sarifRaw,{flag:'wx',mode:0o400});
-          const stagedRaw=fs.readFileSync(stagedSarif),sarifDigest=crypto.createHash('sha256').update(sarifRaw).digest('hex');
-          if(stagedRaw.length!==sarifRaw.length||crypto.createHash('sha256').update(stagedRaw).digest('hex')!==sarifDigest)throw Error('rust_sarif_stage_mismatch');
-          fs.writeFileSync(path.join(verifiedDir,'verified-inputs.json'),JSON.stringify({scope:'CodeQL uploader input snapshot; not a transport payload hash',source_inputs:inputs.length,source_archive:{bytes:fs.statSync(archive).size,sha256:crypto.createHash('sha256').update(fs.readFileSync(archive)).digest('hex')},sarif:{name:'rust.sarif',bytes:sarifRaw.length,sha256:sarifDigest}}),{flag:'wx',mode:0o400});
-          console.log('rust_verified_sarif_files=1 source_bytes_verified=true');
-          RUST_COVERAGE
-      - name: Preserve unverified Rust diagnostics
-        if: ${{ failure() && steps.codeql_analyze.outcome == 'success' && steps.rust_results_verified.outcome == 'failure' }}
+      - name: Verify the whole Rust flight before exposing publication credentials
+        id: rust_owned_flight
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          DATABASE_PUBLISH: ${{ needs.publication_policy.outputs.publish }}
+          CODEQL_PATH: ${{ steps.codeql_init.outputs.codeql-path }}
+          CODEQL_DATABASES: ${{ steps.codeql_analyze.outputs.db-locations }}
+          INPUT_MATRIX: ${{ toJson(matrix) }}
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');
+            const credential=core.getInput('github-token',{required:true});
+            const withheld=new Map();
+            for(const [key,value] of Object.entries(process.env)){
+              if(/(TOKEN|SECRET|PASSWORD|CREDENTIAL)/i.test(key)||value===credential){withheld.set(key,value);delete process.env[key];}
+            }
+            let api,prepared;
+            const digest=bytes=>crypto.createHash('sha256').update(bytes).digest('hex');
+            function readPinned(file,bytes,sha){
+              let fd;
+              try{
+                fd=fs.openSync(file,fs.constants.O_RDONLY|fs.constants.O_NOFOLLOW);
+                const before=fs.fstatSync(fd);if(!before.isFile()||before.size!==bytes)throw Error('bootstrap_source_size');
+                const result=Buffer.alloc(bytes);let at=0;
+                while(at<bytes){const n=fs.readSync(fd,result,at,bytes-at,at);if(!n)throw Error('bootstrap_source_truncated');at+=n;}
+                const tail=Buffer.alloc(1);if(fs.readSync(fd,tail,0,1,at)!==0)throw Error('bootstrap_source_grew');
+                const after=fs.fstatSync(fd);
+                if(before.dev!==after.dev||before.ino!==after.ino||before.size!==after.size||before.mtimeMs!==after.mtimeMs||before.ctimeMs!==after.ctimeMs||digest(result)!==sha)throw Error('bootstrap_source_identity');
+                return result;
+              }finally{if(fd!==undefined)fs.closeSync(fd);}
+            }
+            try{
+              if(process.versions.node.split('.')[0]!=='24')throw Error('official_runtime_major');
+              const pins=[{"name":"codeql-rust-publication.mjs","bytes":37637,"sha256":"53366c06ee70d6dc2a2b3c3e19c1c230410bcf74a0891fac220b2a7ea1bfbc80"},{"name":"codeql-official-owned.mjs","bytes":13096,"sha256":"0c160875ea01772409dd70fdc5d761dc83a2e361c9c02d539d2d1a9b47ec1be4"},{"name":"codeql-bundle-owned.mjs","bytes":3935,"sha256":"35aac6023fb20e1eedaf3d7fb80bb6119ff28eca559f22facd67d0c0989adf32"}];
+              const held=new Map(pins.map(pin=>[pin.name,readPinned(path.join(process.env.GITHUB_WORKSPACE,'tools',pin.name),pin.bytes,pin.sha256)]));
+              const data=bytes=>'data:text/javascript;base64,'+bytes.toString('base64');
+              let main=held.get('codeql-rust-publication.mjs').toString('utf8');
+              for(const name of ['codeql-official-owned.mjs','codeql-bundle-owned.mjs']){
+                const spec="'./"+name+"'";
+                if(main.split(spec).length!==2)throw Error('bootstrap_module_graph');
+                main=main.replace(spec,JSON.stringify(data(held.get(name))));
+              }
+              api=await import(data(Buffer.from(main)));
+              if(false){
+                await api.runMode('inventory',{...process.env});
+                return {inventory:true,runtimeVersion:process.versions.node,runtimeExecutable:process.execPath,credentialsWithheld:true};
+              }
+              const official=readPinned(path.join(process.env.RUNNER_WORKSPACE,'..','_actions','github','codeql-action','33d7b85da1a04171e211befe2c739303b9a4c066','lib','entry-points.js'),7450655,'73d629849c79c82ffb9a3c2c9748f4f8639e1ac384e499f1d6678e47b011cd88');
+              const location=path.join(process.env.RUNNER_TEMP,'codeql-official-action','lib');fs.mkdirSync(location,{recursive:true});
+              fs.writeFileSync(path.join(location,'entry-points.js'),official,{flag:'wx',mode:0o400});
+              prepared=await api.prepareFlight({...process.env});
+              core.info('owned_flight_prepared_before_credentials=true database_files='+prepared.databaseFiles+' bundle_bytes='+prepared.bundleBytes);
+              const result=await api.publishPrepared(prepared,{token:credential});
+              return {verified:true,publication:result.publication,runtimeVersion:process.versions.node,runtimeExecutable:process.execPath,credentialsWithheldUntilPrepared:true};
+            }catch(error){
+              const message=String(error?.message||''),reason=/^[a-z][a-z0-9_]{0,100}$/.test(message)?message:'owned_publication_error';
+              core.setFailed(reason);return {verified:false,reason};
+            }finally{
+              if(prepared&&api)api.closePrepared(prepared);
+              for(const [name,value] of withheld)process.env[name]=value;
+            }
+            
+      - name: Preserve failed Rust diagnostics and producer evidence
+        if: ${{ failure() && steps.codeql_analyze.outcome == 'success' }}
         uses: actions/upload-artifact@v4
         with:
           name: codeql-rust-unverified-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/codeql-query-results/*.sarif
             ${{ runner.temp }}/codeql-rust-archive-members.txt
+            ${{ runner.temp }}/codeql-verified-rust/*.json
+            ${{ runner.temp }}/codeql-verified-rust/producer-stderr.txt
           if-no-files-found: warn
           retention-days: 3
-      - name: Bundle and verify the analyzed Rust database
-        id: rust_database_verified
-        if: ${{ success() && needs.publication_policy.outputs.publish == 'true' && steps.rust_results_verified.outcome == 'success' }}
-        shell: bash
-        timeout-minutes: 4
-        env:
-          DATABASE_PUBLISH: ${{ needs.publication_policy.outputs.publish }}
-          CODEQL_PATH: ${{ steps.codeql_init.outputs.codeql-path }}
-          CODEQL_DATABASES: ${{ steps.codeql_analyze.outputs.db-locations }}
-        run: |
-          set -euo pipefail
-          node <<'RUST_DATABASE'
-          const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto'),cp=require('node:child_process');
-          function fail(code){throw Error(code);}
-          function fileInfo(file){
-            const fd=fs.openSync(file,fs.constants.O_RDONLY|fs.constants.O_NOFOLLOW);
-            try{
-              const st=fs.fstatSync(fd);if(!st.isFile()||!Number.isSafeInteger(st.size)||st.size<1)fail('rust_database_file_kind');
-              const hash=crypto.createHash('sha256'),buf=Buffer.alloc(65536);let n;
-              while((n=fs.readSync(fd,buf,0,buf.length,null))>0)hash.update(buf.subarray(0,n));
-              return {bytes:st.size,sha256:hash.digest('hex')};
-            }finally{fs.closeSync(fd);}
-          }
-          if(process.env.DATABASE_PUBLISH!=='true')fail('rust_database_publication_disabled');
-          if(process.env.GITHUB_SERVER_URL!=='https://github.com'){console.log('rust_database_upload_not_eligible=server');process.exit(0);}
-          const event=JSON.parse(fs.readFileSync(process.env.GITHUB_EVENT_PATH,'utf8')),repo=process.env.GITHUB_REPOSITORY;
-          if(!/^[\w.-]+\/[\w.-]+$/.test(repo||'')||event.repository?.full_name!==repo)fail('rust_database_repository_identity');
-          const branch=event.repository?.default_branch;
-          if(typeof branch!=='string'||!branch)fail('rust_database_default_branch_unknown');
-          if(process.env.GITHUB_REF!=='refs/heads/'+branch){console.log('rust_database_upload_not_eligible=non_default_branch');process.exit(0);}
-          const commit=process.env.GITHUB_SHA;
-          if(!/^[0-9a-f]{40}$/.test(commit||'')||cp.execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8',timeout:5000}).trim()!==commit)fail('rust_database_commit_identity');
-          const cluster=path.join(process.env.RUNNER_TEMP,'codeql_databases'),db=path.join(cluster,'rust');
-          const locations=JSON.parse(process.env.CODEQL_DATABASES||'null');
-          if(!locations||typeof locations.rust!=='string'||path.resolve(locations.rust)!==path.resolve(db))fail('rust_database_location');
-          if(fs.realpathSync(db)!==path.resolve(db))fail('rust_database_location_symlink');
-          const dir=path.join(process.env.RUNNER_TEMP,'codeql-verified-rust'),proof=JSON.parse(fs.readFileSync(path.join(dir,'verified-inputs.json'),'utf8'));
-          const archive=path.join(db,'src.zip'),source=fileInfo(archive);
-          if(source.bytes!==proof.source_archive?.bytes||source.sha256!==proof.source_archive?.sha256)fail('rust_database_source_changed');
-          const cli=process.env.CODEQL_PATH;if(!cli||!path.isAbsolute(cli))fail('rust_database_cli_missing');
-          cp.execFileSync(cli,['database','cleanup',db,'--cache-cleanup=clear'],{stdio:'inherit',timeout:60000});
-          const bundle=path.join(dir,'rust-database.zip');if(fs.existsSync(bundle))fail('rust_database_bundle_exists');
-          const args=['database','bundle',db,'--output='+bundle,'--name=rust'];
-          const baseOids=path.join(cluster,'base-database-oids.json');
-          if(fs.existsSync(baseOids)){
-            fs.copyFileSync(baseOids,path.join(db,'base-database-oids.json'));
-            args.push('--include','base-database-oids.json');
-          }
-          cp.execFileSync(cli,args,{stdio:'inherit',timeout:60000});
-          const members=cp.execFileSync('unzip',['-Z1',bundle],{encoding:'utf8',timeout:10000,maxBuffer:8*1024*1024}).split(/\r?\n/).filter(Boolean);
-          if(members.filter(p=>p==='rust/src.zip').length!==1||members.filter(p=>p==='rust/codeql-database.yml').length!==1)fail('rust_database_bundle_members');
-          const nested=cp.execFileSync('unzip',['-p',bundle,'rust/src.zip'],{timeout:10000,maxBuffer:source.bytes+1});
-          if(nested.length!==source.bytes||crypto.createHash('sha256').update(nested).digest('hex')!==source.sha256)fail('rust_database_bundle_source_mismatch');
-          const after=fileInfo(archive);if(after.bytes!==source.bytes||after.sha256!==source.sha256)fail('rust_database_source_changed');
-          const info=fileInfo(bundle);fs.chmodSync(bundle,0o400);
-          fs.writeFileSync(path.join(dir,'verified-database.json'),JSON.stringify({repository:repo,commit_oid:commit,ref:process.env.GITHUB_REF,language:'rust',bundle:{name:'rust-database.zip',...info},source_archive:source}),{flag:'wx',mode:0o400});
-          fs.appendFileSync(process.env.GITHUB_OUTPUT,'ready=true\n');
-          console.log('rust_database_bundle_verified=true bytes='+info.bytes+' sha256='+info.sha256);
-          RUST_DATABASE
-      - name: Preserve verified Rust query inputs
-        if: ${{ always() && steps.rust_results_verified.outcome == 'success' }}
+      - name: Preserve verified Rust ownership evidence
+        if: ${{ always() && steps.rust_owned_flight.outcome == 'success' && fromJSON(steps.rust_owned_flight.outputs.result).verified == true }}
         uses: actions/upload-artifact@v4
         with:
           name: codeql-query-rust-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            ${{ runner.temp }}/codeql-verified-rust/rust.sarif
-            ${{ runner.temp }}/codeql-verified-rust/verified-inputs.json
-            ${{ runner.temp }}/codeql-verified-rust/verified-database.json
+            ${{ runner.temp }}/codeql-verified-rust/*.sarif
+            ${{ runner.temp }}/codeql-verified-rust/*.json
           if-no-files-found: error
           retention-days: 3
-      - name: Upload verified Rust SARIF
-        id: codeql_rust_publish
-        if: ${{ success() && steps.rust_results_verified.outcome == 'success' && needs.publication_policy.outputs.publish == 'true' }}
-        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
-        with:
-          sarif_file: ${{ runner.temp }}/codeql-verified-rust/rust.sarif
-          category: /language:rust
-          wait-for-processing: true
-      - name: Upload the verified Rust database
-        id: codeql_rust_database_publish
-        if: ${{ success() && needs.publication_policy.outputs.publish == 'true' && steps.rust_database_verified.outputs.ready == 'true' }}
-        shell: bash
-        timeout-minutes: 2
-        env:
-          DATABASE_PUBLISH: ${{ needs.publication_policy.outputs.publish }}
-          GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          node <<'RUST_DATABASE_UPLOAD'
-          const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto'),https=require('node:https');
-          async function main(){
-            if(process.env.DATABASE_PUBLISH!=='true')throw Error('rust_database_publication_disabled');
-            const dir=path.join(process.env.RUNNER_TEMP,'codeql-verified-rust'),meta=JSON.parse(fs.readFileSync(path.join(dir,'verified-database.json'),'utf8'));
-            const event=JSON.parse(fs.readFileSync(process.env.GITHUB_EVENT_PATH,'utf8'));
-            if(process.env.GITHUB_SERVER_URL!=='https://github.com'||meta.repository!==process.env.GITHUB_REPOSITORY||event.repository?.full_name!==meta.repository||meta.ref!==process.env.GITHUB_REF||meta.ref!=='refs/heads/'+event.repository?.default_branch||meta.commit_oid!==process.env.GITHUB_SHA||meta.language!=='rust')throw Error('rust_database_upload_identity');
-            const file=path.join(dir,'rust-database.zip'),fd=fs.openSync(file,fs.constants.O_RDONLY|fs.constants.O_NOFOLLOW);
-            let stream;
-            try{
-              const st=fs.fstatSync(fd),hash=crypto.createHash('sha256'),buf=Buffer.alloc(65536);let pos=0,n;
-              if(!st.isFile()||st.size!==meta.bundle?.bytes||meta.bundle?.name!=='rust-database.zip')throw Error('rust_database_upload_file');
-              while((n=fs.readSync(fd,buf,0,buf.length,pos))>0){hash.update(buf.subarray(0,n));pos+=n;}
-              if(hash.digest('hex')!==meta.bundle.sha256)throw Error('rust_database_upload_hash');
-              const token=process.env.GITHUB_TOKEN;if(!token)throw Error('rust_database_upload_token_missing');
-              const url=new URL('https://uploads.github.com/repos/'+meta.repository+'/code-scanning/codeql/databases/rust');
-              url.searchParams.set('name','rust-database');url.searchParams.set('commit_oid',meta.commit_oid);
-              stream=fs.createReadStream(file,{fd,autoClose:false,start:0});
-              let status;
-              await new Promise((resolve,reject)=>{
-                let settled=false,timer;
-                const finish=error=>{if(settled)return;settled=true;clearTimeout(timer);error?reject(error):resolve();};
-                const req=https.request(url,{method:'POST',agent:false,headers:{Authorization:'Bearer '+token,'User-Agent':'CodeQL-database-upload','Content-Type':'application/zip','Content-Length':st.size,'X-GitHub-Api-Version':'2022-11-28'}},res=>{
-                  status=res.statusCode;res.resume();res.once('error',finish);res.once('aborted',()=>finish(Error('rust_database_upload_response_aborted')));
-                  res.once('end',()=>finish(status>=200&&status<300?undefined:Error('rust_database_upload_http_'+status)));
-                });
-                timer=setTimeout(()=>req.destroy(Error('rust_database_upload_deadline')),60000);
-                req.once('error',finish);req.once('close',()=>{if(!settled)finish(Error('rust_database_upload_closed'));});
-                stream.once('error',error=>{req.destroy();finish(error);});stream.pipe(req);
-              });
-              console.log('rust_database_upload_http_status='+status+' commit_oid='+meta.commit_oid+' bytes='+st.size+' sha256='+meta.bundle.sha256);
-            }finally{if(stream)stream.destroy();fs.closeSync(fd);}
-          }
-          main().catch(error=>{const message=String(error?.message||'');const reason=/^rust_database_(?:publication_disabled|upload_identity|upload_file|upload_hash|upload_token_missing|upload_deadline|upload_closed|upload_response_aborted|upload_http_[0-9]{3})$/.test(message)?message:'rust_database_upload_io_or_transport';console.error(reason);process.exitCode=1;});
-          RUST_DATABASE_UPLOAD
   swift:
     needs: publication_policy
     name: Analyze (swift)
@@ -409,7 +358,7 @@ jobs:
           command_pid=$!
           printf '%s\n' "$command_pid" > "$OUT/command-pid.txt"
           snapshot_status=0
-          LC_ALL=C TZ=UTC perl -e 'alarm 2; exec @ARGV; exit 127;' /bin/ps -p "$command_pid" -o pid=,ppid=,lstart=,state=,comm= > "$OUT/process-before.raw" 2> "$OUT/process-before.stderr" || snapshot_status=$?
+          LC_ALL=C TZ=UTC perl -e 'alarm 2; my $ready=select(undef,undef,undef,1); exit 125 if !defined($ready); exec @ARGV; exit 127;' /bin/ps -p "$command_pid" -o pid=,ppid=,lstart=,state=,comm= > "$OUT/process-before.raw" 2> "$OUT/process-before.stderr" || snapshot_status=$?
           printf 'status=%s\n' "$snapshot_status" > "$OUT/process-before-status.txt"
           status=0
           wait "$command_pid" || status=$?
@@ -722,6 +671,8 @@ jobs:
                 expected_exact_source_sha256='666e48d1a4e10f6d323b7cb0b9ed5b6a95a82e55b19706a8471ee41fb67339b0';
                 cache_policy='separate_fresh_explicit_module_cache'; system_cache_state='not_controlled';
                 controls_are_not_trace_or_extraction_success=$true;
+                root_snapshot_policy=@{ configured_wait_seconds=1; sampler_alarm_seconds=2; actual_wait_measured=$false;
+                  purpose='one_existing_snapshot_after_startup_not_exec_or_generation_proof' };
                 x86_64_true_status=(Get-EvidenceCommandStatus $BuildRoot 'rosetta-status.txt').command_status;
                 rosetta_installation_attempted=$false;
                 tracer_observation_delta=(Get-EvidenceTracerDelta $BuildRoot $DatabaseRoot);
