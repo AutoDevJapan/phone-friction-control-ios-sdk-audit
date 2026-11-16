@@ -7,7 +7,7 @@ import {Readable} from 'node:stream';
 import {execFileSync} from 'node:child_process';
 import {pathToFileURL} from 'node:url';
 import {OFFICIAL,consumeOfficialSarif,canonicalizeLocations,checkOfficialBundle} from './codeql-official-owned.mjs';
-import {produceBundle} from './codeql-bundle-owned.mjs';
+import {produceBundle,currentJob,databaseObject,evidenceDirectory,officialInput,jobManifest,finishBundle,abortBundle,bindPrepared,referenceValid,releasePrepared} from './codeql-bundle-owned.mjs';
 
 export const LIMITS=Object.freeze({archive:32*1024*1024,bundle:512*1024*1024,sarif:64*1024*1024,input:8*1024*1024,inventory:1024*1024,sourceTotal:64*1024*1024,members:20000,memberNames:8*1024*1024,chunk:64*1024});
 const crcTable=Uint32Array.from({length:256},(_,n)=>{let c=n;for(let i=0;i<8;i++)c=(c>>>1)^((c&1)?0xedb88320:0);return c>>>0;});
@@ -140,6 +140,11 @@ function fileDigest(file,io,deadline){
     return Object.freeze({bytes:position,sha256:digest.digest('hex'),device:before.dev,inode:before.ino});
   }finally{if(fd!==undefined)io.closeSync(fd);}
 }
+function databaseGraphDigest(records){
+ const hash=crypto.createHash('sha256');for(const record of [...records].sort((a,b)=>Buffer.compare(Buffer.from(a.name),Buffer.from(b.name)))){const name=Buffer.from(record.name),size=Buffer.alloc(12);size.writeUInt32LE(name.length,0);size.writeBigUInt64LE(BigInt(record.bytes),4);hash.update(size).update(name).update(Buffer.from(record.sha256,'hex'));}return hash.digest('hex');
+}
+export function bundleProjection(name){return !['log/','logs/','results/','trap/','temp/','src/'].some(prefix=>name.startsWith(prefix));}
+
 function scanDatabase(graph){
   const files=new Map(),directories=new Set(['']);let total=0;
   const walk=(directoryFD,relative,depth)=>{
@@ -180,14 +185,22 @@ export function captureDatabaseGraph(database,{io=fs,ownerPID,deadline=Date.now(
     const graph={io,fd,ownerPID,anchor:'/proc/'+ownerPID+'/fd/'+fd,deadline,root,closed:false};
     const snapshot=scanDatabase(graph);
     const records=[...snapshot.files].map(([name,value])=>({name,bytes:value.bytes,sha256:value.sha256})).sort((a,b)=>a.name<b.name?-1:a.name>b.name?1:0);
-    const graphSHA256=hash(Buffer.from(JSON.stringify(records)));
+    const graphSHA256=databaseGraphDigest(records);
     const token=Object.freeze({files:snapshot.files.size,totalBytes:snapshot.total,graphSHA256,rootDevice:root.dev,rootInode:root.ino});
     databaseGraphs.set(token,{...graph,...snapshot,graphSHA256});fd=undefined;return token;
   }finally{if(fd!==undefined)io.closeSync(fd);}
 }
+
+function captureJobDatabase(job,io){
+ const h=databaseObject(job),fd=h.fd,root=io.fstatSync(fd);if(!root.isDirectory())fail('database_root_kind');
+ const graph={io,fd,ownsFD:false,ownerPID:h.ownerPID,anchor:'/proc/'+h.ownerPID+'/fd/'+fd,deadline:Date.now()+240000,root,closed:false};
+ const snapshot=scanDatabase(graph),records=[...snapshot.files].map(([name,value])=>({name,bytes:value.bytes,sha256:value.sha256})).sort((a,b)=>a.name<b.name?-1:a.name>b.name?1:0),graphSHA256=databaseGraphDigest(records);
+ const token=Object.freeze({files:snapshot.files.size,totalBytes:snapshot.total,graphSHA256,rootDevice:root.dev,rootInode:root.ino});databaseGraphs.set(token,{...graph,...snapshot,graphSHA256});return token;
+}
+
 export function closeDatabaseGraph(token){
   const graph=databaseGraphs.get(token);if(!graph||graph.closed)return;
-  graph.closed=true;graph.io.closeSync(graph.fd);databaseGraphs.delete(token);
+  graph.closed=true;if(graph.ownsFD!==false)graph.io.closeSync(graph.fd);databaseGraphs.delete(token);
 }
 function checkedGraph(token){const graph=databaseGraphs.get(token);if(!graph||graph.closed)fail('database_graph_unknown');return graph;}
 function assertDatabaseUnchanged(token){
@@ -216,8 +229,8 @@ export async function verifyBundle(snapshot,sourceProof,inputs,databaseToken){
     if(actual.bytes!==expected.bytes||actual.sha256!==expected.sha256){const error=Error('bundle_database_bytes');error.database={memberSHA256:hash(Buffer.from(relative)),expectedBytes:expected.bytes,actualBytes:actual.bytes,expectedSHA256:expected.sha256,actualSHA256:actual.sha256};throw error;}
     found.add(relative);
   }
-  for(const name of graph.files.keys())if((name==='src.zip'||name==='codeql-database.yml'||name==='base-database-oids.json'||name.startsWith('db-rust/'))&&!found.has(name))fail('bundle_missing_database_member');
-  return {bytes:snapshot.bytes,sha256:snapshot.sha256,databaseFiles:found.size,capturedDatabaseFiles:graph.files.size,capturedDatabaseSHA256:graph.graphSHA256,databaseBytes:graph.total,source_archive:{bytes:source.bytes,sha256:source.sha256}};
+  for(const name of graph.files.keys())if(bundleProjection(name)&&!found.has(name))fail('bundle_missing_database_member');
+  return {bytes:snapshot.bytes,sha256:snapshot.sha256,databaseFiles:found.size,capturedDatabaseFiles:graph.files.size,capturedDatabaseSHA256:graph.graphSHA256,projection:{schema:1,excludes:['log/','logs/','results/','trap/','temp/','src/'],excludedCapturedFiles:[...graph.files.keys()].filter(name=>!bundleProjection(name)).length,requiredCapturedFiles:[...graph.files.keys()].filter(bundleProjection).length},databaseBytes:graph.total,source_archive:{bytes:source.bytes,sha256:source.sha256}};
 }
 export function eligibility(env,event,head){
   if(env.DATABASE_PUBLISH!=='true')fail('publication_disabled');
@@ -344,10 +357,11 @@ function requireInventory(value){
     previous=item.path;
   }
 }
-function captureInputs(env,io){
-  const directory=path.join(env.RUNNER_TEMP,'codeql-verified-rust'),cluster=path.join(env.RUNNER_TEMP,'codeql_databases'),db=path.join(cluster,'rust');
+function captureInputs(env,io,job){
+  const directory=evidenceDirectory(job),cluster=path.join(env.RUNNER_TEMP,'codeql_databases'),db=path.join(cluster,'rust');
   const inventory=jsonSnapshot(path.join(env.RUNNER_TEMP,'codeql-rust-inputs.json'),LIMITS.inventory,io);requireInventory(inventory.value);
-  const source=captureFile(path.join(db,'src.zip'),LIMITS.archive,io);
+  const inherited=databaseObject(job),heldRoot=io.fstatSync(inherited.fd),namedRoot=io.statSync(db);if(heldRoot.dev!==namedRoot.dev||heldRoot.ino!==namedRoot.ino||!heldRoot.isDirectory())fail('database_path_not_held_object');
+  const source=captureFile('/proc/'+inherited.ownerPID+'/fd/'+inherited.fd+'/src.zip',LIMITS.archive,io);
   io.writeFileSync(path.join(env.RUNNER_TEMP,'codeql-rust-archive-members.txt'),openZip(source).names.join('\n')+'\n');
   const sourceProof=verifySource(source,inventory.value),sourceBodies=new Map(),sourceZip=openZip(source);
   for(const input of inventory.value){
@@ -358,7 +372,7 @@ function captureInputs(env,io){
   if(names.length!==1||names[0]!=='rust.sarif')fail('sarif_set');
   const sarif=captureFile(path.join(results,'rust.sarif'),LIMITS.sarif,io),value=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(raw(sarif)));
   if(value.version!=='2.1.0'||!Array.isArray(value.runs)||!value.runs.length||value.runs.some(run=>run?.tool?.driver?.name!=='CodeQL'))fail('sarif_structure');
-  io.mkdirSync(directory,{mode:0o700});
+  if(!io.fstatSync(6).isDirectory())fail('native_diagnostic_directory');
   writeExclusive(path.join(directory,'rust.sarif'),raw(sarif),io);
   const proof={scope:'one invocation holds inventory/source/SARIF through official consumption and database upload; not full semantic cfg proof',source_inputs:inventory.value.length,inventory:{bytes:inventory.snapshot.bytes,sha256:inventory.snapshot.sha256},source_archive:sourceProof,sarif:{name:'rust.sarif',bytes:sarif.bytes,sha256:sarif.sha256}};
   writeExclusive(path.join(directory,'verified-inputs.json'),JSON.stringify(proof),io);
@@ -379,7 +393,7 @@ function eventIdentity(env,event,head){
 function disposeSnapshot(ref){const value=owned.get(ref);if(value){value.fill(0);owned.delete(ref);}}
 export function closePrepared(ref){
   const flight=preparedFlights.get(ref);if(!flight||flight.closed)return;
-  flight.closed=true;closeDatabaseGraph(flight.database);
+  flight.closed=true;releasePrepared(ref);closeDatabaseGraph(flight.database);
   for(const body of flight.session.sourceBodies.values())body.fill(0);flight.session.sourceBodies.clear();
   for(const body of flight.internalReads.values())body.fill(0);flight.internalReads.clear();
   for(const snapshot of [flight.session.source,flight.session.sarif,flight.session.inventory.snapshot,flight.official,flight.bundle,flight.eventSnapshot])disposeSnapshot(snapshot);
@@ -387,42 +401,45 @@ export function closePrepared(ref){
 }
 export async function prepareFlight(env,services={}){
   if(Object.entries(env).some(([name,value])=>/(TOKEN|SECRET|PASSWORD|CREDENTIAL)/i.test(name)&&value))fail('preparation_credentials');
-  const io=services.fs||fs,execute=services.exec||execFileSync,produce=services.produce||produceBundle,log=services.log||console.log;
-  const event=jsonSnapshot(env.GITHUB_EVENT_PATH,LIMITS.inventory,io),head=execute('git',['rev-parse','HEAD'],{encoding:'utf8',timeout:5000}).trim();
-  const identity=eventIdentity(env,event.value,head),session=captureInputs(env,io);let database,bundle,official;
+  if(Object.keys(services).length)fail('native_service_override_not_admitted');
+  const job=currentJob(),io=fs,execute=execFileSync,log=console.log;
+  const event=jsonSnapshot(env.GITHUB_EVENT_PATH,LIMITS.inventory,io),head=execute('/usr/bin/git',['-c','safe.directory='+path.resolve(env.GITHUB_WORKSPACE),'rev-parse','HEAD'],{encoding:'utf8',timeout:5000,cwd:path.resolve(env.GITHUB_WORKSPACE),env:credentiallessEnvironment(env)}).trim();
+  const identity=eventIdentity(env,event.value,head),session=captureInputs(env,io,job);let database,bundle,official,nativeAuthority;
   try{
     const canonical=canonicalizeLocations(raw(session.sarif),session.sourceBodies,path.resolve(env.GITHUB_WORKSPACE));
-    const officialPath=path.join(env.RUNNER_TEMP,'codeql-official-action','lib','entry-points.js');
-    official=captureFile(officialPath,8*1024*1024,io);checkOfficialBundle(raw(official));
+    const officialHeld=officialInput(job),officialPath=officialHeld.filename;
+    official=copySnapshot(officialHeld.bytes,8*1024*1024);officialHeld.bytes.fill(0);checkOfficialBundle(raw(official));
     const locations=JSON.parse(env.CODEQL_DATABASES||'null');
     if(typeof locations?.rust!=='string'||path.resolve(locations.rust)!==path.resolve(session.db)||io.realpathSync(session.db)!==path.resolve(session.db))fail('database_location');
     const cli=env.CODEQL_PATH;if(!cli||!path.isAbsolute(cli))fail('cli_missing');
-    execute(cli,['database','cleanup',session.db,'--cache-cleanup=clear'],{stdio:'inherit',timeout:60000,env:credentiallessEnvironment(env)});
+    if(jobManifest(job).databaseCleanupExit!==0)fail('normal_database_cleanup_unverified');
     const oids=path.join(session.cluster,'base-database-oids.json');let capturedOID;
-    if(io.existsSync(oids)){capturedOID=captureFile(oids,LIMITS.inventory,io);io.writeFileSync(path.join(session.db,'base-database-oids.json'),raw(capturedOID));}
-    database=captureDatabaseGraph(session.db,{io,ownerPID:services.ownerPID??process.pid});
+    if(io.existsSync(oids)){capturedOID=captureFile(oids,LIMITS.inventory,io);const heldOID='/proc/'+process.pid+'/fd/3/base-database-oids.json';if(io.existsSync(heldOID)){const existing=captureFile(heldOID,LIMITS.inventory,io);if(existing.sha256!==capturedOID.sha256||existing.bytes!==capturedOID.bytes)fail('database_oid_changed');disposeSnapshot(existing);}else io.writeFileSync(heldOID,raw(capturedOID),{flag:'wx'});}
+    database=captureJobDatabase(job,io);
     const graph=checkedGraph(database);
     if(capturedOID&&graph.files.get('base-database-oids.json')?.sha256!==capturedOID.sha256)fail('database_oid_changed');
     const sourceRecord=graph.files.get('src.zip');
     if(sourceRecord.sha256!==session.source.sha256||sourceRecord.bytes!==session.source.bytes)fail('database_source_mismatch');
     const includes=graph.files.has('base-database-oids.json')?['base-database-oids.json']:[];
-    const produced=await produce({cli,database:graph.anchor,includes,env:credentiallessEnvironment(env),limit:LIMITS.bundle});
-    if(!Buffer.isBuffer(produced.bytes))fail('producer_body');
+    const produced=await produceBundle({job,database:graph.fd,graphSHA256:graph.graphSHA256,limit:LIMITS.bundle,deadline:graph.deadline});nativeAuthority=produced.authority;
+    if(!Buffer.isBuffer(produced.bytes))fail('producer_body');if(produced.evidence.CopyGraphSHA256!==graph.graphSHA256)fail('producer_copy_graph_mismatch');
     bundle=copySnapshot(produced.bytes,LIMITS.bundle);produced.bytes.fill(0);
     const verified=await verifyBundle(bundle,session.source,session.inventory.value,database);
     assertDatabaseUnchanged(database);
+    const nativeFinal=await finishBundle(job,nativeAuthority);
     const internalReads=new Map([[path.resolve(env.GITHUB_EVENT_PATH),Buffer.from(raw(event.snapshot))]]),internalAbsent=[];
     const diffPath=path.join(env.CODEQL_ACTION_TEMP||env.RUNNER_TEMP,'pr-diff-range.json');
     if(io.existsSync(diffPath)){const diff=captureFile(diffPath,LIMITS.input,io);internalReads.set(path.resolve(diffPath),Buffer.from(raw(diff)));disposeSnapshot(diff);}else internalAbsent.push(path.resolve(diffPath));
     const reference=Object.freeze({verified:true,sourceInputs:session.inventory.value.length,databaseFiles:database.files,databaseGraphSHA256:database.graphSHA256,bundleBytes:bundle.bytes,bundleSHA256:bundle.sha256,canonicalSARIF:canonical.canonical_sha256});
-    const flight={session,database,bundle,official,officialPath,eventSnapshot:event.snapshot,internalReads,internalAbsent,identity,env:{...env},canonical,producer:produced.evidence,closed:false,publishing:false};
-    preparedFlights.set(reference,flight);
-    writeExclusive(path.join(session.directory,'verified-database.json'),JSON.stringify({...identity,...verified,root:{device:database.rootDevice,inode:database.rootInode},producer:produced.evidence}),io);
+    const flight={session,database,bundle,official,officialPath,eventSnapshot:event.snapshot,internalReads,internalAbsent,identity,env:{...env},canonical,producer:{provisional:produced.evidence,final:nativeFinal},nativeJob:job,nativeAuthority,closed:false,publishing:false};
+    bindPrepared(job,nativeAuthority,reference);preparedFlights.set(reference,flight);
+    writeExclusive(path.join(session.directory,'verified-database.json'),JSON.stringify({...identity,...verified,root:{device:database.rootDevice,inode:database.rootInode},producer:flight.producer}),io);
     writeExclusive(path.join(session.directory,'canonical-rust.sarif'),canonical.bytes,io);
-    writeExclusive(path.join(session.directory,'verified-flight.json'),JSON.stringify({...reference,identity,rawSARIF:session.sarif.sha256,scope:'post-analysis DB root held through full-file capture, original producer anonymous pipe, every archive file matched before credentials; not compiler or host attestation'}),io);
+    writeExclusive(path.join(session.directory,'verified-flight.json'),JSON.stringify({...reference,identity,rawSARIF:session.sarif.sha256,scope:'post-analysis DB root held through full-file capture, qualified same-job source-built image and inherited DB FD; native writer epoch and held output FD through member verification, every archive file matched before credentials; not compiler or host attestation'}),io);
     log('rust_owned_flight_ready source_inputs='+session.inventory.value.length+' database_files='+database.files+' bundle_bytes='+bundle.bytes);
     return reference;
   }catch(error){
+    if(nativeAuthority)await abortBundle(job,nativeAuthority,error);
     try{const message=String(error?.message||''),reason=/^[a-z][a-z0-9_]{0,100}$/.test(message)?message:'preparation_io_error';writeExclusive(path.join(session.directory,'verification-failure.json'),JSON.stringify({reason,database:error.database||null,producer:error.producer||null}),io);}catch{error.evidenceWriteFailed=true;}
     if(error.producer){try{writeExclusive(path.join(session.directory,'producer-failure.json'),JSON.stringify(error.producer),io);writeExclusive(path.join(session.directory,'producer-stderr.txt'),String(error.producerStderr||''),io);}catch{error.evidenceWriteFailed=true;}}
     if(database)closeDatabaseGraph(database);
@@ -431,13 +448,20 @@ export async function prepareFlight(env,services={}){
     throw error;
   }
 }
+async function actualDefaultSetup(token){
+ return await new Promise((resolve,reject)=>{let request,response,bytes=0,chunks=[],settled=false,timer;const done=(error,value)=>{if(settled)return;settled=true;clearTimeout(timer);if(error){error.defaultSetup??={state:'unknown'};reject(error);}else resolve(value);};
+ try{request=https.request({protocol:'https:',hostname:'api.github.com',method:'GET',path:'/repos/'+expectedRepo+'/code-scanning/default-setup',headers:{Accept:'application/vnd.github+json',Authorization:'Bearer '+token,'User-Agent':'codeql-owned-rust-flight','X-GitHub-Api-Version':'2022-11-28'}},res=>{response=res;res.on('data',b=>{bytes+=b.length;if(bytes>1024*1024){request.destroy();done(Error('actual_default_state_size'));}else chunks.push(Buffer.from(b));});res.once('error',()=>done(Error('actual_default_state_read')));res.once('aborted',()=>done(Error('actual_default_state_read')));res.once('end',()=>{if(res.statusCode!==200){const e=Error('actual_default_state_unavailable');e.defaultSetup={state:'unknown',httpStatus:res.statusCode};done(e);return;}try{const v=JSON.parse(Buffer.concat(chunks).toString('utf8'));if(!['configured','not-configured'].includes(v.state))throw Error('actual_default_state_unknown');done(null,{state:v.state,languages:Array.isArray(v.languages)?v.languages:[],observedAt:new Date().toISOString(),source:'GET code-scanning/default-setup'});}catch{done(Error('actual_default_state_unknown'));}});});request.once('error',()=>done(Error('actual_default_state_read')));timer=setTimeout(()=>{request.destroy();done(Error('actual_default_state_deadline'));},10000);request.end();}catch{done(Error('actual_default_state_read'));}});
+}
+
 export async function publishPrepared(reference,{token},services={}){
   const flight=preparedFlights.get(reference);
-  if(!flight||flight.closed||flight.publishing||!token)fail('prepared_flight_unknown');
+  if(!flight||flight.closed||flight.publishing||!token||!referenceValid(flight.nativeJob,reference))fail('prepared_flight_unknown');
+  if(Object.keys(services).length)fail('native_service_override_not_admitted');
   flight.publishing=true;
-  const io=services.fs||fs,consume=services.sarif||consumeOfficialSarif,transmit=services.send||sendSnapshot;
+  const io=fs,consume=consumeOfficialSarif,transmit=sendSnapshot;
   const publish=flight.env.DATABASE_PUBLISH==='true';
   try{
+    if(publish){const actual=await actualDefaultSetup(token);writeExclusive(path.join(flight.session.directory,'actual-default-setup.json'),JSON.stringify(actual),io);if(actual.state!=='not-configured'){const e=Error('default_setup_conflict');e.defaultSetup=actual;throw e;}}
     const result=await consume({bundle:raw(flight.official),filename:flight.officialPath,sarif:raw(flight.session.sarif),sources:flight.session.sourceBodies,workspace:path.resolve(flight.env.GITHUB_WORKSPACE),env:flight.env,token,publish,internalReads:flight.internalReads,internalAbsent:flight.internalAbsent,io});
     writeExclusive(path.join(flight.session.directory,'sarif-upload-result.json'),JSON.stringify({...flight.identity,...result}),io);
     let databaseResult={publication:false,reason:!publish?'publication_disabled':!flight.identity.database?'non_default_or_pull_request':'not_attempted'};
@@ -449,7 +473,7 @@ export async function publishPrepared(reference,{token},services={}){
     return {sarif:result,database:databaseResult,publication:publish};
   }catch(error){
     const text=String(error?.message||''),reason=/^[a-z][a-z0-9_]{0,100}$/.test(text)?text:'owned_publication_error';
-    try{writeExclusive(path.join(flight.session.directory,'consumer-failure.json'),JSON.stringify({reason,errorName:/^[A-Za-z]+Error$/.test(String(error.name))?error.name:'Error',messageSHA256:hash(Buffer.from(String(error.message||''))),officialFrames:[...String(error.stack||'').matchAll(/entry-points[.]js:([0-9]+):([0-9]+)/g)].slice(0,5).map(m=>({line:Number(m[1]),column:Number(m[2])})),ownedIO:error.ownedIO||null}),io);}catch{error.evidenceWriteFailed=true;}
+    try{writeExclusive(path.join(flight.session.directory,'consumer-failure.json'),JSON.stringify({reason,errorName:/^[A-Za-z]+Error$/.test(String(error.name))?error.name:'Error',messageSHA256:hash(Buffer.from(String(error.message||''))),officialFrames:[...String(error.stack||'').matchAll(/entry-points[.]js:([0-9]+):([0-9]+)/g)].slice(0,5).map(m=>({line:Number(m[1]),column:Number(m[2])})),ownedIO:error.ownedIO||null,defaultSetup:error.defaultSetup||null}),io);}catch{error.evidenceWriteFailed=true;}
     throw error;
   }finally{closePrepared(reference);}
 }
