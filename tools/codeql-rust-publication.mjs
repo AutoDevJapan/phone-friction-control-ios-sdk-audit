@@ -78,6 +78,7 @@ export function openZip(snapshot){
   ranges.sort((a,b)=>a[0]-b[0]);for(let i=1;i<ranges.length;i++)if(ranges[i][0]<ranges[i-1][1])fail('zip_overlap');
   return Object.freeze({
     names:Object.freeze([...entries.keys()]),
+    size(name){const entry=entries.get(name);return entry?entry.expanded:undefined;},
     async memberHash(name,expected,deadline){
       const entry=entries.get(name);if(!entry||!Number.isSafeInteger(expected)||expected<0||entry.expanded!==expected)fail('zip_entry_size');
       const packed=bytes.subarray(entry.start,entry.start+entry.compressed),digest=crypto.createHash('sha256');
@@ -127,6 +128,8 @@ export function verifySource(snapshot,inputs){
 const databaseGraphs=new WeakMap();
 const preparedFlights=new WeakMap();
 function safeDatabaseName(name){return typeof name==='string'&&name&&!name.includes('\\')&&!name.includes('\0')&&!name.split('/').some(p=>!p||p==='.'||p==='..');}
+const MEMBER_TOP_LEVELS=new Set(['db-rust','diagnostic','baseline-info.json','codeql-database.yml','src.zip','base-database-oids.json','log','logs','results','trap','temp','src']);
+function bundleMemberDiagnostic(zip,graph,relative,condition){const text=String(relative),top=text.split('/')[0],members=zip.names.filter(n=>n.startsWith('rust/')&&!n.endsWith('/')).map(n=>n.slice(5));return{condition,memberSHA256:hash(Buffer.from(text)),nameBytes:Buffer.byteLength(text),memberBytes:zip.size('rust/'+text),topLevel:MEMBER_TOP_LEVELS.has(top)?top:'other',zipFileMembers:members.length,capturedFiles:graph.files.size,projectedFiles:[...graph.files.keys()].filter(bundleProjection).length,extraFileMembers:members.filter(n=>!safeDatabaseName(n)||!graph.files.has(n)).length};}
 function fileDigest(file,io,deadline){
   let fd;
   try{
@@ -224,7 +227,8 @@ export async function verifyBundle(snapshot,sourceProof,inputs,databaseToken){
     if(relative.endsWith('/')){
       const directory=relative.slice(0,-1);if(!graph.directories.has(directory))fail('bundle_extra_directory');zip.member(name,0);continue;
     }
-    if(!safeDatabaseName(relative)||found.has(relative)||!graph.files.has(relative))fail('bundle_extra_database_member');
+    const memberCondition=!safeDatabaseName(relative)?'unsafe_name':found.has(relative)?'duplicate':!graph.files.has(relative)?'not_in_captured_graph':'';
+    if(memberCondition){const error=Error('bundle_extra_database_member');error.database=bundleMemberDiagnostic(zip,graph,relative,memberCondition);throw error;}
     const expected=graph.files.get(relative),actual=await zip.memberHash(name,expected.bytes,graph.deadline);
     if(actual.bytes!==expected.bytes||actual.sha256!==expected.sha256){const error=Error('bundle_database_bytes');error.database={memberSHA256:hash(Buffer.from(relative)),expectedBytes:expected.bytes,actualBytes:actual.bytes,expectedSHA256:expected.sha256,actualSHA256:actual.sha256};throw error;}
     found.add(relative);
