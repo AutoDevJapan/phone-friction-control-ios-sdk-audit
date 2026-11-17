@@ -195,7 +195,7 @@ jobs:
             const credential=core.getInput('github-token',{required:true}),withheld=new Map();
             for(const[key,value]of Object.entries(process.env))if(/(TOKEN|SECRET|PASSWORD|CREDENTIAL)/i.test(key)||value===credential){withheld.set(key,value);delete process.env[key];}
             try{let fd,body;
-             try{fd=fs.openSync(path.join(process.env.GITHUB_WORKSPACE,'tools','codeql-root-driver.mjs'),fs.constants.O_RDONLY|fs.constants.O_NOFOLLOW);const a=fs.fstatSync(fd);if(!a.isFile()||a.size!==32160)throw Error('root_driver_size');body=Buffer.alloc(a.size);let at=0;while(at<body.length){const n=fs.readSync(fd,body,at,body.length-at,at);if(!n)throw Error('root_driver_short');at+=n;}const z=fs.fstatSync(fd);if(a.dev!==z.dev||a.ino!==z.ino||a.size!==z.size||a.mtimeMs!==z.mtimeMs||a.ctimeMs!==z.ctimeMs||fs.readSync(fd,Buffer.alloc(1),0,1,at)!==0||crypto.createHash('sha256').update(body).digest('hex')!=='0c0bef7aeadb8478906e1783180fe55691034191db0d617ebf4e04e593870f0d')throw Error('root_driver_identity');}finally{if(fd!==undefined)fs.closeSync(fd);}
+             try{fd=fs.openSync(path.join(process.env.GITHUB_WORKSPACE,'tools','codeql-root-driver.mjs'),fs.constants.O_RDONLY|fs.constants.O_NOFOLLOW);const a=fs.fstatSync(fd);if(!a.isFile()||a.size!==36764)throw Error('root_driver_size');body=Buffer.alloc(a.size);let at=0;while(at<body.length){const n=fs.readSync(fd,body,at,body.length-at,at);if(!n)throw Error('root_driver_short');at+=n;}const z=fs.fstatSync(fd);if(a.dev!==z.dev||a.ino!==z.ino||a.size!==z.size||a.mtimeMs!==z.mtimeMs||a.ctimeMs!==z.ctimeMs||fs.readSync(fd,Buffer.alloc(1),0,1,at)!==0||crypto.createHash('sha256').update(body).digest('hex')!=='de2aa26aaa2b68a73f25bc1433b0d9e337be4e27efd0948c6ee9ea08831e8d01')throw Error('root_driver_identity');}finally{if(fd!==undefined)fs.closeSync(fd);}
              const driver=await import('data:text/javascript;base64,'+body.toString('base64'));return await driver.runRootFlight({env:{...process.env},readToken:()=>credential,log:message=>core.info(message)});
             }catch(error){const message=String(error?.message||''),reason=/^[a-z][a-z0-9_]{0,100}$/.test(message)?message:'root_flight_failed';core.setFailed(reason);return{verified:false,reason};}
             finally{for(const[key,value]of withheld)process.env[key]=value;}
@@ -368,6 +368,29 @@ jobs:
           } catch { if ($_.Exception -is [System.Management.Automation.ItemNotFoundException]) { $record.presence='missing' } else { $record.read_state='read_unavailable' } }
           finally { if ($null -ne $stream) { $stream.Dispose() } }
           [IO.File]::WriteAllText((Join-Path $env:RUNNER_TEMP 'codeql-swift-build/tracer-before.json'),($record | ConvertTo-Json),[Text.UTF8Encoding]::new($false))
+      - name: Observe tracer-environment exec behavior with bounded controls
+        id: tracer_exec_probe
+        if: ${{ always() && steps.codeql_init.outcome == 'success' }}
+        continue-on-error: true
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set -u
+          SWIFTC=$(cat "$RUNNER_TEMP/codeql-swift-build/compiler-path.txt")
+          PATH_PERL=$(command -v perl || printf missing)
+          probe() {
+            local name="$1" limit="$2" interpreter="$3" begin end status=0
+            shift 3
+            begin=$(date +%s)
+            "$interpreter" -e 'alarm shift; exec @ARGV; exit 127;' "$limit" "$@" > /dev/null 2>&1 || status=$?
+            end=$(date +%s)
+            printf 'tracer_exec_probe name=%s status=%s elapsed_seconds=%s\n' "$name" "$status" "$((end - begin))"
+          }
+          printf 'tracer_exec_probe_context path_perl=%s dyld_in_shell=%s preload_in_shell=%s\n' "$PATH_PERL" "${DYLD_INSERT_LIBRARIES:+set}" "${SEMMLE_PRELOAD_libtrace:+set}"
+          probe system_perl_true 10 /usr/bin/perl /usr/bin/true
+          probe system_perl_perl 10 /usr/bin/perl /usr/bin/perl -e 'exit 0'
+          probe system_perl_swiftc_version 10 /usr/bin/perl "$SWIFTC" --version
+          if test "$PATH_PERL" != missing; then probe path_perl_swiftc_version 10 "$PATH_PERL" "$SWIFTC" --version; fi
       - name: Observe the traced compiler version
         id: traced_version
         if: ${{ always() && steps.codeql_init.outcome == 'success' }}
