@@ -1,0 +1,865 @@
+name: CodeQL
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    - cron: '38 3 * * 5'
+permissions:
+  contents: read
+jobs:
+  publication_policy:
+    name: Evaluate publication policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      normal_uploads: ${{ steps.policy.outputs.normal_uploads }}
+      rust_uploads: ${{ steps.policy.outputs.rust_uploads }}
+      database_upload: ${{ steps.policy.outputs.database_upload }}
+      publish: ${{ steps.policy.outputs.publish }}
+    steps:
+      - name: Require exact lowercase true for publication
+        id: policy
+        shell: pwsh
+        env:
+          CODEQL_UPLOAD_REQUEST: ${{ vars.CODEQL_ADVANCED_ACTIVE }}
+          POLICY_SERVER: ${{ github.server_url }}
+          POLICY_REPOSITORY: ${{ github.repository }}
+          POLICY_REPOSITORY_ID: ${{ github.repository_id }}
+          POLICY_REF: ${{ github.ref }}
+          POLICY_EVENT: ${{ github.event_name }}
+        run: |
+          $ErrorActionPreference='Stop'
+          $enabled=[string]::Equals($env:CODEQL_UPLOAD_REQUEST,'true',[StringComparison]::Ordinal)
+          $lines=if ($enabled) {
+            @('normal_uploads=["always"]','rust_uploads=["failure-only"]','database_upload=true','publish=true')
+          } else {
+            @('normal_uploads=["never"]','rust_uploads=["never"]','database_upload=false','publish=false')
+          }
+          if ([string]::IsNullOrEmpty($env:GITHUB_OUTPUT)) { throw 'policy_output_unavailable' }
+          [IO.File]::AppendAllLines($env:GITHUB_OUTPUT,[string[]]$lines,[Text.UTF8Encoding]::new($false))
+          if ($enabled) { Write-Host 'CodeQL publication mode: active' } else { Write-Host '::notice title=CodeQL publication::validation-only; no Code Scanning upload' }
+  interpreted:
+    needs: publication_policy
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [javascript-typescript, actions]
+        upload: ${{ fromJSON(needs.publication_policy.outputs.normal_uploads) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: github/codeql-action/init@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          languages: ${{ matrix.language }}
+      - uses: github/codeql-action/analyze@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        id: codeql_analyze
+        with:
+          # Matrix values let the official post action resolve failed-run publication.
+          upload: ${{ matrix.upload }}
+          upload-database: ${{ needs.publication_policy.outputs.database_upload }}
+          output: ${{ runner.temp }}/codeql-query-results
+          category: /language:${{ matrix.language }}
+      - name: Preserve completed query results
+        if: ${{ always() && steps.codeql_analyze.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: codeql-query-${{ matrix.language }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/codeql-query-results/*.sarif
+          if-no-files-found: error
+          retention-days: 3
+  rust:
+    needs: publication_policy
+    name: Analyze (rust)
+    strategy:
+      fail-fast: false
+      matrix:
+        upload: ${{ fromJSON(needs.publication_policy.outputs.rust_uploads) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-07-18
+          components: rust-src
+          targets: aarch64-apple-ios-sim
+      - name: Identify the Rust sysroot
+        id: sysroot
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'path=%s\n' "$(rustc --print sysroot)" >> "$GITHUB_OUTPUT"
+      - name: Describe all tracked Rust inputs using the official Node24 runtime
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          CODEQL_RUST_SYSROOT: ${{ steps.sysroot.outputs.path }}
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');
+            const credential=core.getInput('github-token',{required:true});
+            const withheld=new Map();
+            for(const [key,value] of Object.entries(process.env)){
+              if(/(TOKEN|SECRET|PASSWORD|CREDENTIAL)/i.test(key)||value===credential){withheld.set(key,value);delete process.env[key];}
+            }
+            let api,prepared;
+            const digest=bytes=>crypto.createHash('sha256').update(bytes).digest('hex');
+            function readPinned(file,bytes,sha){
+              let fd;
+              try{
+                fd=fs.openSync(file,fs.constants.O_RDONLY|fs.constants.O_NOFOLLOW);
+                const before=fs.fstatSync(fd);if(!before.isFile()||before.size!==bytes)throw Error('bootstrap_source_size');
+                const result=Buffer.alloc(bytes);let at=0;
+                while(at<bytes){const n=fs.readSync(fd,result,at,bytes-at,at);if(!n)throw Error('bootstrap_source_truncated');at+=n;}
+                const tail=Buffer.alloc(1);if(fs.readSync(fd,tail,0,1,at)!==0)throw Error('bootstrap_source_grew');
+                const after=fs.fstatSync(fd);
+                if(before.dev!==after.dev||before.ino!==after.ino||before.size!==after.size||before.mtimeMs!==after.mtimeMs||before.ctimeMs!==after.ctimeMs||digest(result)!==sha)throw Error('bootstrap_source_identity');
+                return result;
+              }finally{if(fd!==undefined)fs.closeSync(fd);}
+            }
+            try{
+              if(process.versions.node.split('.')[0]!=='24')throw Error('official_runtime_major');
+              const pins=[{"name":"codeql-rust-publication.mjs","bytes":43462,"sha256":"653d0e369e77868c5bbd19deb4269263d16c7accacfeaa68c6e6c875254d9ebe"},{"name":"codeql-official-owned.mjs","bytes":13096,"sha256":"0c160875ea01772409dd70fdc5d761dc83a2e361c9c02d539d2d1a9b47ec1be4"},{"name":"codeql-bundle-owned.mjs","bytes":14501,"sha256":"5ba2f4a5521428cbb1f919f605bc2b13e8f544f38ce971afe057c755d8145063"}];
+              const held=new Map(pins.map(pin=>[pin.name,readPinned(path.join(process.env.GITHUB_WORKSPACE,'tools',pin.name),pin.bytes,pin.sha256)]));
+              const data=bytes=>'data:text/javascript;base64,'+bytes.toString('base64');
+              let main=held.get('codeql-rust-publication.mjs').toString('utf8');
+              for(const name of ['codeql-official-owned.mjs','codeql-bundle-owned.mjs']){
+                const spec="'./"+name+"'";
+                if(main.split(spec).length!==2)throw Error('bootstrap_module_graph');
+                main=main.replace(spec,JSON.stringify(data(held.get(name))));
+              }
+              api=await import(data(Buffer.from(main)));
+              if(true){
+                await api.runMode('inventory',{...process.env});
+                return {inventory:true,runtimeVersion:process.versions.node,runtimeExecutable:process.execPath,credentialsWithheld:true};
+              }
+              const official=readPinned(path.join(process.env.RUNNER_WORKSPACE,'..','_actions','github','codeql-action','33d7b85da1a04171e211befe2c739303b9a4c066','lib','entry-points.js'),7450655,'73d629849c79c82ffb9a3c2c9748f4f8639e1ac384e499f1d6678e47b011cd88');
+              const location=path.join(process.env.RUNNER_TEMP,'codeql-official-action','lib');fs.mkdirSync(location,{recursive:true});
+              fs.writeFileSync(path.join(location,'entry-points.js'),official,{flag:'wx',mode:0o400});
+              prepared=await api.prepareFlight({...process.env});
+              core.info('owned_flight_prepared_before_credentials=true database_files='+prepared.databaseFiles+' bundle_bytes='+prepared.bundleBytes);
+              const result=await api.publishPrepared(prepared,{token:credential});
+              return {verified:true,publication:result.publication,runtimeVersion:process.versions.node,runtimeExecutable:process.execPath,credentialsWithheldUntilPrepared:true};
+            }catch(error){
+              const message=String(error?.message||''),reason=/^[a-z][a-z0-9_]{0,100}$/.test(message)?message:'owned_publication_error';
+              core.setFailed(reason);return {verified:false,reason};
+            }finally{
+              if(prepared&&api)api.closePrepared(prepared);
+              for(const [name,value] of withheld)process.env[name]=value;
+            }
+            
+      - uses: github/codeql-action/init@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        id: codeql_init
+        with:
+          languages: rust
+          build-mode: none
+          db-location: ${{ runner.temp }}/codeql_databases
+      - uses: github/codeql-action/analyze@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        id: codeql_analyze
+        with:
+          # All normal Rust publication follows owned verification below.
+          # The official post action still handles genuine failed-run diagnostics.
+          upload: ${{ matrix.upload }}
+          upload-database: false
+          output: ${{ runner.temp }}/codeql-query-results
+          category: /language:rust
+      - name: Verify the whole Rust flight before exposing publication credentials
+        id: rust_owned_flight
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          DATABASE_PUBLISH: ${{ needs.publication_policy.outputs.publish }}
+          CODEQL_PATH: ${{ steps.codeql_init.outputs.codeql-path }}
+          CODEQL_DATABASES: ${{ steps.codeql_analyze.outputs.db-locations }}
+          INPUT_MATRIX: ${{ toJson(matrix) }}
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');
+            const credential=core.getInput('github-token',{required:true}),withheld=new Map();
+            for(const[key,value]of Object.entries(process.env))if(/(TOKEN|SECRET|PASSWORD|CREDENTIAL)/i.test(key)||value===credential){withheld.set(key,value);delete process.env[key];}
+            try{let fd,body;
+             try{fd=fs.openSync(path.join(process.env.GITHUB_WORKSPACE,'tools','codeql-root-driver.mjs'),fs.constants.O_RDONLY|fs.constants.O_NOFOLLOW);const a=fs.fstatSync(fd);if(!a.isFile()||a.size!==37966)throw Error('root_driver_size');body=Buffer.alloc(a.size);let at=0;while(at<body.length){const n=fs.readSync(fd,body,at,body.length-at,at);if(!n)throw Error('root_driver_short');at+=n;}const z=fs.fstatSync(fd);if(a.dev!==z.dev||a.ino!==z.ino||a.size!==z.size||a.mtimeMs!==z.mtimeMs||a.ctimeMs!==z.ctimeMs||fs.readSync(fd,Buffer.alloc(1),0,1,at)!==0||crypto.createHash('sha256').update(body).digest('hex')!=='13e62aa0783aac62dd8578f49cb9e4215455b4015bfac1b1978b4e2ad6ad7e76')throw Error('root_driver_identity');}finally{if(fd!==undefined)fs.closeSync(fd);}
+             const driver=await import('data:text/javascript;base64,'+body.toString('base64'));return await driver.runRootFlight({env:{...process.env},readToken:()=>credential,log:message=>core.info(message)});
+            }catch(error){const message=String(error?.message||''),reason=/^[a-z][a-z0-9_]{0,100}$/.test(message)?message:'root_flight_failed';core.setFailed(reason);return{verified:false,reason};}
+            finally{for(const[key,value]of withheld)process.env[key]=value;}
+      - name: Preserve failed Rust diagnostics and producer evidence
+        if: ${{ failure() && steps.codeql_analyze.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: codeql-rust-unverified-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/codeql-query-results/*.sarif
+            ${{ runner.temp }}/codeql-rust-archive-members.txt
+            ${{ runner.temp }}/codeql-verified-rust/*.json
+            ${{ runner.temp }}/codeql-verified-rust/producer-stderr.txt
+            ${{ runner.temp }}/codeql-root-bootstrap-stderr.txt
+          if-no-files-found: warn
+          retention-days: 3
+      - name: Preserve verified Rust ownership evidence
+        if: ${{ always() && steps.rust_owned_flight.outcome == 'success' && fromJSON(steps.rust_owned_flight.outputs.result).verified == true }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: codeql-query-rust-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/codeql-verified-rust/*.sarif
+            ${{ runner.temp }}/codeql-verified-rust/*.json
+            ${{ runner.temp }}/codeql-root-bootstrap-stderr.txt
+          if-no-files-found: error
+          retention-days: 3
+  swift:
+    needs: publication_policy
+    name: Analyze (swift)
+    strategy:
+      fail-fast: false
+      matrix:
+        upload: ${{ fromJSON(needs.publication_policy.outputs.normal_uploads) }}
+    runs-on: macos-15
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify the pinned compiler and SDK
+        id: preflight
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="$RUNNER_TEMP/codeql-swift-build"
+          mkdir -p "$OUT"
+          git rev-parse HEAD > "$OUT/source.txt"
+          xcodebuild -version > "$OUT/versions.txt"
+          SWIFTC=$(xcrun --find swiftc)
+          test -x "$SWIFTC"
+          case "$SWIFTC" in
+            "$DEVELOPER_DIR"/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc) ;;
+            *) exit 1 ;;
+          esac
+          printf '%s\n' "$SWIFTC" > "$OUT/compiler-path.txt"
+          shasum -a 256 "$SWIFTC" > "$OUT/compiler-sha256.txt"
+          "$SWIFTC" --version >> "$OUT/versions.txt"
+          grep -F 'Swift version 6.1.2' "$OUT/versions.txt"
+          xcrun --sdk iphonesimulator --show-sdk-version > "$OUT/sdk-version.txt"
+          test "$(cat "$OUT/sdk-version.txt")" = 18.5
+          xcrun --sdk iphonesimulator --show-sdk-path > "$OUT/sdk-path.txt"
+          printf 'linked=false\nruntime_executed=false\n' > "$OUT/scope.txt"
+          git ls-files -z -- '*.swift' > "$OUT/inputs.nul"
+          SOURCES=()
+          while IFS= read -r -d '' source; do SOURCES+=("$source"); done < "$OUT/inputs.nul"
+          test "${#SOURCES[@]}" = 1
+          test "${SOURCES[0]}" = tools/CapturedHostingLowering.swift
+          shasum -a 256 "${SOURCES[@]}" > "$OUT/inputs-sha256.txt"
+          grep -Eq '^666e48d1a4e10f6d323b7cb0b9ed5b6a95a82e55b19706a8471ee41fb67339b0  tools/CapturedHostingLowering.swift$' "$OUT/inputs-sha256.txt"
+          rosetta_status=0
+          perl -e 'alarm 10; exec @ARGV; exit 127;' /usr/bin/arch -x86_64 /usr/bin/true > "$OUT/rosetta.stdout.txt" 2> "$OUT/rosetta.stderr.txt" || rosetta_status=$?
+          printf 'status=%s\nprobe=x86_64_true\ninstallation_attempted=false\n' "$rosetta_status" > "$OUT/rosetta-status.txt"
+          cat > "$OUT/compiler-phase.sh" <<'PHASE'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          BASE="$RUNNER_TEMP/codeql-swift-build"
+          phase="${1-}"
+          case "$phase" in
+            nontrace) OUT="$BASE/nontrace"; limit=60 ;;
+            traced-version) OUT="$BASE/traced-version"; limit=10 ;;
+            trace) OUT="$BASE"; limit=60 ;;
+            *) exit 2 ;;
+          esac
+          mkdir -p "$OUT"
+          (set -o noclobber; : > "$OUT/phase-created")
+          SWIFTC=$(cat "$BASE/compiler-path.txt")
+          SDK=$(cat "$BASE/sdk-path.txt")
+          shasum -a 256 -c "$BASE/compiler-sha256.txt" > "$OUT/compiler-recheck.txt"
+          shasum -a 256 -c "$BASE/inputs-sha256.txt" > "$OUT/input-recheck.txt"
+          SOURCES=()
+          while IFS= read -r -d '' source; do SOURCES+=("$source"); done < "$BASE/inputs.nul"
+          test "${#SOURCES[@]}" = 1
+          test "${SOURCES[0]}" = tools/CapturedHostingLowering.swift
+          if test "$phase" = traced-version; then
+            COMMAND=("$SWIFTC" --version)
+          else
+            test ! -e "$OUT/inspection.o"
+            mkdir "$OUT/module-cache"
+            COMMAND=("$SWIFTC" -v -target arm64-apple-ios18.5-simulator -sdk "$SDK"
+              -swift-version 6 -parse-as-library -module-name CodeQLSDKInputs
+              -whole-module-optimization -module-cache-path "$OUT/module-cache"
+              -emit-object "${SOURCES[@]}" -o "$OUT/inspection.o")
+          fi
+          printf '%s\0' "${COMMAND[@]}" > "$OUT/compile-argv.nul"
+          printf '%q ' "${COMMAND[@]}" > "$OUT/compile-command.txt"
+          printf '\n' >> "$OUT/compile-command.txt"
+          printf 'phase=%s\nmodule_cache_policy=separate_fresh_phase_directories\nsystem_cache_state=not_controlled\n' "$phase" > "$OUT/phase-identity.txt"
+          date -u '+started_utc=%Y-%m-%dT%H:%M:%SZ' > "$OUT/compile-timing.txt"
+          # This per-launch correlation token is not a process-generation proof.
+          wrapper_nonce=''
+          if nonce_candidate=$(/usr/bin/uuidgen 2>/dev/null); then
+            if [[ "$nonce_candidate" =~ ^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$ ]]; then wrapper_nonce="$nonce_candidate"; fi
+          fi
+          printf '%s\n' "$wrapper_nonce" > "$OUT/wrapper-attempt-nonce.txt" || :
+          perl -e 'my $s=shift; my $phase=shift; my $nonce=shift; sub marker { my $event=shift; local $@; local $!; eval { syswrite STDERR, "swift-wrapper-v2 phase=$phase pid=$$ nonce=$nonce event=$event\n"; 1; }; } marker("body"); alarm $s; marker("alarm_armed"); marker("exec_requested"); exec @ARGV; marker("exec_returned_error"); exit 127;' "$limit" "$phase" "$wrapper_nonce" "${COMMAND[@]}" > "$OUT/compile.stdout.txt" 2> "$OUT/compile.stderr.txt" &
+          command_pid=$!
+          printf '%s\n' "$command_pid" > "$OUT/command-pid.txt"
+          snapshot_status=0
+          LC_ALL=C TZ=UTC perl -e 'alarm 2; my $ready=select(undef,undef,undef,1); exit 125 if !defined($ready); exec @ARGV; exit 127;' /bin/ps -p "$command_pid" -o pid=,ppid=,lstart=,state=,comm= > "$OUT/process-before.raw" 2> "$OUT/process-before.stderr" || snapshot_status=$?
+          printf 'status=%s\n' "$snapshot_status" > "$OUT/process-before-status.txt"
+          status=0
+          wait "$command_pid" || status=$?
+          date -u '+command_returned_utc=%Y-%m-%dT%H:%M:%SZ' >> "$OUT/compile-timing.txt"
+          collection=command-returned
+          if test "$status" != 0; then collection=unknown; fi
+          printf 'status=%s\nlimit_seconds=%s\ncollection_state=%s\ndescendant_drain=unconfirmed\n' "$status" "$limit" "$collection" > "$OUT/compile-status.txt"
+          cat "$OUT/compile-status.txt"
+          test "$status" = 0
+          if test "$phase" != traced-version; then test -s "$OUT/inspection.o"; fi
+          PHASE
+      - name: Observe the exact non-traced object control
+        id: nontrace
+        timeout-minutes: 2
+        shell: bash
+        run: bash "$RUNNER_TEMP/codeql-swift-build/compiler-phase.sh" nontrace
+      - uses: github/codeql-action/init@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        id: codeql_init
+        if: ${{ always() && steps.preflight.outcome == 'success' }}
+        with:
+          languages: swift
+          build-mode: manual
+      - name: Record the pre-command tracer observation
+        if: ${{ always() && steps.codeql_init.outcome == 'success' }}
+        timeout-minutes: 1
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $record=[ordered]@{ presence='unknown'; observed_bytes=$null; sampled_bytes=0; sample_sha256=$null; read_state='not_read' }
+          $stream=$null
+          try {
+            $path=Join-Path $env:RUNNER_TEMP 'codeql_databases/log/build-tracer.log'
+            $item=Get-Item -LiteralPath $path -Force -ErrorAction Stop
+            if (-not $item.PSIsContainer -and ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) {
+              $record.presence='present'; $record.observed_bytes=$item.Length
+              $stream=[IO.File]::Open($path,[IO.FileMode]::Open,[IO.FileAccess]::Read,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+              $buffer=[byte[]]::new(65536); $count=0
+              while ($count -lt $buffer.Length) { $n=$stream.Read($buffer,$count,$buffer.Length-$count); if ($n -eq 0) { break }; $count+=$n }
+              $sha=[Security.Cryptography.SHA256]::Create()
+              try { $record.sample_sha256=[Convert]::ToHexString($sha.ComputeHash($buffer,0,$count)).ToLowerInvariant() } finally { $sha.Dispose() }
+              $record.sampled_bytes=$count; $record.read_state='bounded_prefix_observed'; [Array]::Clear($buffer,0,$buffer.Length)
+            }
+          } catch { if ($_.Exception -is [System.Management.Automation.ItemNotFoundException]) { $record.presence='missing' } else { $record.read_state='read_unavailable' } }
+          finally { if ($null -ne $stream) { $stream.Dispose() } }
+          [IO.File]::WriteAllText((Join-Path $env:RUNNER_TEMP 'codeql-swift-build/tracer-before.json'),($record | ConvertTo-Json),[Text.UTF8Encoding]::new($false))
+      - name: Observe the traced compiler version
+        id: traced_version
+        if: ${{ always() && steps.codeql_init.outcome == 'success' }}
+        timeout-minutes: 1
+        shell: bash
+        run: bash "$RUNNER_TEMP/codeql-swift-build/compiler-phase.sh" traced-version
+      - name: Compile the tracked SDK inspection sources
+        id: compile
+        if: ${{ always() && steps.codeql_init.outcome == 'success' }}
+        timeout-minutes: 2
+        shell: bash
+        run: bash "$RUNNER_TEMP/codeql-swift-build/compiler-phase.sh" trace
+      - uses: github/codeql-action/analyze@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        id: codeql_analyze
+        with:
+          # Matrix values let the official post action resolve failed-run publication.
+          upload: ${{ matrix.upload }}
+          upload-database: ${{ needs.publication_policy.outputs.database_upload }}
+          output: ${{ runner.temp }}/codeql-query-results
+          category: /language:swift
+      - name: Preserve completed query results
+        if: ${{ always() && steps.codeql_analyze.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: codeql-query-swift-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/codeql-query-results/*.sarif
+          if-no-files-found: error
+          retention-days: 3
+      - name: Record bounded diagnostic metadata
+        id: evidence
+        if: always()
+        timeout-minutes: 1
+        shell: pwsh
+        env:
+          EVIDENCE_INIT_OUTCOME: ${{ steps.codeql_init.outcome }}
+          EVIDENCE_COMPILE_OUTCOME: ${{ steps.compile.outcome }}
+          EVIDENCE_ANALYZE_OUTCOME: ${{ steps.codeql_analyze.outcome }}
+          EVIDENCE_CONTROL_OUTCOME: ${{ steps.nontrace.outcome }}
+          EVIDENCE_VERSION_OUTCOME: ${{ steps.traced_version.outcome }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Evidence functions begin. Host controls use these exact functions.
+          function ConvertTo-SafeDiagnosticPrefix {
+            param([string]$Text)
+            $counts=[ordered]@{ examined_lines=0; kept_lines=0; sensitive_lines=0; context_lines=0;
+              oversized_lines=0; truncated=$false; line_limit=256; line_character_limit=512; character_limit=16384;
+              format_state='unverified'; parsed_event_count=$null; execution_confirmed=$false }
+            $known=@('trace','tracer','exec','execve','spawn','fork','wait','waitpid','signal','alarm','timeout',
+              'compiler','frontend','swift','swiftc','clang','codeql','extractor','error','warning','failed',
+              'load','loaded','loading','attach','detach','dyld','process','exit','exited','start','started',
+              'return','returned','libtrace','codesign','signing','copy','copying')
+            $kept=[Collections.Generic.List[string]]::new(); $characters=0
+            foreach ($line in ($Text -split "\r?\n")) {
+              $counts.examined_lines++
+              if ($counts.examined_lines -gt 256) { $counts.truncated=$true; break }
+              if ($line.Length -gt 2048) { $counts.oversized_lines++ }
+              if ($line -match '(?i)authorization|password|passwd|secret|credential|token|api[-_]?key|private[-_ ]?key|cookie|\benv(?:ironment|p)?\b' -or
+                  $line -cmatch '(?:^|[\s{,])["'']?[A-Z_][A-Z0-9_]{1,}["'']?\s*[:=]') {
+                $counts.sensitive_lines++; continue
+              }
+              # Only code-owned enum words leave this observer. No free-form fragment,
+              # identifier, environment value, path, address, URL or argument is exported.
+              $tags=@($known | Where-Object { [regex]::IsMatch($line,'(?i)\b'+[regex]::Escape($_)+'\b') })
+              if ($tags.Count -eq 0) { $counts.context_lines++; continue }
+              $safe='L'+$counts.examined_lines+': lexical_tokens='+($tags -join ',')
+              if ($characters+$safe.Length+1 -gt 16384) { $counts.truncated=$true; break }
+              $kept.Add($safe); $characters+=$safe.Length+1; $counts.kept_lines++
+            }
+            return [pscustomobject]@{ policy='technical-enum-projection-v1'; text=($kept -join [char]10); counts=[pscustomobject]$counts }
+          }
+          function Get-EvidenceProbe {
+            param([string]$SourcePath, [string]$Role, [ref]$SampleText)
+            $row = [ordered]@{ role=$Role; presence='unknown'; kind='unknown'; observed_bytes=$null;
+              sampled_bytes=0; sample_sha256=$null; sample_limit=65536; read_state='not_read';
+              markers=@{ swift_version=$false; frontend_token=$false; error_token=$false };
+              redacted_prefix=$null; redaction=$null }
+            try { $item = Get-Item -LiteralPath $SourcePath -Force -ErrorAction Stop }
+            catch {
+              if ($_.Exception -is [System.Management.Automation.ItemNotFoundException]) { $row.presence='missing' }
+              return [pscustomobject]$row
+            }
+            $row.presence='present'
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { $row.kind='link_not_read'; return [pscustomobject]$row }
+            if ($item.PSIsContainer) { $row.kind='directory'; return [pscustomobject]$row }
+            $row.kind='file'; $row.observed_bytes=$item.Length
+            $stream=$null
+            try {
+              $stream=[IO.File]::Open($SourcePath,[IO.FileMode]::Open,[IO.FileAccess]::Read,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+              $buffer=[byte[]]::new(65536); $count=0
+              while ($count -lt $buffer.Length) {
+                $n=$stream.Read($buffer,$count,$buffer.Length-$count)
+                if ($n -eq 0) { break }; $count+=$n
+              }
+              $sample=[byte[]]::new($count); [Array]::Copy($buffer,$sample,$count)
+              $sha=[Security.Cryptography.SHA256]::Create()
+              try { $row.sample_sha256=[Convert]::ToHexString($sha.ComputeHash($sample)).ToLowerInvariant() }
+              finally { $sha.Dispose() }
+              $text=[Text.Encoding]::UTF8.GetString($sample)
+              $row.sampled_bytes=$count; $row.read_state='bounded_prefix_observed'
+              $row.markers.swift_version=$text.Contains('Swift version')
+              $row.markers.frontend_token=$text.Contains('-frontend')
+              $row.markers.error_token=$text.ToLowerInvariant().Contains('error:')
+              if ($Role -match '^(?:build_tracer|(?:compiler_build|nontrace_control|traced_version)/compile\.(?:stdout|stderr)\.txt|swift_logs/|swift_diagnostics/)') {
+                $projection=ConvertTo-SafeDiagnosticPrefix $text
+                $row.redacted_prefix=$projection.text; $row.redaction=$projection.counts
+              }
+              if ($PSBoundParameters.ContainsKey('SampleText')) { $SampleText.Value=$text }
+              [Array]::Clear($buffer,0,$buffer.Length); [Array]::Clear($sample,0,$sample.Length)
+            } catch { $row.read_state='read_unavailable' }
+            finally { if ($null -ne $stream) { $stream.Dispose() } }
+            return [pscustomobject]$row
+          }
+          function Get-EvidenceCommandStatus {
+            param([string]$Directory,[string]$Name='compile-status.txt')
+            $text=$null; $probe=Get-EvidenceProbe (Join-Path $Directory $Name) 'compiler_status' ([ref]$text)
+            $value=$null
+            if ($probe.read_state -eq 'bounded_prefix_observed') {
+              $matches=[regex]::Matches($text,'(?m)^status=(\d+)\r?$')
+              if ($matches.Count -eq 1) { $parsed=0; if ([int]::TryParse($matches[0].Groups[1].Value,[ref]$parsed) -and $parsed -le 255) { $value=$parsed } }
+            }
+            return [pscustomobject]@{ command_status=$value; status_probe=$probe }
+          }
+          function Get-EvidenceRootObservation {
+            param([string]$Directory)
+            $result=[ordered]@{ state='unknown'; reason='pid_missing_or_invalid'; launch_pid=$null; observed_pid=$null;
+              start_time_utc=$null; start_time_precision='seconds'; process_category=$null; process_state=$null;
+              generation_proved=$false; descendant_collection='not_verified'; snapshot_status=$null }
+            $timing=$null; [void](Get-EvidenceProbe (Join-Path $Directory 'compile-timing.txt') 'command_time' ([ref]$timing))
+            foreach ($key in @('started_utc','command_returned_utc')) {
+              $result[$key]=$null; $m=[regex]::Matches([string]$timing,('(?m)^'+$key+'=([^\r\n]+)\r?$')); $v=[DateTime]::MinValue
+              if ($m.Count -eq 1 -and [DateTime]::TryParseExact($m[0].Groups[1].Value,"yyyy-MM-dd'T'HH:mm:ss'Z'",[Globalization.CultureInfo]::InvariantCulture,([Globalization.DateTimeStyles]::AssumeUniversal -bor [Globalization.DateTimeStyles]::AdjustToUniversal),[ref]$v)) { $result[$key]=$v.ToString('o') }
+            }
+            $result.timing_clock='utc_wall_seconds_includes_observer'
+            $text=$null; $probe=Get-EvidenceProbe (Join-Path $Directory 'command-pid.txt') 'launch_pid' ([ref]$text)
+            $ownerId=0
+            if ($probe.read_state -ne 'bounded_prefix_observed' -or $text -notmatch '^[1-9][0-9]{0,9}\r?\n?$' -or -not [int]::TryParse($text.Trim(),[ref]$ownerId)) { return [pscustomobject]$result }
+            $result.launch_pid=$ownerId
+            $statusText=$null; $statusProbe=Get-EvidenceProbe (Join-Path $Directory 'process-before-status.txt') 'process_status' ([ref]$statusText)
+            $statusMatches=[regex]::Matches([string]$statusText,'(?m)^status=(\d+)\r?$'); $snapshotStatus=0
+            if ($statusProbe.read_state -ne 'bounded_prefix_observed' -or $statusMatches.Count -ne 1 -or -not [int]::TryParse($statusMatches[0].Groups[1].Value,[ref]$snapshotStatus) -or $snapshotStatus -gt 255) { $result.reason='snapshot_status_unknown'; return [pscustomobject]$result }
+            $result.snapshot_status=$snapshotStatus
+            if ($snapshotStatus -ne 0) { $result.reason='snapshot_command_not_successful'; return [pscustomobject]$result }
+            $raw=$null; $rawProbe=Get-EvidenceProbe (Join-Path $Directory 'process-before.raw') 'process_sample' ([ref]$raw)
+            $match=[regex]::Match([string]$raw,'^\s*(?<id>[1-9][0-9]*)\s+(?<parent>[0-9]+)\s+(?<start>(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+[0-9]{1,2}\s+[0-9:]{8}\s+[0-9]{4})\s+(?<state>[A-Za-z+<>-]{1,12})\s+(?<command>[^\r\n]+?)\s*$')
+            if ($rawProbe.read_state -ne 'bounded_prefix_observed' -or -not $match.Success) { $result.reason='snapshot_format_unknown'; return [pscustomobject]$result }
+            $observedId=0
+            if (-not [int]::TryParse($match.Groups['id'].Value,[ref]$observedId) -or $observedId -ne $ownerId) { $result.reason='snapshot_pid_mismatch'; return [pscustomobject]$result }
+            $startTime=[DateTime]::MinValue; $startText=[regex]::Replace($match.Groups['start'].Value,'\s+',' ')
+            if (-not [DateTime]::TryParseExact($startText,'ddd MMM d HH:mm:ss yyyy',[Globalization.CultureInfo]::InvariantCulture,([Globalization.DateTimeStyles]::AssumeUniversal -bor [Globalization.DateTimeStyles]::AdjustToUniversal),[ref]$startTime)) { $result.reason='snapshot_time_unknown'; return [pscustomobject]$result }
+            $leaf=($match.Groups['command'].Value.Trim() -split '/')[-1]
+            $result.process_category=if ($leaf -in @('perl','swiftc','swift-driver','swift-frontend','codeql','codesign','java')) { $leaf } else { 'other' }
+            $state=$match.Groups['state'].Value.Substring(0,1); $result.process_state=if ($state -in @('R','S','I','T','U','Z')) { $state } else { 'other' }
+            $result.observed_pid=$observedId; $result.start_time_utc=$startTime.ToString('o')
+            $result.state='pid_candidate_observed'; $result.reason='observational_only_not_an_authority_or_reap_proof'
+            return [pscustomobject]$result
+          }
+          # Wrapper progress functions begin. Tokens are not kernel exec proof.
+          function ConvertFrom-SwiftWrapperPrefix {
+            param([AllowNull()][string]$Text,[AllowNull()][object]$ExpectedPhase,
+              [AllowNull()][object]$ExpectedPID,[AllowNull()][object]$CommandStatus,
+              [AllowNull()][object]$ExpectedNonce=$null,
+              [AllowNull()][object]$CollectionState,[string]$ReadState='not_read',
+              [AllowNull()][object]$ObservedBytes=$null,[AllowNull()][object]$SampledBytes=$null)
+            $result=[ordered]@{
+              protocol='swift-wrapper-v2'; state='unavailable'; reason='phase_context_unknown';
+              phase=$null; launch_pid=$null; attempt_nonce=$null; command_status=$null; collection_state=$null;
+              observed_prefix=@(); observed_event_count=0; prefix_complete=$false;
+              exec_returned_error_token_observed=$false;
+              correlation_kind='observed_phase_pid_attempt_nonce_status_text_only';
+              context_read_atomic=$false; source_quiescence_proved=$false;
+              kernel_exec_success=$null; kernel_exec_success_proved=$false;
+              pid_generation_proved=$false; descendant_reap_proved=$false
+            }
+            if ($ExpectedPhase -isnot [string] -or $ExpectedPhase -cnotin @('nontrace','traced-version','trace')) { return [pscustomobject]$result }
+            $result.phase=$ExpectedPhase
+            if (($ExpectedPID -isnot [int] -and $ExpectedPID -isnot [long]) -or $ExpectedPID -le 0 -or $ExpectedPID -gt [int]::MaxValue) {
+              $result.reason='pid_context_unknown'; return [pscustomobject]$result
+            }
+            $result.launch_pid=[int]$ExpectedPID
+            if (($CommandStatus -isnot [int] -and $CommandStatus -isnot [long]) -or $CommandStatus -lt 0 -or $CommandStatus -gt 255) {
+              $result.reason='status_context_unknown'; return [pscustomobject]$result
+            }
+            $result.command_status=[int]$CommandStatus
+            $expectedCollection=if ($CommandStatus -eq 0) { 'command-returned' } else { 'unknown' }
+            if ($CollectionState -isnot [string] -or $CollectionState -cne $expectedCollection) {
+              $result.reason='collection_context_mismatch'; return [pscustomobject]$result
+            }
+            $result.collection_state=$CollectionState
+            if ($ExpectedNonce -isnot [string] -or $ExpectedNonce -cnotmatch '\A[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\z') {
+              $result.reason='nonce_context_unknown'; return [pscustomobject]$result
+            }
+            $result.attempt_nonce=$ExpectedNonce
+            if ($ReadState -cne 'bounded_prefix_observed' -or $null -eq $Text) { $result.reason='sample_unavailable'; return [pscustomobject]$result }
+            if (($ObservedBytes -isnot [int] -and $ObservedBytes -isnot [long]) -or
+                ($SampledBytes -isnot [int] -and $SampledBytes -isnot [long]) -or $SampledBytes -lt 0 -or $ObservedBytes -lt 0) {
+              $result.reason='sample_size_unknown'; return [pscustomobject]$result
+            }
+            # GUARD_SAMPLE_BOUND
+            if ($SampledBytes -ge 65536 -or $ObservedBytes -ne $SampledBytes) {
+              $result.reason='sample_bounded_or_changing'; return [pscustomobject]$result
+            }
+            if ([Text.Encoding]::UTF8.GetByteCount($Text) -ne $SampledBytes -or $Text.IndexOf([char]0) -ge 0 -or $Text.IndexOf([char]0xfffd) -ge 0) {
+              $result.reason='sample_text_unverified'; return [pscustomobject]$result
+            }
+            if ($Text.Length -eq 0) { $result.reason='markers_missing'; return [pscustomobject]$result }
+            if (-not $Text.EndsWith([string][char]10,[StringComparison]::Ordinal)) { $result.reason='unterminated_sample'; return [pscustomobject]$result }
+            $lines=@($Text -split [char]10); $lineCount=$lines.Count-1
+            if ($lineCount -gt 256) { $result.reason='line_limit'; return [pscustomobject]$result }
+            $events=[Collections.Generic.List[string]]::new()
+            $order=@('body','alarm_armed','exec_requested','exec_returned_error')
+            for ($lineIndex=0; $lineIndex -lt $lineCount; $lineIndex++) {
+              $line=$lines[$lineIndex]
+              if ($line.IndexOf('swift-wrapper',[StringComparison]::OrdinalIgnoreCase) -lt 0) { continue }
+              $m=[regex]::Match($line,'\Aswift-wrapper-v2 phase=(?<phase>nontrace|traced-version|trace) pid=(?<pid>[1-9][0-9]{0,9}) nonce=(?<nonce>[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}) event=(?<event>body|alarm_armed|exec_requested|exec_returned_error)\z')
+              if (-not $m.Success) { $result.state='rejected_observation'; $result.reason='marker_format_invalid'; return [pscustomobject]$result }
+              # GUARD_PHASE
+              if ($m.Groups['phase'].Value -cne $ExpectedPhase) {
+                $result.state='rejected_observation'; $result.reason='phase_mismatch'; return [pscustomobject]$result
+              }
+              $markerPid=0
+              if (-not [int]::TryParse($m.Groups['pid'].Value,[ref]$markerPid)) { $result.state='rejected_observation'; $result.reason='marker_pid_invalid'; return [pscustomobject]$result }
+              # GUARD_PID
+              if ($markerPid -ne $ExpectedPID) {
+                $result.state='rejected_observation'; $result.reason='pid_mismatch'; return [pscustomobject]$result
+              }
+              # GUARD_NONCE
+              if ($m.Groups['nonce'].Value -cne $ExpectedNonce) {
+                $result.state='rejected_observation'; $result.reason='nonce_mismatch'; return [pscustomobject]$result
+              }
+              $event=$m.Groups['event'].Value
+              if ($events.Contains($event)) { $result.state='rejected_observation'; $result.reason='duplicate_event'; return [pscustomobject]$result }
+              # GUARD_ORDER
+              if ($events.Count -ge $order.Count -or $event -cne $order[$events.Count]) {
+                $result.state='rejected_observation'; $result.reason='event_order_mismatch'; return [pscustomobject]$result
+              }
+              $events.Add($event)
+            }
+            if ($events.Count -eq 0) { $result.reason='markers_missing'; return [pscustomobject]$result }
+            # GUARD_CONTROLFLOW
+            if ($events.Count -eq 4 -and $CommandStatus -ne 127) {
+              $result.state='rejected_observation'; $result.reason='exec_error_status_mismatch'; return [pscustomobject]$result
+            }
+            $result.observed_prefix=$events.ToArray(); $result.observed_event_count=$events.Count
+            $result.prefix_complete=$events.Count -ge 3
+            $result.exec_returned_error_token_observed=$events.Count -eq 4
+            $result.state=if ($result.prefix_complete) { 'complete_prefix_observation' } else { 'partial_prefix_observation' }
+            $result.reason='correlated_tokens_not_exec_or_generation_proof'
+            return [pscustomobject]$result
+          }
+          function Get-SwiftWrapperObservation {
+            param([string]$Directory,[string]$ExpectedPhase)
+            $statusText=$null
+            $statusProbe=Get-EvidenceProbe (Join-Path $Directory 'compile-status.txt') 'wrapper_context_status' ([ref]$statusText)
+            $pidText=$null
+            $pidProbe=Get-EvidenceProbe (Join-Path $Directory 'command-pid.txt') 'wrapper_context_pid' ([ref]$pidText)
+            $nonceText=$null
+            $nonceProbe=Get-EvidenceProbe (Join-Path $Directory 'wrapper-attempt-nonce.txt') 'wrapper_context_nonce' ([ref]$nonceText)
+            $stderrText=$null
+            $stderrProbe=Get-EvidenceProbe (Join-Path $Directory 'compile.stderr.txt') 'wrapper_context_stderr' ([ref]$stderrText)
+            $commandStatus=$null; $collection=$null; $launchId=$null; $attemptNonce=$null
+            $limit=if ($ExpectedPhase -ceq 'traced-version') { '10' } else { '60' }
+            if ($statusProbe.read_state -ceq 'bounded_prefix_observed' -and $statusProbe.kind -ceq 'file' -and
+                $statusProbe.observed_bytes -eq $statusProbe.sampled_bytes -and $statusProbe.sampled_bytes -lt 65536) {
+              $statusMatch=[regex]::Match([string]$statusText,'\Astatus=(?<status>0|[1-9][0-9]{0,2})\nlimit_seconds=(?<limit>10|60)\ncollection_state=(?<collection>command-returned|unknown)\ndescendant_drain=unconfirmed\n\z')
+              $parsedStatus=0
+              if ($statusMatch.Success -and $statusMatch.Groups['limit'].Value -ceq $limit -and
+                  [int]::TryParse($statusMatch.Groups['status'].Value,[ref]$parsedStatus) -and $parsedStatus -le 255) {
+                $commandStatus=$parsedStatus; $collection=$statusMatch.Groups['collection'].Value
+              }
+            }
+            if ($pidProbe.read_state -ceq 'bounded_prefix_observed' -and $pidProbe.kind -ceq 'file' -and
+                $pidProbe.observed_bytes -eq $pidProbe.sampled_bytes -and $pidProbe.sampled_bytes -lt 65536) {
+              $pidMatch=[regex]::Match([string]$pidText,'\A(?<pid>[1-9][0-9]{0,9})\n\z')
+              $parsedPID=0
+              if ($pidMatch.Success -and [int]::TryParse($pidMatch.Groups['pid'].Value,[ref]$parsedPID)) { $launchId=$parsedPID }
+            }
+            if ($nonceProbe.read_state -ceq 'bounded_prefix_observed' -and $nonceProbe.kind -ceq 'file' -and
+                $nonceProbe.observed_bytes -eq $nonceProbe.sampled_bytes -and $nonceProbe.sampled_bytes -lt 65536) {
+              $nonceMatch=[regex]::Match([string]$nonceText,'\A(?<nonce>[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12})\n\z')
+              if ($nonceMatch.Success) { $attemptNonce=$nonceMatch.Groups['nonce'].Value }
+            }
+            $prefixArguments=@{
+              Text=$stderrText; ExpectedPhase=$ExpectedPhase; ExpectedPID=$launchId; ExpectedNonce=$attemptNonce;
+              CommandStatus=$commandStatus; CollectionState=$collection; ReadState=$stderrProbe.read_state;
+              ObservedBytes=$stderrProbe.observed_bytes; SampledBytes=$stderrProbe.sampled_bytes
+            }
+            $prefix=ConvertFrom-SwiftWrapperPrefix @prefixArguments
+            $statusText=$null; $pidText=$null; $nonceText=$null; $stderrText=$null
+            return [pscustomobject]@{
+              protocol='swift-wrapper-v2'; phase=$ExpectedPhase; observation=$prefix;
+              source_probes=@{ command_status=$statusProbe; launch_pid=$pidProbe; attempt_nonce=$nonceProbe; stderr=$stderrProbe };
+              correlation_scope='independent_bounded_live_samples_not_atomic_or_generation_proof';
+              body_token_means='Perl_wrapper_body_not_Swift_body';
+              kernel_exec_success=$null; pid_generation_proved=$false; descendant_reap_proved=$false
+            }
+          }
+          # Wrapper progress functions end.
+          function Get-EvidenceTracerDelta {
+            param([string]$BuildRoot,[string]$DatabaseRoot)
+            $result=[ordered]@{ state='not_comparable'; reason='before_observation_unavailable';
+              before=$null; after=$null; source_identity_pinned=$false; source_quiescence_proved=$false;
+              parser_state='format_unverified'; parsed_event_count=$null }
+            $text=$null; $probe=Get-EvidenceProbe (Join-Path $BuildRoot 'tracer-before.json') 'tracer_before_metadata' ([ref]$text)
+            $after=Get-EvidenceProbe (Join-Path $DatabaseRoot 'log/build-tracer.log') 'build_tracer'
+            $result.after=[pscustomobject]@{ presence=$after.presence; observed_bytes=$after.observed_bytes; sampled_bytes=$after.sampled_bytes; sample_sha256=$after.sample_sha256; read_state=$after.read_state }
+            if ($probe.read_state -ne 'bounded_prefix_observed') { return [pscustomobject]$result }
+            try { $before=$text | ConvertFrom-Json -AsHashtable -ErrorAction Stop } catch { $result.reason='before_metadata_parse_failure'; return [pscustomobject]$result }
+            if ($null -eq $before -or $before -isnot [System.Collections.IDictionary] -or $before.Count -ne 5 -or
+                @($before.Keys | Where-Object { $_ -notin @('presence','observed_bytes','sampled_bytes','sample_sha256','read_state') }).Count -ne 0 -or
+                $before.presence -notin @('present','missing','unknown') -or $before.read_state -notin @('not_read','bounded_prefix_observed','read_unavailable') -or
+                $before.sampled_bytes -isnot [long] -or $before.sampled_bytes -lt 0 -or $before.sampled_bytes -gt 65536 -or
+                ($null -ne $before.observed_bytes -and ($before.observed_bytes -isnot [long] -or $before.observed_bytes -lt 0)) -or
+                ($null -ne $before.sample_sha256 -and ($before.sample_sha256 -isnot [string] -or $before.sample_sha256 -cnotmatch '^[0-9a-f]{64}$'))) {
+              $result.reason='before_metadata_invalid'; return [pscustomobject]$result
+            }
+            $result.before=[pscustomobject]$before
+            if ($before.presence -ne 'present' -or $before.read_state -ne 'bounded_prefix_observed' -or
+                $null -eq $before.sample_sha256 -or $null -eq $before.observed_bytes -or
+                $after.presence -ne 'present' -or $after.read_state -ne 'bounded_prefix_observed') {
+              $result.reason='one_observation_missing_or_unknown'; return [pscustomobject]$result
+            }
+            $result.state=if ($before.sample_sha256 -eq $after.sample_sha256 -and $before.sampled_bytes -eq $after.sampled_bytes -and $before.observed_bytes -eq $after.observed_bytes) { 'same_observed_prefix_and_size' } else { 'changed_observation' }
+            $result.reason='bounded_unpinned_live_samples_not_a_causal_event_diff'
+            return [pscustomobject]$result
+          }
+          function Export-CodeQLSwiftEvidence {
+            param([string]$BuildRoot,[string]$DatabaseRoot,[string]$OutFile,
+              [string]$InitOutcome,[string]$CompileOutcome,[string]$AnalyzeOutcome,
+              [string]$ControlOutcome='unknown',[string]$VersionOutcome='unknown')
+            $outFull=[IO.Path]::GetFullPath($OutFile)
+            if ([IO.Path]::GetFileName($outFull) -ne 'evidence-manifest.json') { throw 'evidence_output_name' }
+            foreach ($sourceRoot in @($BuildRoot,$DatabaseRoot)) {
+              $prefix=[IO.Path]::GetFullPath($sourceRoot).TrimEnd([IO.Path]::DirectorySeparatorChar)+[IO.Path]::DirectorySeparatorChar
+              if ($outFull.StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase)) { throw 'evidence_output_inside_source' }
+            }
+            $statusText=$null
+            $statusProbe=Get-EvidenceProbe (Join-Path $BuildRoot 'compile-status.txt') 'compiler_status' ([ref]$statusText)
+            $status=$null
+            if ($null -ne $statusText -and $statusProbe.read_state -eq 'bounded_prefix_observed') {
+              $statusMatches=[regex]::Matches($statusText,'(?m)^status=(\d+)\r?$')
+              if ($statusMatches.Count -eq 1) {
+                $value=0
+                if ([int]::TryParse($statusMatches[0].Groups[1].Value,[ref]$value) -and $value -le 255) { $status=$value }
+              }
+            }
+            $statusText=$null
+            $control=Get-EvidenceCommandStatus (Join-Path $BuildRoot 'nontrace')
+            $version=Get-EvidenceCommandStatus (Join-Path $BuildRoot 'traced-version')
+            $validOutcomes=@('success','failure','skipped','cancelled')
+            if ($InitOutcome -notin $validOutcomes) { $InitOutcome='unknown' }
+            if ($CompileOutcome -notin $validOutcomes) { $CompileOutcome='unknown' }
+            if ($AnalyzeOutcome -notin $validOutcomes) { $AnalyzeOutcome='unknown' }
+            if ($ControlOutcome -notin $validOutcomes) { $ControlOutcome='unknown' }
+            if ($VersionOutcome -notin $validOutcomes) { $VersionOutcome='unknown' }
+            $definitions=@(
+              @{ id='compiler_build'; path=$BuildRoot; template='$BUILD_ROOT'; directory=$true },
+              @{ id='nontrace_control'; path=(Join-Path $BuildRoot 'nontrace'); template='$BUILD_ROOT/nontrace'; directory=$true },
+              @{ id='traced_version'; path=(Join-Path $BuildRoot 'traced-version'); template='$BUILD_ROOT/traced-version'; directory=$true },
+              @{ id='build_tracer'; path=(Join-Path $DatabaseRoot 'log/build-tracer.log'); template='$DATABASE_ROOT/log/build-tracer.log'; directory=$false },
+              @{ id='swift_logs'; path=(Join-Path $DatabaseRoot 'swift/log'); template='$DATABASE_ROOT/swift/log'; directory=$true },
+              @{ id='swift_diagnostics'; path=(Join-Path $DatabaseRoot 'swift/diagnostic/extractors/swift'); template='$DATABASE_ROOT/swift/diagnostic/extractors/swift'; directory=$true })
+            $groups=[Collections.Generic.List[object]]::new()
+            foreach ($definition in $definitions) {
+              $rootProbe=Get-EvidenceProbe $definition.path $definition.id
+              $files=[Collections.Generic.List[object]]::new(); $truncated=$false; $enumeration='not_attempted'
+              $expectedKind=if ($definition.directory) { 'directory' } else { 'file' }
+              if ($rootProbe.presence -eq 'present' -and $rootProbe.kind -ne $expectedKind) { $enumeration='wrong_kind' }
+              elseif ($rootProbe.presence -eq 'present') {
+                if (-not $definition.directory) { $files.Add($rootProbe); $enumeration='single_file' }
+                elseif ($definition.id -in @('compiler_build','nontrace_control','traced_version')) {
+                  foreach ($name in @('source.txt','versions.txt','compiler-path.txt','compiler-sha256.txt','sdk-version.txt','sdk-path.txt','scope.txt','inputs-sha256.txt','compile-argv.nul','compile-command.txt','compile-timing.txt','compile-status.txt','compile.stdout.txt','compile.stderr.txt','inspection.o','phase-identity.txt','command-pid.txt','process-before.raw','process-before-status.txt','rosetta-status.txt','tracer-before.json')) {
+                    $files.Add((Get-EvidenceProbe (Join-Path $definition.path $name) ($definition.id+'/'+$name)))
+                  }
+                  $enumeration='fixed_file_allowlist'
+                } elseif ($rootProbe.kind -eq 'directory') {
+                  try {
+                    $found=@(Get-ChildItem -LiteralPath $definition.path -File -Force -Recurse -Depth 2 -ErrorAction Stop | Select-Object -First 33)
+                    $truncated=$found.Count -gt 32
+                    foreach ($file in ($found | Select-Object -First 32)) {
+                      $probe=Get-EvidenceProbe $file.FullName ($definition.id+'/'+$files.Count)
+                      $pathBytes=[Text.Encoding]::UTF8.GetBytes([IO.Path]::GetRelativePath($definition.path,$file.FullName))
+                      $sha=[Security.Cryptography.SHA256]::Create()
+                      try { $pathHash=[Convert]::ToHexString($sha.ComputeHash($pathBytes)).ToLowerInvariant() } finally { $sha.Dispose() }
+                      $probe | Add-Member -NotePropertyName relative_path_sha256 -NotePropertyValue $pathHash
+                      $files.Add($probe)
+                    }
+                    $enumeration='depth_2_bounded_files'
+                  } catch { $enumeration='enumeration_unavailable' }
+                }
+              }
+              $missingReason=$null
+              if ($rootProbe.presence -eq 'missing') {
+                $missingReason=if ($InitOutcome -eq 'success') { 'not_observed_after_init' } else { 'not_observed_init_not_successful' }
+              }
+              $groups.Add([pscustomobject]@{ id=$definition.id; source_path_template=$definition.template;
+                source=$rootProbe; expected_kind=$expectedKind; missing_reason=$missingReason; enumeration=$enumeration;
+                files=$files.ToArray(); file_limit=32; traversal_depth_limit=2; enumeration_truncated=$truncated;
+                artifact_location=('evidence-manifest.json#/groups/'+$groups.Count) })
+            }
+            $kind=if ($status -eq 0 -and $CompileOutcome -eq 'success') { 'command_completion_observation' } else { 'partial_observation' }
+            $report=[ordered]@{ schemaVersion=2; domain='codeql-swift-evidence-metadata-v2';
+              recorded_at_utc=[DateTime]::UtcNow.ToString('o'); observer_version=$PSVersionTable.PSVersion.ToString();
+              evidence_class=$kind; compiler_command_status=$status; compiler_status_probe=$statusProbe;
+              stages=@{ init=$InitOutcome; compile=$CompileOutcome; analyze=$AnalyzeOutcome; nontrace=$ControlOutcome; traced_version=$VersionOutcome };
+              comparison=@{ nontrace_command_status=$control.command_status; traced_version_status=$version.command_status;
+                expected_exact_source_sha256='666e48d1a4e10f6d323b7cb0b9ed5b6a95a82e55b19706a8471ee41fb67339b0';
+                cache_policy='separate_fresh_explicit_module_cache'; system_cache_state='not_controlled';
+                controls_are_not_trace_or_extraction_success=$true;
+                root_snapshot_policy=@{ configured_wait_seconds=1; sampler_alarm_seconds=2; actual_wait_measured=$false;
+                  purpose='one_existing_snapshot_after_startup_not_exec_or_generation_proof' };
+                x86_64_true_status=(Get-EvidenceCommandStatus $BuildRoot 'rosetta-status.txt').command_status;
+                rosetta_installation_attempted=$false;
+                wrapper_progress_protocol='swift-wrapper-v2';
+                wrapper_observations=@{ nontrace=(Get-SwiftWrapperObservation (Join-Path $BuildRoot 'nontrace') 'nontrace');
+                  traced_version=(Get-SwiftWrapperObservation (Join-Path $BuildRoot 'traced-version') 'traced-version');
+                  trace=(Get-SwiftWrapperObservation $BuildRoot 'trace') };
+                tracer_observation_delta=(Get-EvidenceTracerDelta $BuildRoot $DatabaseRoot);
+                root_observations=@{ nontrace=(Get-EvidenceRootObservation (Join-Path $BuildRoot 'nontrace'));
+                  traced_version=(Get-EvidenceRootObservation (Join-Path $BuildRoot 'traced-version')); trace=(Get-EvidenceRootObservation $BuildRoot) } };
+              observation_boundary='before_action_post_hooks'; source_quiescence_proved=$false;
+              descendant_collection='not_verified'; raw_diagnostic_bodies_exported=$false;
+              redacted_diagnostic_prefixes_exported=$true; prefix_samples_are_not_final_files=$true;
+              redaction_policy='technical-enum-projection-v1'; redacted_lines_are_not_execution_proof=$true;
+              all_requested_group_paths_present=(@($groups.ToArray() | Where-Object { $_.source.presence -ne 'present' }).Count -eq 0);
+              all_requested_group_kinds_match=(@($groups.ToArray() | Where-Object { $_.source.kind -ne $_.expected_kind }).Count -eq 0);
+              export_completed=$true; artifact_members=@('evidence-manifest.json'); groups=$groups.ToArray() }
+            $directory=[IO.Path]::GetDirectoryName($outFull); [void][IO.Directory]::CreateDirectory($directory)
+            $temporary=Join-Path $directory ('.evidence-'+[guid]::NewGuid().ToString('N')+'.tmp')
+            try {
+              $bytes=[Text.UTF8Encoding]::new($false).GetBytes(($report | ConvertTo-Json -Depth 16))
+              $writer=[IO.FileStream]::new($temporary,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+              try { $writer.Write($bytes,0,$bytes.Length); $writer.Flush() } finally { $writer.Dispose() }
+              [IO.File]::Move($temporary,$outFull,$false)
+            } finally { if ([IO.File]::Exists($temporary)) { [IO.File]::Delete($temporary) } }
+            return [pscustomobject]$report
+          }
+          # Evidence functions end.
+          try {
+            $out=Join-Path $env:RUNNER_TEMP ('codeql-swift-export-'+$env:GITHUB_RUN_ID+'-'+$env:GITHUB_RUN_ATTEMPT+'/evidence-manifest.json')
+            $report=Export-CodeQLSwiftEvidence -BuildRoot (Join-Path $env:RUNNER_TEMP 'codeql-swift-build') -DatabaseRoot (Join-Path $env:RUNNER_TEMP 'codeql_databases') -OutFile $out -InitOutcome $env:EVIDENCE_INIT_OUTCOME -CompileOutcome $env:EVIDENCE_COMPILE_OUTCOME -AnalyzeOutcome $env:EVIDENCE_ANALYZE_OUTCOME -ControlOutcome $env:EVIDENCE_CONTROL_OUTCOME -VersionOutcome $env:EVIDENCE_VERSION_OUTCOME
+            Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value 'ready=true' -Encoding utf8
+            Write-Output ('evidence_export=metadata-ready kind='+$report.evidence_class+' raw_bodies=false redacted_prefixes=true')
+          } catch { Write-Output 'evidence_export=failed'; exit 1 }
+      - name: Preserve diagnostic metadata
+        if: ${{ always() && steps.evidence.outputs.ready == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: codeql-swift-build-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/codeql-swift-export-${{ github.run_id }}-${{ github.run_attempt }}/evidence-manifest.json
+          if-no-files-found: error
+          retention-days: 3
+      - name: Observe tracer-environment exec behavior after the existing phases
+        id: tracer_exec_probe
+        if: ${{ always() && steps.codeql_init.outcome == 'success' }}
+        continue-on-error: true
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set -u
+          SWIFTC=$(cat "$RUNNER_TEMP/codeql-swift-build/compiler-path.txt")
+          PATH_PERL=$(command -v perl || printf missing)
+          clean_env=(env -i "PATH=$PATH" "HOME=$HOME" "TMPDIR=${TMPDIR:-/tmp}")
+          if test -n "${DEVELOPER_DIR:-}"; then clean_env+=("DEVELOPER_DIR=$DEVELOPER_DIR"); fi
+          probe() {
+            local name="$1" limit="$2" interpreter="$3" begin end status=0
+            shift 3
+            begin=$(date +%s)
+            ( "$interpreter" -e 'alarm shift; exec @ARGV; exit 127;' "$limit" "$@" > /dev/null 2>&1 ) 2>/dev/null || status=$?
+            end=$(date +%s)
+            printf 'tracer_exec_probe name=%s status=%s elapsed_seconds=%s\n' "$name" "$status" "$((end - begin))"
+          }
+          probe_clean() {
+            local name="$1" limit="$2" interpreter="$3" begin end status=0
+            shift 3
+            begin=$(date +%s)
+            ( "${clean_env[@]}" "$interpreter" -e 'alarm shift; exec @ARGV; exit 127;' "$limit" "$@" > /dev/null 2>&1 ) 2>/dev/null || status=$?
+            end=$(date +%s)
+            printf 'tracer_exec_probe name=%s status=%s elapsed_seconds=%s\n' "$name" "$status" "$((end - begin))"
+          }
+          processes() {
+            /bin/ps -axo pid=,ppid=,etime=,state=,comm= | /usr/bin/grep -E -i 'perl|swift|xcrun|runner|codeql|extractor|clang|libtrace' | /usr/bin/head -n 40 | /usr/bin/sed "s/^/$1 /" || true
+          }
+          printf 'tracer_exec_probe_context path_perl=%s dyld_in_shell=%s preload_in_shell=%s\n' "$PATH_PERL" "${DYLD_INSERT_LIBRARIES:+set}" "${SEMMLE_PRELOAD_libtrace:+set}"
+          processes tracer_exec_probe_process
+          probe system_perl_true 10 /usr/bin/perl /usr/bin/true
+          probe system_perl_perl 10 /usr/bin/perl /usr/bin/perl -e 'exit 0'
+          probe system_perl_swiftc_version 10 /usr/bin/perl "$SWIFTC" --version
+          if test "$PATH_PERL" != missing; then probe path_perl_swiftc_version 10 "$PATH_PERL" "$SWIFTC" --version; fi
+          probe_clean untraced_system_perl_swiftc_version 10 /usr/bin/perl "$SWIFTC" --version
+          ( /usr/bin/perl -e 'alarm shift; exec @ARGV; exit 127;' 10 "$SWIFTC" --version > /dev/null 2>&1 ) > /dev/null 2>&1 &
+          hang_pid=$!
+          sleep 5
+          processes tracer_exec_probe_hang_process
+          wait "$hang_pid" > /dev/null 2>&1; hang_status=$?
+          printf 'tracer_exec_probe name=traced_background_swiftc_version status=%s hang_snapshot_after_seconds=5\n' "$hang_status"
